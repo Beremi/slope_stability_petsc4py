@@ -28,6 +28,7 @@ from slope_stability.mesh import (
     reorder_mesh_nodes,
     seepage_boundary_3d_hetero_comsol,
 )
+from slope_stability.problem_assets import load_material_rows_for_path
 from slope_stability.seepage import heter_conduct, seepage_problem_3d
 from slope_stability.utils import local_csr_to_petsc_aij_matrix, owned_block_range
 
@@ -88,7 +89,7 @@ def run_capture(
         progress_callback = _make_progress_logger(data_dir)
 
     if mesh_path is None:
-        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_seepage_ssr_comsol" / "comsol_mesh.h5"
+        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_seepage_ssr_comsol" / "comsol_mesh.msh"
     mesh_path = Path(mesh_path)
     elem_type = validate_supported_elem_type(3, elem_type)
     if elem_type != "P2":
@@ -96,15 +97,15 @@ def run_capture(
             f"COMSOL seepage+SSR currently uses the exported P2 tetrahedral mesh family; requested {elem_type!r}."
         )
 
-    material_rows = np.asarray(
-        [
+    material_rows = load_material_rows_for_path(mesh_path)
+    if material_rows is None:
+        material_rows = [
             [15.0, 30.0, 0.0, 10000.0, 0.33, 19.0, 19.0],
             [15.0, 38.0, 0.0, 50000.0, 0.30, 22.0, 22.0],
             [10.0, 35.0, 0.0, 50000.0, 0.30, 21.0, 21.0],
             [18.0, 32.0, 0.0, 20000.0, 0.33, 20.0, 20.0],
-        ],
-        dtype=np.float64,
-    )
+        ]
+    material_rows = np.asarray(material_rows, dtype=np.float64)
     materials = [
         MaterialSpec(
             c0=float(row[0]),

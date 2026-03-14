@@ -21,12 +21,12 @@ class LoadedMesh:
     elem_type: str | None = None
 
 
-def load_mesh_from_file(path: str | Path, *, boundary_type: int = 0) -> LoadedMesh:
+def load_mesh_from_file(path: str | Path, *, boundary_type: int = 0, elem_type: str | None = None) -> LoadedMesh:
     path = Path(path)
     if path.suffix.lower() == ".h5":
         data = load_mesh_p2(path, boundary_type=boundary_type)
     else:
-        data = load_mesh_file(path)
+        data = load_mesh_file(path, elem_type=elem_type, boundary_type=boundary_type)
     return LoadedMesh(
         coord=np.asarray(data.coord, dtype=np.float64),
         elem=np.asarray(data.elem, dtype=np.int64),

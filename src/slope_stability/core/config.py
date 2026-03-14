@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import tomllib
 
+from ..problem_assets import load_material_rows_for_path
+
 
 @dataclass(frozen=True)
 class MaterialConfig:
@@ -38,7 +40,7 @@ class Problem3DConfig:
     elem_type: str = "P2"
     davis_type: str = "B"
     seepage: bool = False
-    mesh_path: Path = Path("meshes/3d_hetero_ssr/SSR_hetero_ada_L1.h5")
+    mesh_path: Path = Path("meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh")
     materials: tuple[MaterialConfig, ...] = ()
 
 
@@ -98,6 +100,12 @@ class Run3DSSRConfig:
     newton: NewtonConfig = NewtonConfig()
     linear_solver: LinearSolverConfig = LinearSolverConfig()
 
+    def material_rows(self) -> list[list[float]]:
+        if self.problem.materials:
+            return [m.as_row() for m in self.problem.materials]
+        rows = load_material_rows_for_path(self.problem.mesh_path)
+        return [] if rows is None else rows
+
     def validate(self) -> "Run3DSSRConfig":
         if self.problem.seepage:
             raise NotImplementedError(
@@ -107,7 +115,7 @@ class Run3DSSRConfig:
             raise NotImplementedError("Only 3D P2 runs are wired into the current config runner.")
         if self.continuation.method.lower() != "indirect":
             raise NotImplementedError("The config runner currently targets indirect 3D SSR continuation only.")
-        if not self.problem.materials:
+        if not self.material_rows():
             raise ValueError("At least one material must be provided in [[materials]].")
         return self
 
@@ -141,7 +149,7 @@ class Run3DSSRConfig:
             "constitutive_mode": self.execution.constitutive_mode,
             "elem_type": self.problem.elem_type,
             "davis_type": self.problem.davis_type,
-            "material_rows": [m.as_row() for m in self.problem.materials],
+            "material_rows": self.material_rows(),
         }
 
 
@@ -190,7 +198,7 @@ def load_run_3d_ssr_config(path: str | Path) -> Run3DSSRConfig:
         elem_type=str(problem_data.get("elem_type", "P2")),
         davis_type=str(problem_data.get("davis_type", "B")),
         seepage=bool(problem_data.get("seepage", False)),
-        mesh_path=_resolve_path(config_path, str(problem_data.get("mesh_path", "meshes/3d_hetero_ssr/SSR_hetero_ada_L1.h5"))),
+        mesh_path=_resolve_path(config_path, str(problem_data.get("mesh_path", "meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"))),
         materials=_load_materials(data),
     )
 

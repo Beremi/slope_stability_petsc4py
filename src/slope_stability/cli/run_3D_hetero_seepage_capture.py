@@ -213,7 +213,7 @@ def main() -> None:
     parser.add_argument(
         "--mesh_path",
         type=Path,
-        default=ROOT / "meshes" / "3d_hetero_seepage" / "slope_with_waterlevels_concave_L2.h5",
+        default=ROOT / "meshes" / "3d_hetero_seepage" / "slope_with_waterlevels_concave_L2.msh",
     )
     parser.add_argument("--elem_type", type=str, default="P2", choices=["P1", "P2", "P4"])
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE")

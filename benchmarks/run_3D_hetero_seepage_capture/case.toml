@@ -13,7 +13,7 @@ dimension = 3
 variant = "hetero"
 elem_type = "P2"
 seepage = true
-mesh_path = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.h5"
+mesh_path = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
 
 [linear_solver]
 solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"

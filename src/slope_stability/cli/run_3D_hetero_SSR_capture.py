@@ -30,6 +30,7 @@ from slope_stability.linear import SolverFactory
 from slope_stability.constitutive import ConstitutiveOperator
 from slope_stability.continuation import LL_indirect_continuation, SSR_indirect_continuation
 from slope_stability.nonlinear.newton import _destroy_petsc_mat, _prefers_full_system_operator, _setup_linear_system, _solve_linear_system
+from slope_stability.problem_assets import load_material_rows_for_path
 from slope_stability.utils import extract_submatrix_free, local_csr_to_petsc_aij_matrix, owned_block_range, q_to_free_indices
 
 
@@ -263,6 +264,12 @@ def run_capture(
     if elem_type == "P4":
         raise NotImplementedError("3D P4 is wired in the config interface, but the mechanics benchmark path is not implemented yet.")
 
+    if mesh_path is None:
+        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
+    mesh_path = Path(mesh_path)
+
+    if material_rows is None:
+        material_rows = load_material_rows_for_path(mesh_path)
     if material_rows is None:
         material_rows = [
             [15.0, 30.0, 0.0, 10000.0, 0.33, 19.0, 19.0],
@@ -284,10 +291,7 @@ def run_capture(
         for row in mat_props
     ]
 
-    if mesh_path is None:
-        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.h5"
-    mesh_path = Path(mesh_path)
-    mesh = load_mesh_from_file(mesh_path, boundary_type=int(mesh_boundary_type))
+    mesh = load_mesh_from_file(mesh_path, boundary_type=int(mesh_boundary_type), elem_type=elem_type)
     if mesh.elem_type is not None and normalize_elem_type(mesh.elem_type) != elem_type:
         raise ValueError(
             f"Requested elem_type {elem_type!r}, but mesh {mesh_path.name} contains {mesh.elem_type!r} elements."

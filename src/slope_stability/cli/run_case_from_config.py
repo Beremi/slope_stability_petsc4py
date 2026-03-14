@@ -259,7 +259,11 @@ def _rebuild_case_mesh(cfg: RunCaseConfig) -> tuple[np.ndarray, list[tuple[str, 
         return points, cell_blocks, {"material_id": np.asarray(mesh.material, dtype=np.int64)}
 
     if case in {"3d_homo_ssr", "3d_hetero_ssr", "3d_siopt_ssr"}:
-        mesh = load_mesh_from_file(cfg.problem.mesh_path, boundary_type=cfg.problem.mesh_boundary_type)
+        mesh = load_mesh_from_file(
+            cfg.problem.mesh_path,
+            boundary_type=cfg.problem.mesh_boundary_type,
+            elem_type=cfg.problem.elem_type,
+        )
         reordered = reorder_mesh_nodes(
             mesh.coord,
             mesh.elem,

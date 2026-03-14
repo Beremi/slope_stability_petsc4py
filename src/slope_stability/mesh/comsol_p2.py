@@ -8,6 +8,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from ..io import _collect_meshio_blocks, _elevate_tet4_mesh_to_tet10, _map_physical_ids
+
 
 @dataclass(frozen=True)
 class ComsolP2Mesh3D:
@@ -17,6 +19,26 @@ class ComsolP2Mesh3D:
     q_mask: np.ndarray
     material: np.ndarray
     triangle_labels: np.ndarray
+
+
+def _comsol_q_mask(n_nodes: int, surf: np.ndarray, boundary: np.ndarray, *, boundary_type: int) -> np.ndarray:
+    q = np.ones((3, int(n_nodes)), dtype=bool)
+    labels = np.asarray(boundary, dtype=np.int64).ravel()
+
+    tmp = surf[:, labels == 1]
+    q[0, tmp.ravel()] = False
+    tmp = surf[:, labels == 2]
+    q[0, tmp.ravel()] = False
+    tmp = surf[:, labels == 3]
+    q[2, tmp.ravel()] = False
+    tmp = surf[:, labels == 4]
+    q[2, tmp.ravel()] = False
+    tmp = surf[:, labels == 5]
+    if int(boundary_type):
+        q[:, tmp.ravel()] = False
+    else:
+        q[1, tmp.ravel()] = False
+    return q
 
 
 def _as_nodes_by_count(arr: np.ndarray, width: int) -> np.ndarray:
@@ -34,6 +56,34 @@ def load_mesh_p2_comsol(path: str | Path, boundary_type: int = 1) -> ComsolP2Mes
     """Replicate MATLAB ``MESH.load_mesh_P2(file_path, boundary_type)`` for COMSOL meshes."""
 
     path = Path(path)
+    if path.suffix.lower() == ".msh":
+        try:
+            import meshio
+        except ImportError as exc:  # pragma: no cover - runtime dependency in normal use
+            raise ImportError("Reading .msh files requires the 'meshio' package.") from exc
+
+        msh = meshio.read(path)
+        tetra_cells, tetra_tags = _collect_meshio_blocks(msh, "tetra")
+        face_cells, boundary = _collect_meshio_blocks(msh, "triangle")
+        if tetra_cells.size == 0:
+            raise ValueError(f"No tetrahedral cells found in {path}.")
+
+        coord_p1 = np.asarray(msh.points[:, :3], dtype=np.float64).T
+        elem_p1 = np.asarray(tetra_cells.T, dtype=np.int64)
+        surf_p1 = np.asarray(face_cells.T, dtype=np.int64) if face_cells.size else np.empty((3, 0), dtype=np.int64)
+        coord, elem, surf = _elevate_tet4_mesh_to_tet10(coord_p1, elem_p1, surf_p1)
+        boundary = _map_physical_ids(boundary, msh.field_data, 2, "boundary")
+        material = _map_physical_ids(tetra_tags, msh.field_data, 3, "material")
+        q = _comsol_q_mask(coord.shape[1], surf, boundary, boundary_type=boundary_type)
+        return ComsolP2Mesh3D(
+            coord=coord,
+            elem=elem,
+            surf=surf,
+            q_mask=q,
+            material=np.asarray(material, dtype=np.int64),
+            triangle_labels=np.asarray(boundary, dtype=np.int64),
+        )
+
     with h5py.File(str(path), "r") as h5:
         boundary = np.asarray(h5["boundary"][:], dtype=np.int64).ravel()
         elem = _as_nodes_by_count(np.asarray(h5["elem"][:], dtype=np.int64), 10)
@@ -41,24 +91,8 @@ def load_mesh_p2_comsol(path: str | Path, boundary_type: int = 1) -> ComsolP2Mes
         material = np.asarray(h5["material"][:], dtype=np.int64).ravel()
         node = _as_nodes_by_count(np.asarray(h5["node"][:], dtype=np.float64), 3)
 
-    q = np.ones_like(node, dtype=bool)
-
-    tmp = face[:, boundary == 1]
-    q[0, tmp.ravel()] = False
-    tmp = face[:, boundary == 2]
-    q[0, tmp.ravel()] = False
-    tmp = face[:, boundary == 3]
-    q[1, tmp.ravel()] = False
-    tmp = face[:, boundary == 4]
-    q[1, tmp.ravel()] = False
-    tmp = face[:, boundary == 5]
-    if int(boundary_type):
-        q[:, tmp.ravel()] = False
-    else:
-        q[2, tmp.ravel()] = False
-
     coord = np.asarray(node[[0, 2, 1], :], dtype=np.float64)
-    q = q[[0, 2, 1], :]
+    q = _comsol_q_mask(coord.shape[1], face, boundary, boundary_type=boundary_type)
     return ComsolP2Mesh3D(
         coord=coord,
         elem=np.asarray(elem, dtype=np.int64),

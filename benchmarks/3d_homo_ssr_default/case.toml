@@ -7,7 +7,7 @@ variant = "homo"
 elem_type = "P2"
 davis_type = "B"
 seepage = false
-mesh_path = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.h5"
+mesh_path = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
 
 [execution]
 node_ordering = "block_metis"
@@ -41,13 +41,3 @@ compiled_outer = false
 recycle_preconditioner = true
 pc_hypre_coarsen_type = "HMIS"
 pc_hypre_interp_type = "ext+i"
-
-[[materials]]
-name = "homogeneous_slope"
-c0 = 6.0
-phi = 45.0
-psi = 0.0
-young = 40000.0
-poisson = 0.30
-gamma_sat = 20.0
-gamma_unsat = 20.0

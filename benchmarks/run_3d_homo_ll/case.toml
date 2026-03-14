@@ -7,7 +7,7 @@ variant = "homo"
 elem_type = "P2"
 davis_type = "B"
 seepage = false
-mesh_path = "../../meshes/3d_homo_ll/LL_homo_ada_L1.h5"
+mesh_path = "../../meshes/3d_homo_ll/LL_homo_ada_L1.msh"
 mesh_boundary_type = 0
 
 [execution]
@@ -41,13 +41,3 @@ recycle_preconditioner = true
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
-
-[[materials]]
-name = "homogeneous_slope"
-c0 = 6.0
-phi = 45.0
-psi = 0.0
-young = 40000.0
-poisson = 0.30
-gamma_sat = 20.0
-gamma_unsat = 20.0

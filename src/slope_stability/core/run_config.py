@@ -8,6 +8,7 @@ from typing import Any
 import tomllib
 
 from .elements import validate_supported_elem_type
+from ..problem_assets import load_material_rows_for_path
 
 
 TomlValue = str | int | float | bool | list[Any] | dict[str, Any]
@@ -138,12 +139,17 @@ class RunCaseConfig:
         if self.problem.analysis.lower() not in {"ssr", "ll", "seepage"}:
             raise ValueError(f"Unsupported analysis {self.problem.analysis!r}.")
         validate_supported_elem_type(self.problem.dimension, self.problem.elem_type)
-        if self.problem.analysis.lower() != "seepage" and not self.materials:
+        if self.problem.analysis.lower() != "seepage" and not self.material_rows():
             raise ValueError("At least one [[materials]] entry is required for non-seepage cases.")
         return self
 
     def material_rows(self) -> list[list[float]]:
-        return [m.as_row() for m in self.materials]
+        if self.materials:
+            return [m.as_row() for m in self.materials]
+        if self.problem.mesh_path is None:
+            return []
+        rows = load_material_rows_for_path(self.problem.mesh_path)
+        return [] if rows is None else rows
 
 
 def _resolve_path(config_path: Path, value: str) -> Path:

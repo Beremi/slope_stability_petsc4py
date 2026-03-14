@@ -1,14 +1,16 @@
-"""Mesh IO helpers for MATLAB-compatible HDF5 inputs."""
+"""Mesh IO helpers for project mesh formats."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import h5py
 import numpy as np
 
 from .core.elements import infer_simplex_elem_type, SIMPLEX_NODES_PER_SURFACE
+from .problem_assets import load_problem_asset_definition_for_path
 
 
 @dataclass
@@ -20,6 +22,63 @@ class MeshData:
     material: np.ndarray
     boundary: np.ndarray
     elem_type: str | None = None
+
+
+_AXES_BY_DIM: dict[int, tuple[str, ...]] = {
+    2: ("x", "y"),
+    3: ("x", "y", "z"),
+}
+
+
+def _default_dirichlet_labels(dim: int) -> dict[str, tuple[int, ...]]:
+    axes = _AXES_BY_DIM[int(dim)]
+    if int(dim) == 2:
+        return {"x": (1, 2), "y": (3,)}
+    if int(dim) == 3:
+        return {"x": (1, 2), "y": (5,), "z": (3, 4)}
+    raise ValueError(f"Unsupported dimension {dim}.")
+
+
+def _dirichlet_labels_for_path(path: Path, dim: int) -> dict[str, tuple[int, ...]]:
+    asset = load_problem_asset_definition_for_path(path)
+    if asset is None:
+        return _default_dirichlet_labels(dim)
+
+    raw = asset.payload.get("dirichlet_labels")
+    if not isinstance(raw, dict):
+        return _default_dirichlet_labels(dim)
+
+    labels = _default_dirichlet_labels(dim)
+    for axis in _AXES_BY_DIM[int(dim)]:
+        value = raw.get(axis)
+        if value is None:
+            continue
+        labels[axis] = tuple(int(v) for v in value)
+    return labels
+
+
+def _build_dirichlet_mask(
+    dim: int,
+    n_nodes: int,
+    surf: np.ndarray,
+    boundary: np.ndarray,
+    *,
+    path: Path,
+) -> np.ndarray:
+    face = np.asarray(surf, dtype=np.int64)
+    labels = np.asarray(boundary, dtype=np.int64).ravel()
+    q = np.ones((int(dim), int(n_nodes)), dtype=bool)
+    axis_to_labels = _dirichlet_labels_for_path(path, dim)
+    axis_names = _AXES_BY_DIM[int(dim)]
+
+    for axis_idx, axis_name in enumerate(axis_names):
+        constrained = tuple(int(v) for v in axis_to_labels.get(axis_name, ()))
+        if not constrained or face.size == 0:
+            continue
+        mask = np.isin(labels, np.asarray(constrained, dtype=np.int64))
+        if np.any(mask):
+            q[axis_idx, face[:, mask].ravel()] = False
+    return q
 
 
 def _to_zero_based(indices: np.ndarray) -> np.ndarray:
@@ -67,24 +126,9 @@ def _load_lagrange_tet_mesh(path: Path) -> MeshData:
             f"expected {expected_face_nodes} nodes per face."
         )
 
-    q = np.ones_like(node, dtype=bool)
-
-    face_1 = face[:, boundary == 1].ravel()
-    face_2 = face[:, boundary == 2].ravel()
-    face_3 = face[:, boundary == 3].ravel()
-    face_4 = face[:, boundary == 4].ravel()
-    face_5 = face[:, boundary == 5].ravel()
-
-    # Boundary mask behavior follows legacy MATLAB orientation convention.
-    q[0, face_1] = 0
-    q[0, face_2] = 0
-    q[1, face_3] = 0
-    q[1, face_4] = 0
-    q[2, face_5] = 0
-
     # MATLAB exports stored as (x, z, y) in this helper.
     coord = np.asarray(node[[0, 2, 1], :], dtype=np.float64)
-    q = q[[0, 2, 1], :]
+    q = _build_dirichlet_mask(3, coord.shape[1], face, boundary, path=path)
 
     return MeshData(
         coord=coord,
@@ -106,7 +150,170 @@ def load_mesh_p2(file_path: str | Path, boundary_type: int = 0) -> MeshData:
     return _load_lagrange_tet_mesh(path)
 
 
-def load_mesh_file(mesh_file: str | Path) -> MeshData:
+def _physical_group_name_map(field_data: dict[str, np.ndarray], dim: int, prefix: str) -> dict[int, int]:
+    pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)$")
+    mapping: dict[int, int] = {}
+    for name, meta in field_data.items():
+        arr = np.asarray(meta, dtype=np.int64).ravel()
+        if arr.size < 2 or int(arr[1]) != int(dim):
+            continue
+        match = pattern.match(str(name).strip().lower())
+        if match is None:
+            continue
+        mapping[int(arr[0])] = int(match.group(1))
+    return mapping
+
+
+def _map_physical_ids(physical_ids: np.ndarray, field_data: dict[str, np.ndarray], dim: int, prefix: str) -> np.ndarray:
+    ids = np.asarray(physical_ids, dtype=np.int64).ravel()
+    mapping = _physical_group_name_map(field_data, dim, prefix)
+    if not mapping:
+        return ids
+    missing = sorted(int(v) for v in np.unique(ids) if int(v) not in mapping)
+    if missing:
+        raise ValueError(
+            f"Physical group mapping for prefix {prefix!r} is incomplete; missing logical ids for physical tags {missing}."
+        )
+    return np.asarray([mapping[int(v)] for v in ids], dtype=np.int64)
+
+
+def _collect_meshio_blocks(mesh, cell_type: str) -> tuple[np.ndarray, np.ndarray]:
+    physical_blocks = mesh.cell_data.get("gmsh:physical")
+    if physical_blocks is None:
+        raise ValueError("Gmsh mesh must carry 'gmsh:physical' cell data.")
+
+    cells_out: list[np.ndarray] = []
+    tags_out: list[np.ndarray] = []
+    for block, physical in zip(mesh.cells, physical_blocks, strict=False):
+        if str(block.type) != str(cell_type):
+            continue
+        cell_arr = np.asarray(block.data, dtype=np.int64)
+        physical_arr = np.asarray(physical, dtype=np.int64).ravel()
+        if cell_arr.shape[0] != physical_arr.size:
+            raise ValueError(
+                f"Cell-data size mismatch for {cell_type}: cells {cell_arr.shape[0]}, physical tags {physical_arr.size}."
+            )
+        cells_out.append(cell_arr)
+        tags_out.append(physical_arr)
+
+    if not cells_out:
+        return np.empty((0, 0), dtype=np.int64), np.empty(0, dtype=np.int64)
+    return np.vstack(cells_out), np.concatenate(tags_out)
+
+
+def _midpoint_node_index(
+    coord: np.ndarray,
+    edge_map: dict[tuple[int, int], int],
+    extra_points: list[np.ndarray],
+    a: int,
+    b: int,
+) -> int:
+    i = int(a)
+    j = int(b)
+    key = (i, j) if i < j else (j, i)
+    idx = edge_map.get(key)
+    if idx is not None:
+        return idx
+    idx = int(coord.shape[1] + len(extra_points))
+    edge_map[key] = idx
+    extra_points.append(0.5 * (coord[:, key[0]] + coord[:, key[1]]))
+    return idx
+
+
+def _elevate_tet4_mesh_to_tet10(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    surf: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    tet4 = np.asarray(elem, dtype=np.int64)
+    tri3 = np.asarray(surf, dtype=np.int64)
+    if tet4.shape[0] != 4:
+        raise ValueError(f"tet4 elevation expects 4-node tetrahedra, got shape {tet4.shape}.")
+    if tri3.size and tri3.shape[0] != 3:
+        raise ValueError(f"tet4 elevation expects 3-node surface triangles, got shape {tri3.shape}.")
+
+    edge_map: dict[tuple[int, int], int] = {}
+    extra_points: list[np.ndarray] = []
+
+    tet10 = np.empty((10, tet4.shape[1]), dtype=np.int64)
+    tet10[:4, :] = tet4
+    for idx in range(tet4.shape[1]):
+        v0, v1, v2, v3 = (int(v) for v in tet4[:, idx])
+        tet10[4, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v0, v1)
+        tet10[5, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v1, v2)
+        tet10[6, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v0, v2)
+        tet10[7, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v1, v3)
+        tet10[8, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v2, v3)
+        tet10[9, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v0, v3)
+
+    tri6 = np.empty((6, tri3.shape[1]), dtype=np.int64)
+    if tri3.shape[1]:
+        tri6[:3, :] = tri3
+        for idx in range(tri3.shape[1]):
+            v0, v1, v2 = (int(v) for v in tri3[:, idx])
+            tri6[3, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v0, v1)
+            tri6[4, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v1, v2)
+            tri6[5, idx] = _midpoint_node_index(coord_arr, edge_map, extra_points, v0, v2)
+
+    if extra_points:
+        coord_new = np.hstack((coord_arr, np.column_stack(extra_points)))
+    else:
+        coord_new = coord_arr.copy()
+    return coord_new, tet10, tri6
+
+
+def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None) -> MeshData:
+    try:
+        import meshio
+    except ImportError as exc:  # pragma: no cover - runtime dependency in normal use
+        raise ImportError("Reading .msh files requires the 'meshio' package.") from exc
+
+    msh = meshio.read(path)
+    points = np.asarray(msh.points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] < 3:
+        raise ValueError(f"Expected 3D point coordinates in {path}, got shape {points.shape}.")
+
+    tetra_cells, tetra_tags = _collect_meshio_blocks(msh, "tetra")
+    tri_cells, tri_tags = _collect_meshio_blocks(msh, "triangle")
+    if tetra_cells.size == 0:
+        raise ValueError(f"No tetrahedral cells found in {path}.")
+
+    coord = points[:, :3].T.copy()
+    material = _map_physical_ids(tetra_tags, msh.field_data, 3, "material")
+    boundary = _map_physical_ids(tri_tags, msh.field_data, 2, "boundary")
+    elem = np.asarray(tetra_cells.T, dtype=np.int64)
+    surf = np.asarray(tri_cells.T, dtype=np.int64) if tri_cells.size else np.empty((3, 0), dtype=np.int64)
+
+    target = None if elem_type is None else str(elem_type).strip().upper()
+    if target in {None, "", "P1"}:
+        q_mask = _build_dirichlet_mask(3, coord.shape[1], surf, boundary, path=path)
+        return MeshData(
+            coord=coord,
+            elem=elem,
+            surf=surf,
+            q_mask=q_mask,
+            material=material,
+            boundary=boundary,
+            elem_type="P1",
+        )
+    if target != "P2":
+        raise NotImplementedError(f"Gmsh simplex loader currently supports P1 source meshes elevated to P2; requested {target!r}.")
+
+    coord_p2, elem_p2, surf_p2 = _elevate_tet4_mesh_to_tet10(coord, elem, surf)
+    q_mask = _build_dirichlet_mask(3, coord_p2.shape[1], surf_p2, boundary, path=path)
+    return MeshData(
+        coord=coord_p2,
+        elem=elem_p2,
+        surf=surf_p2,
+        q_mask=q_mask,
+        material=material,
+        boundary=boundary,
+        elem_type="P2",
+    )
+
+
+def load_mesh_file(mesh_file: str | Path, *, elem_type: str | None = None, boundary_type: int = 0) -> MeshData:
     path = Path(mesh_file)
     lower = path.name.lower()
     if path.suffix.lower() == ".h5":
@@ -114,6 +321,8 @@ def load_mesh_file(mesh_file: str | Path) -> MeshData:
             keys = set(h5.keys())
         if {"boundary", "elem", "face", "material", "node"} <= keys:
             return _load_lagrange_tet_mesh(path)
+    if path.suffix.lower() == ".msh":
+        return _load_gmsh_simplex_mesh(path, elem_type=elem_type)
     if "p2" in lower:
         return load_mesh_p2(path)
     raise ValueError(f"Unsupported mesh format for {path}")

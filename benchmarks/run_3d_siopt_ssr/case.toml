@@ -7,7 +7,7 @@ variant = "homo"
 elem_type = "P2"
 davis_type = "B"
 seepage = false
-mesh_path = "../../meshes/3d_siopt/SIOPT_L0.h5"
+mesh_path = "../../meshes/3d_siopt/SIOPT_L0.msh"
 mesh_boundary_type = 1
 
 [execution]
@@ -42,13 +42,3 @@ recycle_preconditioner = true
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
-
-[[materials]]
-name = "siopt_reference"
-c0 = 15.0
-phi = 20.0
-psi = 20.0
-young = 40000.0
-poisson = 0.30
-gamma_sat = 20.0
-gamma_unsat = 20.0
