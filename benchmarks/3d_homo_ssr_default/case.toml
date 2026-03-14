@@ -1,0 +1,53 @@
+[problem]
+name = "3d_homo_ssr_default"
+case = "3d_homo_ssr"
+analysis = "ssr"
+dimension = 3
+variant = "homo"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+mesh_path = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.h5"
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_init = 0.9
+d_lambda_init = 0.1
+d_lambda_min = 1e-5
+d_lambda_diff_scaled_min = 1e-3
+omega_max = 1.0e6
+step_max = 100
+
+[newton]
+it_max = 50
+it_damp_max = 10
+tol = 1e-4
+r_min = 1e-4
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 1e-1
+max_iterations = 100
+deflation_basis_tolerance = 1e-3
+threads = 16
+print_level = 0
+use_as_preconditioner = true
+compiled_outer = false
+recycle_preconditioner = true
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+
+[[materials]]
+name = "homogeneous_slope"
+c0 = 6.0
+phi = 45.0
+psi = 0.0
+young = 40000.0
+poisson = 0.30
+gamma_sat = 20.0
+gamma_unsat = 20.0

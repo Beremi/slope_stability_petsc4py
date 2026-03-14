@@ -1,0 +1,34 @@
+[benchmark]
+title = "3D heterogeneous seepage"
+matlab_script = "run_3D_hetero_seepage_capture"
+comparison_kind = "seepage"
+mpi_ranks = 8
+notes = "Current PETSc seepage implementation is scalar; under MPI the benchmark executes on rank 0 only."
+
+[problem]
+name = "benchmark_3d_hetero_seepage"
+case = "3d_hetero_seepage"
+analysis = "seepage"
+dimension = 3
+variant = "hetero"
+elem_type = "P2"
+seepage = true
+mesh_path = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.h5"
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"
+tolerance = 1e-10
+max_iterations = 500
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 500
+water_unit_weight = 9.81
+conductivity = [1.0, 1.0, 1.0, 1.0]
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true

@@ -1,0 +1,40 @@
+*.asv
+*.fig
+*.mat
+*.pdf
+*.png
+*.pos
+*.pyc
+*.swp
+__pycache__/
+.pytest_cache/
+
+# Local environments and build outputs
+.build/
+.local/
+.venv/
+.venv_petsc4py/
+bin/
+
+# Local-only working trees
+artifacts/
+archives/
+tests_local/
+slope_stability_matlab/
+scripts_local/
+
+# Local C/HYPRE build artifacts
+third_party/hypre/
+third_party/hypre-build-openmp/
+third_party/hypre-openmp/
+hypre_boomeramg_mex.mexa64
+
+# Generated extension artifacts
+src/slope_stability/_kernels.cpython-*.so
+src/slope_stability/cython/_kernels.c
+src/slope_stability.egg-info/
+
+# Misc local files
+convert_eol.fish
+poznamky.docx
+poznamky_MB.docx

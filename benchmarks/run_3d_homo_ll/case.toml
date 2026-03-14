@@ -1,0 +1,53 @@
+[problem]
+name = "run_3d_homo_ll"
+case = "3d_homo_ssr"
+analysis = "ll"
+dimension = 3
+variant = "homo"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+mesh_path = "../../meshes/3d_homo_ll/LL_homo_ada_L1.h5"
+mesh_boundary_type = 0
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_ell = 1.0
+d_t_min = 1e-3
+d_omega_ini_scale = 0.2
+omega_max = 4900.0
+step_max = 100
+
+[newton]
+it_max = 200
+it_damp_max = 10
+tol = 1e-4
+r_min = 1e-4
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 1e-1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true
+
+[[materials]]
+name = "homogeneous_slope"
+c0 = 6.0
+phi = 45.0
+psi = 0.0
+young = 40000.0
+poisson = 0.30
+gamma_sat = 20.0
+gamma_unsat = 20.0

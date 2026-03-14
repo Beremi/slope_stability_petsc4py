@@ -1,0 +1,34 @@
+[benchmark]
+title = "2D Sloan2013 seepage"
+matlab_script = "run_2D_sloan2013_seepage_capture"
+comparison_kind = "seepage"
+mpi_ranks = 8
+notes = "Current PETSc seepage implementation is scalar; under MPI the benchmark executes on rank 0 only."
+
+[problem]
+name = "benchmark_2d_sloan2013_seepage"
+case = "2d_sloan2013_seepage"
+analysis = "seepage"
+dimension = 2
+variant = "hetero"
+elem_type = "P1"
+davis_type = "B"
+seepage = true
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"
+tolerance = 1e-10
+max_iterations = 300
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 300
+water_unit_weight = 9.81
+conductivity = [1.0, 1.0]
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true

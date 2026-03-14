@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools", "wheel", "Cython>=3.0", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slope_stability"
+version = "0.1.0"
+description = "PETSc/Cython reimplementation of slope stability workflow."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10", "h5py>=3.9", "matplotlib>=3.8", "mpi4py>=4.0", "petsc4py>=3.20"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+cython = ["Cython>=3.0"]
+viz = ["pyvista>=0.46"]
+partition = ["pymetis>=2025.2"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["slope_stability*"]

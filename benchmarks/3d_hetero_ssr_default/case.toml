@@ -1,0 +1,83 @@
+[problem]
+name = "3d_hetero_ssr_default"
+case = "3d_hetero_ssr"
+analysis = "ssr"
+dimension = 3
+variant = "hetero"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+mesh_path = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.h5"
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_init = 1.0
+d_lambda_init = 0.1
+d_lambda_min = 1e-3
+d_lambda_diff_scaled_min = 1e-3
+omega_max = 1.2e7
+step_max = 100
+
+[newton]
+it_max = 200
+it_damp_max = 10
+tol = 1e-4
+r_min = 1e-4
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 1e-1
+max_iterations = 100
+deflation_basis_tolerance = 1e-3
+threads = 16
+print_level = 0
+use_as_preconditioner = true
+compiled_outer = false
+recycle_preconditioner = true
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+
+[[materials]]
+name = "cover_layer"
+c0 = 15.0
+phi = 30.0
+psi = 0.0
+young = 10000.0
+poisson = 0.33
+gamma_sat = 19.0
+gamma_unsat = 19.0
+
+[[materials]]
+name = "general_foundation"
+c0 = 15.0
+phi = 38.0
+psi = 0.0
+young = 50000.0
+poisson = 0.30
+gamma_sat = 22.0
+gamma_unsat = 22.0
+
+[[materials]]
+name = "weak_foundation"
+c0 = 10.0
+phi = 35.0
+psi = 0.0
+young = 50000.0
+poisson = 0.30
+gamma_sat = 21.0
+gamma_unsat = 21.0
+
+[[materials]]
+name = "slope_mass"
+c0 = 18.0
+phi = 32.0
+psi = 0.0
+young = 20000.0
+poisson = 0.33
+gamma_sat = 20.0
+gamma_unsat = 20.0
