@@ -15,6 +15,7 @@ from petsc4py import PETSc
 import matplotlib
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from slope_stability.core.elements import normalize_elem_type, validate_supported_elem_type
@@ -72,25 +73,29 @@ def _collector_delta(before: dict, after: dict) -> dict:
     }
 
 
-def _build_plotting_mesh(surf: np.ndarray) -> np.ndarray:
-    """Return a simple triangulated boundary mesh for P1/P2/P4 triangle faces."""
+def _surface_faces_by_width(surf: np.ndarray) -> np.ndarray:
+    """Return boundary faces as (n_faces, nodes_per_face)."""
     surf = np.asarray(surf, dtype=np.int64)
     if surf.ndim != 2:
         raise ValueError(f"Expected a 2D surface array, got shape {surf.shape}")
     if surf.shape[0] == 6:
-        surf_faces = surf.T
-    elif surf.shape[1] == 6:
-        surf_faces = surf
+        return surf.T.astype(np.int64)
+    if surf.shape[1] == 6:
+        return surf.astype(np.int64)
     elif surf.shape[0] == 15:
         return surf[:3, :].T.astype(np.int64)
-    elif surf.shape[1] == 15:
+    if surf.shape[1] == 15:
         return surf[:, :3].astype(np.int64)
-    elif surf.shape[0] == 3:
+    if surf.shape[0] == 3:
         return surf.T.astype(np.int64)
-    elif surf.shape[1] == 3:
+    if surf.shape[1] == 3:
         return surf.astype(np.int64)
-    else:
-        raise ValueError(f"Unsupported surface array shape {surf.shape}")
+    raise ValueError(f"Unsupported surface array shape {surf.shape}")
+
+
+def _build_plotting_mesh(surf: np.ndarray) -> np.ndarray:
+    """Return a simple triangulated boundary mesh for P1/P2/P4 triangle faces."""
+    surf_faces = _surface_faces_by_width(surf)
     if surf_faces.shape[1] != 6:
         # Already triangular.
         return surf_faces.astype(np.int64)
@@ -102,6 +107,51 @@ def _build_plotting_mesh(surf: np.ndarray) -> np.ndarray:
         triangles.append(face[split[2]])
         triangles.append(face[split[3]])
     return np.asarray(triangles, dtype=np.int64)
+
+
+def _build_plotting_mesh_with_face_ids(surf: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return triangulated boundary faces and the owning surface-face index for each triangle."""
+    surf_faces = _surface_faces_by_width(surf)
+    if surf_faces.shape[1] != 6:
+        tri = surf_faces.astype(np.int64)
+        face_ids = np.arange(tri.shape[0], dtype=np.int64)
+        return tri, face_ids
+
+    split = np.array([[0, 3, 5], [3, 1, 4], [3, 4, 5], [5, 4, 2]], dtype=np.int64)
+    triangles: list[np.ndarray] = []
+    face_ids: list[int] = []
+    for face_id, face in enumerate(surf_faces):
+        for local in split:
+            triangles.append(face[local])
+            face_ids.append(face_id)
+    return np.asarray(triangles, dtype=np.int64), np.asarray(face_ids, dtype=np.int64)
+
+
+def _surface_parent_elements(elem: np.ndarray, surf: np.ndarray) -> np.ndarray:
+    """Map each boundary face to its owning tetrahedron via corner-node triples."""
+    tet = np.asarray(elem, dtype=np.int64)
+    faces = _surface_faces_by_width(surf)
+    if tet.ndim != 2 or tet.shape[0] < 4:
+        raise ValueError(f"Expected tetrahedral connectivity, got shape {tet.shape}")
+    if faces.ndim != 2 or faces.shape[1] < 3:
+        raise ValueError(f"Expected triangular faces, got shape {faces.shape}")
+
+    lookup: dict[tuple[int, int, int], int] = {}
+    local_faces = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
+    corner_tet = tet[:4, :]
+    for elem_id in range(corner_tet.shape[1]):
+        nodes = corner_tet[:, elem_id]
+        for local in local_faces:
+            key = tuple(sorted(int(nodes[idx]) for idx in local))
+            lookup[key] = elem_id
+
+    parent = np.empty(faces.shape[0], dtype=np.int64)
+    for face_id, face in enumerate(faces):
+        key = tuple(sorted(int(v) for v in face[:3]))
+        if key not in lookup:
+            raise KeyError(f"Boundary face {key} was not found in any tetrahedron.")
+        parent[face_id] = lookup[key]
+    return parent
 
 
 def _set_axes_equal(ax):
@@ -169,25 +219,32 @@ def _save_plots(
     fig.savefig(out_dir / "petsc_displacements_3D.png")
     plt.close(fig)
 
-    # Deviatoric strain proxy as element-centered scatter, similar intent to MATLAB boundary coloring.
+    # MATLAB-style surface coloring on the undeformed boundary mesh.
     E = B @ U.reshape(-1, order="F")
     E = E.reshape(6, -1, order="F")
     dev_norm = _deviatoric_strain_norm(E)
     n_e = elem.shape[1]
     elem_strain = dev_norm.reshape(n_q, n_e, order="F")
-    # Aggregate by mean of IPs and reorder for consistency with MATLAB ordering used there.
     elem_strain = np.mean(elem_strain, axis=0)
-
-    centroid = np.mean(coord[:, elem.astype(np.int64)], axis=1).T
+    tri_surface, tri_face_ids = _build_plotting_mesh_with_face_ids(surf.astype(np.int64))
+    face_parent = _surface_parent_elements(elem.astype(np.int64), surf.astype(np.int64))
+    tri_vals = elem_strain[face_parent[tri_face_ids]]
+    strain_cmap = plt.get_cmap("jet")
+    strain_norm = mcolors.Normalize(vmin=0.0, vmax=max(float(elem_strain.max()), 1e-12))
 
     fig = plt.figure(figsize=(10, 8), dpi=160)
     ax = fig.add_subplot(111, projection="3d")
-    p = ax.scatter(centroid[:, 0], centroid[:, 1], centroid[:, 2], c=elem_strain, cmap="viridis", s=2)
-    ax.set_title("Deviatoric strain (element mean proxy)")
+    triangles = [coord[:, tri_nodes].T for tri_nodes in tri_surface]
+    face_colors = strain_cmap(strain_norm(tri_vals))
+    mesh = Poly3DCollection(triangles, facecolors=face_colors, edgecolor="none", alpha=0.95)
+    ax.add_collection3d(mesh)
+    ax.set_title("Deviatoric strain (undeformed boundary surface)")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
-    fig.colorbar(p, ax=ax, pad=0.1, shrink=0.7, label="deviatoric strain norm")
+    mappable = plt.cm.ScalarMappable(cmap=strain_cmap, norm=strain_norm)
+    mappable.set_array(np.asarray([strain_norm.vmin, strain_norm.vmax], dtype=np.float64))
+    fig.colorbar(mappable, ax=ax, pad=0.1, shrink=0.7, label="deviatoric strain norm")
     _set_axes_equal(ax)
     fig.tight_layout()
     fig.savefig(out_dir / "petsc_deviatoric_strain_3D.png")
@@ -204,15 +261,16 @@ def _save_plots(
     plt.close(fig)
 
     # Optional: save per-step displacement maxima as lightweight visual summary.
-    step_norm = np.max(np.linalg.norm(step_u, axis=1), axis=1)
-    fig = plt.figure(figsize=(8, 6), dpi=160)
-    plt.plot(step_norm, marker="o", linewidth=1.0)
-    plt.xlabel("accepted step")
-    plt.ylabel(r"max $\|U\|$")
-    plt.title("Converged-step displacement growth")
-    plt.grid(True)
-    fig.savefig(out_dir / "petsc_step_displacement.png")
-    plt.close(fig)
+    if step_u.ndim == 3 and step_u.size:
+        step_norm = np.max(np.linalg.norm(step_u, axis=1), axis=1)
+        fig = plt.figure(figsize=(8, 6), dpi=160)
+        plt.plot(step_norm, marker="o", linewidth=1.0)
+        plt.xlabel("accepted step")
+        plt.ylabel(r"max $\|U\|$")
+        plt.title("Converged-step displacement growth")
+        plt.grid(True)
+        fig.savefig(out_dir / "petsc_step_displacement.png")
+        plt.close(fig)
 
 
 def run_capture(
@@ -251,6 +309,8 @@ def run_capture(
     compiled_outer: bool = False,
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
+    max_deflation_basis_vectors: int = 48,
+    store_step_u: bool = True,
 ) -> dict:
     rank = int(PETSc.COMM_WORLD.getRank())
     out_dir = _ensure_dir(output_dir) if rank == 0 else output_dir
@@ -261,8 +321,6 @@ def run_capture(
         progress_callback = _make_progress_logger(data_dir)
 
     elem_type = validate_supported_elem_type(3, elem_type)
-    if elem_type == "P4":
-        raise NotImplementedError("3D P4 is wired in the config interface, but the mechanics benchmark path is not implemented yet.")
 
     if mesh_path is None:
         mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
@@ -401,6 +459,8 @@ def run_capture(
         "factor_solver_type": factor_solver_type,
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
         "use_coordinates": True,
+        # P4 continuation can accumulate many recycle vectors; cap them to keep memory bounded.
+        "max_deflation_basis_vectors": int(max_deflation_basis_vectors),
     }
     if compiled_outer:
         preconditioner_options["compiled_outer"] = True
@@ -507,6 +567,7 @@ def run_capture(
             const_builder,
             linear_system_solver.copy(),
             progress_callback=progress_callback,
+            store_step_u=bool(store_step_u),
         )
     else:
         free_idx = q_to_free_indices(q_mask)
@@ -719,6 +780,8 @@ def main() -> None:
     parser.add_argument("--pc_hypre_strong_threshold", type=float, default=None)
     parser.add_argument("--compiled_outer", action="store_true", default=False)
     parser.add_argument("--recycle_preconditioner", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max_deflation_basis_vectors", type=int, default=48)
+    parser.add_argument("--store_step_u", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--constitutive_mode",
         type=str,
@@ -765,6 +828,8 @@ def main() -> None:
         compiled_outer=args.compiled_outer,
         recycle_preconditioner=args.recycle_preconditioner,
         constitutive_mode=args.constitutive_mode,
+        max_deflation_basis_vectors=args.max_deflation_basis_vectors,
+        store_step_u=args.store_step_u,
     )
     if PETSc.COMM_WORLD.getRank() == 0:
         print(json.dumps(result, indent=2))

@@ -370,7 +370,8 @@ class DeflatedFGMRESSolver:
             tolerance_deflation_basis=self.tolerance_deflation_basis,
             verbose=self.verbose,
         )
-        clone.deflation_basis = np.array(self.deflation_basis, copy=True)
+        # Share the current basis until the clone appends/reorthogonalizes and rebinds it.
+        clone.deflation_basis = self.deflation_basis
         clone.preconditioner = self.preconditioner
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
@@ -530,6 +531,16 @@ class PetscKSPFGMRESSolver:
                 continue
             if key.startswith(("pc_", "mg_", "ksp_", "mat_")):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
+
+    def _max_deflation_basis_vectors(self) -> int | None:
+        raw = self.preconditioner_options.get("max_deflation_basis_vectors")
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except Exception:
+            return None
+        return value if value > 0 else None
 
     def _expand_to_full_space(self, vectors: np.ndarray) -> np.ndarray:
         vec = np.asarray(vectors, dtype=np.float64)
@@ -760,6 +771,9 @@ class PetscKSPFGMRESSolver:
             self.deflation_basis = np.asarray(v, dtype=np.float64)
         else:
             self.deflation_basis = np.hstack((self.deflation_basis, v))
+        max_cols = self._max_deflation_basis_vectors()
+        if max_cols is not None and self.deflation_basis.ndim == 2 and self.deflation_basis.shape[1] > max_cols:
+            self.deflation_basis = np.asarray(self.deflation_basis[:, -max_cols:], dtype=np.float64)
 
     def copy(self):
         clone = self.__class__(
@@ -772,7 +786,8 @@ class PetscKSPFGMRESSolver:
             coord=self.coord,
             preconditioner_options=self.preconditioner_options,
         )
-        clone.deflation_basis = np.array(self.deflation_basis, copy=True)
+        # Share the current basis until the clone appends/reorthogonalizes and rebinds it.
+        clone.deflation_basis = self.deflation_basis
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         clone._diagnostics_enabled = self._diagnostics_enabled
@@ -1083,7 +1098,8 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
             coord=self.coord,
             preconditioner_options=self.preconditioner_options,
         )
-        clone.deflation_basis = np.array(self.deflation_basis, copy=True)
+        # Share the current basis until the clone appends/reorthogonalizes and rebinds it.
+        clone.deflation_basis = self.deflation_basis
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         return clone
@@ -1464,7 +1480,8 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
             coord=self.coord,
             preconditioner_options=self.preconditioner_options,
         )
-        clone.deflation_basis = np.array(self.deflation_basis, copy=True)
+        # Share the current basis until the clone appends/reorthogonalizes and rebinds it.
+        clone.deflation_basis = self.deflation_basis
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         clone._diagnostics_enabled = self._diagnostics_enabled
@@ -1849,7 +1866,8 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
             coord=self.coord,
             preconditioner_options=self.preconditioner_options,
         )
-        clone.deflation_basis = np.array(self.deflation_basis, copy=True)
+        # Share the current basis until the clone appends/reorthogonalizes and rebinds it.
+        clone.deflation_basis = self.deflation_basis
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         clone._diagnostics_enabled = self._diagnostics_enabled

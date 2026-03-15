@@ -148,6 +148,9 @@ def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str) -> Assembl
     elif elem_type == "P2":
         hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
         n_p = 10
+    elif elem_type == "P4":
+        hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
+        n_p = 35
     elif elem_type == "Q1":
         hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
         n_p = 8
@@ -311,7 +314,7 @@ def vector_volume(assembly: Assembly, f_int: np.ndarray, weight: np.ndarray | No
     if hatp is None:
         raise ValueError("assembly must contain quadrature basis in dphi['hatp']")
     n_p = hatp.shape[0]
-    if n_p not in {3, 4, 6, 8, 10, 15}:
+    if n_p not in {3, 4, 6, 8, 10, 15, 35}:
         raise ValueError(f"Unexpected number of basis functions {n_p}")
 
     n_nodes = assembly.n_nodes

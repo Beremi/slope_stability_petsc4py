@@ -423,10 +423,12 @@ def assemble_owned_regularized_matrix(
     """Return owned rows of ``K_r = r*K_elast + (1-r)*K_tangent`` on the fixed pattern."""
 
     tang = assemble_owned_tangent_values(pattern, DS, use_compiled=use_compiled)
-    values = float(r) * pattern.elastic_values + (1.0 - float(r)) * tang
+    tang = np.asarray(tang, dtype=np.float64)
+    tang *= 1.0 - float(r)
+    tang += float(r) * np.asarray(pattern.elastic_values, dtype=np.float64)
     indptr = np.array(pattern.local_matrix_pattern.indptr, copy=True)
     indices = np.array(pattern.local_matrix_pattern.indices, copy=True)
-    return csr_matrix((values, indices, indptr), shape=pattern.local_matrix_pattern.shape)
+    return csr_matrix((tang, indices, indptr), shape=pattern.local_matrix_pattern.shape)
 
 
 def build_global_tangent_matrix(assembly, DS: np.ndarray) -> csr_matrix:

@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 
 from .core.elements import infer_simplex_elem_type, SIMPLEX_NODES_PER_SURFACE
+from .core.simplex_lagrange import triangle_lagrange_interior_tuples
 from .problem_assets import load_problem_asset_definition_for_path
 
 
@@ -263,6 +264,129 @@ def _elevate_tet4_mesh_to_tet10(
     return coord_new, tet10, tri6
 
 
+def _edge_lagrange_node_indices(
+    coord: np.ndarray,
+    edge_map: dict[tuple[int, int], tuple[int, ...]],
+    extra_points: list[np.ndarray],
+    a: int,
+    b: int,
+    *,
+    order: int,
+) -> tuple[int, ...]:
+    i = int(a)
+    j = int(b)
+    key = (i, j) if i < j else (j, i)
+    stored = edge_map.get(key)
+    if stored is None:
+        lo, hi = key
+        ids: list[int] = []
+        for step in range(1, int(order)):
+            idx = int(coord.shape[1] + len(extra_points))
+            alpha = float(int(order) - step) / float(order)
+            beta = float(step) / float(order)
+            extra_points.append(alpha * coord[:, lo] + beta * coord[:, hi])
+            ids.append(idx)
+        stored = tuple(ids)
+        edge_map[key] = stored
+    if (i, j) == key:
+        return stored
+    return tuple(reversed(stored))
+
+
+def _face_interior_node_indices(
+    coord: np.ndarray,
+    face_map: dict[tuple[int, int, int], dict[tuple[int, int, int], int]],
+    extra_points: list[np.ndarray],
+    verts: tuple[int, int, int],
+    *,
+    order: int,
+) -> tuple[int, ...]:
+    local_verts = tuple(int(v) for v in verts)
+    canonical = tuple(sorted(local_verts))
+    stored = face_map.get(canonical)
+    if stored is None:
+        stored = {}
+        for tri_counts in triangle_lagrange_interior_tuples(int(order)):
+            point = np.zeros(coord.shape[0], dtype=np.float64)
+            for count, node in zip(tri_counts, canonical, strict=False):
+                point += (float(count) / float(order)) * coord[:, int(node)]
+            idx = int(coord.shape[1] + len(extra_points))
+            extra_points.append(point)
+            stored[tuple(int(v) for v in tri_counts)] = idx
+        face_map[canonical] = stored
+
+    local_to_canonical = [canonical.index(v) for v in local_verts]
+    out: list[int] = []
+    for tri_counts in triangle_lagrange_interior_tuples(int(order)):
+        canonical_counts = [0, 0, 0]
+        for local_idx, canonical_idx in enumerate(local_to_canonical):
+            canonical_counts[canonical_idx] = int(tri_counts[local_idx])
+        out.append(int(stored[tuple(canonical_counts)]))
+    return tuple(out)
+
+
+def _elevate_tet4_mesh_to_tet35(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    surf: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    tet4 = np.asarray(elem, dtype=np.int64)
+    tri3 = np.asarray(surf, dtype=np.int64)
+    if tet4.shape[0] != 4:
+        raise ValueError(f"tet35 elevation expects 4-node tetrahedra, got shape {tet4.shape}.")
+    if tri3.size and tri3.shape[0] != 3:
+        raise ValueError(f"tet35 elevation expects 3-node surface triangles, got shape {tri3.shape}.")
+
+    edge_map: dict[tuple[int, int], tuple[int, ...]] = {}
+    face_map: dict[tuple[int, int, int], dict[tuple[int, int, int], int]] = {}
+    extra_points: list[np.ndarray] = []
+
+    tet35 = np.empty((35, tet4.shape[1]), dtype=np.int64)
+    tet35[:4, :] = tet4
+    for idx in range(tet4.shape[1]):
+        v0, v1, v2, v3 = (int(v) for v in tet4[:, idx])
+
+        tet35[4:7, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v1, order=4)
+        tet35[7:10, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v1, v2, order=4)
+        tet35[10:13, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v2, order=4)
+        tet35[13:16, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v1, v3, order=4)
+        tet35[16:19, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v2, v3, order=4)
+        tet35[19:22, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v3, order=4)
+
+        faces = (
+            (v0, v1, v2),
+            (v0, v1, v3),
+            (v0, v2, v3),
+            (v1, v2, v3),
+        )
+        cursor = 22
+        for face in faces:
+            interior = _face_interior_node_indices(coord_arr, face_map, extra_points, face, order=4)
+            tet35[cursor : cursor + len(interior), idx] = interior
+            cursor += len(interior)
+
+        centroid_idx = int(coord_arr.shape[1] + len(extra_points))
+        extra_points.append(0.25 * (coord_arr[:, v0] + coord_arr[:, v1] + coord_arr[:, v2] + coord_arr[:, v3]))
+        tet35[34, idx] = centroid_idx
+
+    tri15 = np.empty((15, tri3.shape[1]), dtype=np.int64)
+    if tri3.shape[1]:
+        tri15[:3, :] = tri3
+        for idx in range(tri3.shape[1]):
+            v0, v1, v2 = (int(v) for v in tri3[:, idx])
+            tri15[3:6, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v1, order=4)
+            tri15[6:9, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v1, v2, order=4)
+            tri15[9:12, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v2, order=4)
+            tri15[12:15, idx] = _face_interior_node_indices(coord_arr, face_map, extra_points, (v0, v1, v2), order=4)
+
+    if extra_points:
+        coord_new = np.hstack((coord_arr, np.column_stack(extra_points)))
+    else:
+        coord_new = coord_arr.copy()
+    return coord_new, tet35, tri15
+
+
 def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None) -> MeshData:
     try:
         import meshio
@@ -297,19 +421,32 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None) -> Mesh
             boundary=boundary,
             elem_type="P1",
         )
-    if target != "P2":
-        raise NotImplementedError(f"Gmsh simplex loader currently supports P1 source meshes elevated to P2; requested {target!r}.")
-
-    coord_p2, elem_p2, surf_p2 = _elevate_tet4_mesh_to_tet10(coord, elem, surf)
-    q_mask = _build_dirichlet_mask(3, coord_p2.shape[1], surf_p2, boundary, path=path)
-    return MeshData(
-        coord=coord_p2,
-        elem=elem_p2,
-        surf=surf_p2,
-        q_mask=q_mask,
-        material=material,
-        boundary=boundary,
-        elem_type="P2",
+    if target == "P2":
+        coord_p2, elem_p2, surf_p2 = _elevate_tet4_mesh_to_tet10(coord, elem, surf)
+        q_mask = _build_dirichlet_mask(3, coord_p2.shape[1], surf_p2, boundary, path=path)
+        return MeshData(
+            coord=coord_p2,
+            elem=elem_p2,
+            surf=surf_p2,
+            q_mask=q_mask,
+            material=material,
+            boundary=boundary,
+            elem_type="P2",
+        )
+    if target == "P4":
+        coord_p4, elem_p4, surf_p4 = _elevate_tet4_mesh_to_tet35(coord, elem, surf)
+        q_mask = _build_dirichlet_mask(3, coord_p4.shape[1], surf_p4, boundary, path=path)
+        return MeshData(
+            coord=coord_p4,
+            elem=elem_p4,
+            surf=surf_p4,
+            q_mask=q_mask,
+            material=material,
+            boundary=boundary,
+            elem_type="P4",
+        )
+    raise NotImplementedError(
+        f"Gmsh simplex loader currently supports P1 source meshes elevated to P2/P4; requested {target!r}."
     )
 
 

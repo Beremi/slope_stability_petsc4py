@@ -3,6 +3,8 @@
 from __future__ import annotations
 import numpy as np
 
+from ..core.simplex_lagrange import evaluate_tetra_lagrange_basis
+
 
 def local_basis_volume_2d(elem_type: str, xi: np.ndarray):
     elem_type = elem_type.upper()
@@ -199,6 +201,9 @@ def local_basis_volume_3d(elem_type: str, xi: np.ndarray):
             dtype=np.float64,
         )
         return hatp, dhat1, dhat2, dhat3
+
+    if elem_type == "P4":
+        return evaluate_tetra_lagrange_basis(4, xi)
 
     if elem_type == "Q1":
         x = xi

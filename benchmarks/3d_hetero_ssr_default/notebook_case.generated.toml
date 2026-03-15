@@ -1,0 +1,52 @@
+[problem]
+name = "3d_hetero_ssr_default"
+case = "3d_hetero_ssr"
+analysis = "ssr"
+dimension = 3
+variant = "hetero"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+mesh_path = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+mesh_boundary_type = 0
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_init = 1.0
+d_lambda_init = 0.1
+d_lambda_min = 0.001
+d_lambda_diff_scaled_min = 0.001
+omega_max = 12000000.0
+step_max = 12
+
+[newton]
+it_max = 200
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 0.1
+max_iterations = 100
+deflation_basis_tolerance = 0.001
+threads = 16
+print_level = 0
+use_as_preconditioner = true
+compiled_outer = false
+recycle_preconditioner = true
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true
+custom_debug_name = "run_debug.h5"
+history_name = "continuation_history.json"
+solution_name = "final_solution.vtu"

@@ -111,8 +111,8 @@ class Run3DSSRConfig:
             raise NotImplementedError(
                 "Seepage configs are intentionally not wired yet; use this scheme for 3D non-seepage SSR first."
             )
-        if self.problem.elem_type.upper() != "P2":
-            raise NotImplementedError("Only 3D P2 runs are wired into the current config runner.")
+        if self.problem.elem_type.upper() not in {"P2", "P4"}:
+            raise NotImplementedError("Only 3D P2/P4 runs are wired into the current config runner.")
         if self.continuation.method.lower() != "indirect":
             raise NotImplementedError("The config runner currently targets indirect 3D SSR continuation only.")
         if not self.material_rows():

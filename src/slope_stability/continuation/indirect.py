@@ -145,6 +145,8 @@ def SSR_indirect_continuation(
     constitutive_matrix_builder,
     linear_system_solver,
     progress_callback: Callable[[dict], None] | None = None,
+    *,
+    store_step_u: bool = True,
 ):
     """Indirect continuation in ``omega`` with nested-Newton solves."""
 
@@ -246,8 +248,9 @@ def SSR_indirect_continuation(
     lambda_hist[1] = lambda_value
     Umax_hist[0] = np.max(np.linalg.norm(U_old, axis=0))
     Umax_hist[1] = np.max(np.linalg.norm(U, axis=0))
-    stats["step_U"].append(U_old.copy())
-    stats["step_U"].append(U.copy())
+    if store_step_u:
+        stats["step_U"].append(U_old.copy())
+        stats["step_U"].append(U.copy())
 
     d_omega = omega - omega_old
     if omega_max_stop < omega + d_omega:
@@ -371,7 +374,8 @@ def SSR_indirect_continuation(
             stats["step_linear_orthogonalization_time"].append(step_lin_orth_accum)
             stats["step_lambda"].append(lambda_value)
             stats["step_omega"].append(omega)
-            stats["step_U"].append(U.copy())
+            if store_step_u:
+                stats["step_U"].append(U.copy())
 
             _emit(
                 "step_accepted",

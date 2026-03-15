@@ -1117,6 +1117,7 @@ class ConstitutiveOperator:
         self._owned_regularized_mat = None
         self._owned_regularized_indptr = None
         self._owned_regularized_indices = None
+        self._owned_regularized_values = None
         self._owned_overlap_c_bar = None
         self._owned_overlap_sin_phi = None
         self._owned_unique_c_bar = None
@@ -1343,7 +1344,13 @@ class ConstitutiveOperator:
             self._owned_local_DS if self._owned_local_DS is not None else self.DS,
             use_compiled=self.use_compiled_owned_tangent,
         )
-        values = float(r) * np.asarray(pattern.elastic_values, dtype=np.float64) + (1.0 - float(r)) * np.asarray(tang, dtype=np.float64)
+        tang = np.asarray(tang, dtype=np.float64)
+        if self._owned_regularized_values is None or self._owned_regularized_values.shape != tang.shape:
+            self._owned_regularized_values = np.empty_like(tang)
+        values = self._owned_regularized_values
+        np.copyto(values, tang)
+        values *= 1.0 - float(r)
+        values += float(r) * np.asarray(pattern.elastic_values, dtype=np.float64)
         self.time_build_tangent_local.append(perf_counter() - t0)
 
         if self._owned_regularized_indptr is None:
@@ -1356,7 +1363,7 @@ class ConstitutiveOperator:
             from scipy.sparse import csr_matrix
 
             local_matrix = csr_matrix(
-                (np.asarray(values, dtype=np.float64).copy(), self._owned_regularized_indices, self._owned_regularized_indptr),
+                (np.array(values, dtype=np.float64, copy=True), self._owned_regularized_indices, self._owned_regularized_indptr),
                 shape=pattern.local_matrix_pattern.shape,
             )
             self._owned_regularized_mat = local_csr_to_petsc_aij_matrix(
@@ -1675,3 +1682,4 @@ class ConstitutiveOperator:
         self._owned_regularized_mat = None
         self._owned_regularized_indptr = None
         self._owned_regularized_indices = None
+        self._owned_regularized_values = None

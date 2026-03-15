@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
 
+from slope_stability.core.simplex_lagrange import tetra_reference_nodes
+from slope_stability.fem.basis import local_basis_volume_3d
+from slope_stability.fem.quadrature import quadrature_volume_3d
 from slope_stability.core.run_config import load_run_case_config
 from slope_stability.io import load_mesh_file
 from slope_stability.problem_assets import load_material_rows_for_path
@@ -49,3 +53,40 @@ def test_gmsh_loader_reads_tet4_and_elevates_to_tet10() -> None:
     assert int((~mesh_p2.q_mask[0]).sum()) == 395
     assert int((~mesh_p2.q_mask[1]).sum()) == 722
     assert int((~mesh_p2.q_mask[2]).sum()) == 1336
+
+
+def test_p4_reference_basis_is_nodal() -> None:
+    xi = tetra_reference_nodes(4)
+    hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d("P4", xi)
+    assert hatp.shape == (35, 35)
+    assert dhat1.shape == (35, 35)
+    assert dhat2.shape == (35, 35)
+    assert dhat3.shape == (35, 35)
+    assert np.allclose(hatp, np.eye(35), atol=1e-12)
+
+
+def test_p4_tetra_quadrature_is_degree_six_exact() -> None:
+    xi, wf = quadrature_volume_3d("P4")
+
+    def exact_monomial(a: int, b: int, c: int) -> float:
+        return float(math.factorial(a) * math.factorial(b) * math.factorial(c) / math.factorial(a + b + c + 3))
+
+    for total_degree in range(7):
+        for a in range(total_degree + 1):
+            for b in range(total_degree - a + 1):
+                c = total_degree - a - b
+                approx = float(np.sum(wf * (xi[0, :] ** a) * (xi[1, :] ** b) * (xi[2, :] ** c)))
+                assert abs(approx - exact_monomial(a, b, c)) < 1.0e-12
+
+
+def test_gmsh_loader_elevates_tet4_to_tet35() -> None:
+    mesh_p4 = load_mesh_file(MESH_PATH, elem_type="P4")
+    assert mesh_p4.coord.shape == (3, 208549)
+    assert mesh_p4.elem.shape == (35, 18419)
+    assert mesh_p4.surf.shape == (15, 6325)
+    assert mesh_p4.elem_type == "P4"
+    assert np.array_equal(np.unique(mesh_p4.material), np.array([0, 1, 2, 3], dtype=np.int64))
+    assert np.array_equal(np.unique(mesh_p4.boundary), np.array([0, 1, 2, 3, 4, 5, 6], dtype=np.int64))
+    assert int((~mesh_p4.q_mask[0]).sum()) == 1472
+    assert int((~mesh_p4.q_mask[1]).sum()) == 2783
+    assert int((~mesh_p4.q_mask[2]).sum()) == 5070
