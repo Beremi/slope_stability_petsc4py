@@ -13,9 +13,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MESH = ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
-DEFAULT_RANKS = (1, 2, 4, 8, 16)
+DEFAULT_RANKS = (1, 2, 4, 8)
+DEFAULT_KERNELS = ("legacy", "rows")
+DEFAULT_CONSTITUTIVE_MODES = ("overlap",)
 DEFAULT_OUT_ROOT = ROOT / "artifacts" / "p4_scaling_step2"
 DEFAULT_REPORT = Path(__file__).resolve().parent / "report_p4_scaling_step2.md"
+DEFAULT_CONSTITUTIVE_REPORT = Path(__file__).resolve().parent / "report_p4_constitutive_modes.md"
 
 
 def _load_progress_summary(out_dir: Path) -> dict[str, int]:
@@ -55,7 +58,15 @@ def _load_progress_summary(out_dir: Path) -> dict[str, int]:
     }
 
 
-def _run_case(*, ranks: int, mesh_path: Path, step_max: int, out_dir: Path) -> None:
+def _run_case(
+    *,
+    ranks: int,
+    mesh_path: Path,
+    step_max: int,
+    tangent_kernel: str,
+    constitutive_mode: str,
+    out_dir: Path,
+) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
     cmd = [
@@ -71,6 +82,10 @@ def _run_case(*, ranks: int, mesh_path: Path, step_max: int, out_dir: Path) -> N
         "P4",
         "--step_max",
         str(int(step_max)),
+        "--tangent_kernel",
+        str(tangent_kernel),
+        "--constitutive_mode",
+        str(constitutive_mode),
         "--out_dir",
         str(out_dir),
     ]
@@ -130,12 +145,23 @@ def _load_case_metrics(out_dir: Path) -> dict[str, object]:
         "build_F": float(constitutive["build_F"]),
         "local_strain": float(constitutive["local_strain"]),
         "local_constitutive": float(constitutive["local_constitutive"]),
+        "local_constitutive_comm": float(constitutive.get("local_constitutive_comm", 0.0)),
         "continuation_total_wall_time": float(timings["continuation_total_wall_time"]),
     }
 
 
 def _fmt_ratio(x: float) -> str:
     return f"{float(x):.3f}x"
+
+
+def _mesh_label(mesh_path: Path) -> str:
+    mesh_path = Path(mesh_path)
+    if not mesh_path.is_absolute():
+        return str(mesh_path)
+    try:
+        return str(mesh_path.relative_to(ROOT))
+    except ValueError:
+        return str(mesh_path)
 
 
 def _write_csv(out_root: Path, *, results: dict[int, dict[str, object]]) -> Path:
@@ -172,6 +198,7 @@ def _write_csv(out_root: Path, *, results: dict[int, dict[str, object]]) -> Path
         "build_F",
         "local_strain",
         "local_constitutive",
+        "local_constitutive_comm",
         "continuation_total_wall_time",
         "step_wall_time_total",
     ]
@@ -217,6 +244,7 @@ def _write_csv(out_root: Path, *, results: dict[int, dict[str, object]]) -> Path
                     "build_F": float(row["build_F"]),
                     "local_strain": float(row["local_strain"]),
                     "local_constitutive": float(row["local_constitutive"]),
+                    "local_constitutive_comm": float(row["local_constitutive_comm"]),
                     "continuation_total_wall_time": float(row["continuation_total_wall_time"]),
                     "step_wall_time_total": float(row["step_wall_time_total"]),
                 }
@@ -224,12 +252,22 @@ def _write_csv(out_root: Path, *, results: dict[int, dict[str, object]]) -> Path
     return csv_path
 
 
-def _write_json(out_root: Path, *, mesh_path: Path, step_max: int, results: dict[int, dict[str, object]]) -> Path:
+def _write_json(
+    out_root: Path,
+    *,
+    mesh_path: Path,
+    step_max: int,
+    tangent_kernel: str,
+    constitutive_mode: str,
+    results: dict[int, dict[str, object]],
+) -> Path:
     json_path = out_root / "summary.json"
     rank1 = results[min(results)]
     payload = {
-        "mesh_path": str(mesh_path.relative_to(ROOT)),
+        "mesh_path": _mesh_label(mesh_path),
         "element_order": "P4",
+        "tangent_kernel": str(tangent_kernel),
+        "constitutive_mode": str(constitutive_mode),
         "step_max": int(step_max),
         "ranks": sorted(results),
         "rank1_reference": min(results),
@@ -323,6 +361,8 @@ def _write_plots(out_root: Path, *, results: dict[int, dict[str, object]]) -> di
         "attempt solves": np.asarray([float(results[int(r)]["attempt_linear_solve_time_total"]) for r in ranks], dtype=np.float64),
         "attempt prec": np.asarray([float(results[int(r)]["attempt_linear_preconditioner_time_total"]) for r in ranks], dtype=np.float64),
         "tangent local": np.asarray([float(results[int(r)]["build_tangent_local"]) for r in ranks], dtype=np.float64),
+        "constitutive": np.asarray([float(results[int(r)]["local_constitutive"]) for r in ranks], dtype=np.float64),
+        "constitutive comm": np.asarray([float(results[int(r)]["local_constitutive_comm"]) for r in ranks], dtype=np.float64),
     }
     fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
     bottom = np.zeros_like(ranks, dtype=np.float64)
@@ -344,7 +384,15 @@ def _write_plots(out_root: Path, *, results: dict[int, dict[str, object]]) -> di
     }
 
 
-def _write_report(report_path: Path, *, mesh_path: Path, step_max: int, results: dict[int, dict[str, object]]) -> None:
+def _write_report(
+    report_path: Path,
+    *,
+    mesh_path: Path,
+    step_max: int,
+    tangent_kernel: str,
+    constitutive_mode: str,
+    results: dict[int, dict[str, object]],
+) -> None:
     rank1 = results[min(results)]
     best_rank = min(results, key=lambda ranks: float(results[ranks]["runtime_seconds"]))
     max_delta_lambda = max(abs(float(row["lambda_last"]) - float(rank1["lambda_last"])) for row in results.values())
@@ -353,8 +401,10 @@ def _write_report(report_path: Path, *, mesh_path: Path, step_max: int, results:
     lines: list[str] = [
         "# 3D Hetero SSR P4 Scaling",
         "",
-        f"- Mesh: `{mesh_path.relative_to(ROOT)}`",
+        f"- Mesh: `{_mesh_label(mesh_path)}`",
         f"- Element order: `P4`",
+        f"- Tangent kernel: `{tangent_kernel}`",
+        f"- Constitutive mode: `{constitutive_mode}`",
         f"- `step_max`: `{int(step_max)}`",
         f"- Ranks tested: `{', '.join(str(r) for r in sorted(results))}`",
         "- Runner: `slope_stability.cli.run_3D_hetero_SSR_capture`",
@@ -417,8 +467,8 @@ def _write_report(report_path: Path, *, mesh_path: Path, step_max: int, results:
             "",
             "## Timing Breakdown",
             "",
-            "| Ranks | Init solve [s] | Attempt solves [s] | Attempt prec [s] | Tangent local [s] | Build F [s] | Local strain [s] | Local constitutive [s] |",
-            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Ranks | Init solve [s] | Attempt solves [s] | Attempt prec [s] | Tangent local [s] | Build F [s] | Local strain [s] | Local constitutive [s] | Constitutive comm [s] |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for ranks in sorted(results):
@@ -426,7 +476,8 @@ def _write_report(report_path: Path, *, mesh_path: Path, step_max: int, results:
         lines.append(
             f"| {ranks} | {float(row['init_linear_solve_time']):.3f} | {float(row['attempt_linear_solve_time_total']):.3f} | "
             f"{float(row['attempt_linear_preconditioner_time_total']):.3f} | {float(row['build_tangent_local']):.3f} | "
-            f"{float(row['build_F']):.3f} | {float(row['local_strain']):.3f} | {float(row['local_constitutive']):.3f} |"
+            f"{float(row['build_F']):.3f} | {float(row['local_strain']):.3f} | {float(row['local_constitutive']):.3f} | "
+            f"{float(row['local_constitutive_comm']):.3f} |"
         )
 
     lines.extend(
@@ -444,33 +495,244 @@ def _write_report(report_path: Path, *, mesh_path: Path, step_max: int, results:
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_kernel_comparison_report(
+    report_path: Path,
+    *,
+    mesh_path: Path,
+    step_max: int,
+    constitutive_mode: str,
+    results_by_kernel: dict[str, dict[int, dict[str, object]]],
+) -> None:
+    kernels = list(results_by_kernel)
+    lines = [
+        "# 3D Hetero SSR P4 Kernel Comparison",
+        "",
+        f"- Mesh: `{_mesh_label(mesh_path)}`",
+        "- Element order: `P4`",
+        f"- `step_max`: `{int(step_max)}`",
+        f"- Constitutive mode: `{constitutive_mode}`",
+        f"- Kernels: `{', '.join(kernels)}`",
+        "",
+    ]
+
+    for kernel in kernels:
+        results = results_by_kernel[kernel]
+        rank1 = results[min(results)]
+        best_rank = min(results, key=lambda ranks: float(results[ranks]["runtime_seconds"]))
+        lines.extend(
+            [
+                f"## `{kernel}`",
+                "",
+                f"- Rank-1 runtime: `{float(rank1['runtime_seconds']):.3f}` s",
+                f"- Rank-1 `build_tangent_local`: `{float(rank1['build_tangent_local']):.3f}` s",
+                f"- Rank-1 `local_constitutive_comm`: `{float(rank1['local_constitutive_comm']):.3f}` s",
+                f"- Best runtime rank: `{best_rank}`",
+                "",
+            ]
+        )
+
+    baseline = "legacy" if "legacy" in results_by_kernel else kernels[0]
+    if "rows" in results_by_kernel and baseline in results_by_kernel:
+        common_ranks = sorted(set(results_by_kernel[baseline]) & set(results_by_kernel["rows"]))
+        lines.extend(
+            [
+                f"## `rows` vs `{baseline}`",
+                "",
+                "| Ranks | Runtime baseline [s] | Runtime rows [s] | Runtime speedup | Tangent baseline [s] | Tangent rows [s] | Tangent speedup | |delta lambda| | |delta omega| | |delta Umax| |",
+                "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for ranks in common_ranks:
+            base = results_by_kernel[baseline][ranks]
+            rows = results_by_kernel["rows"][ranks]
+            runtime_speedup = float(base["runtime_seconds"]) / max(float(rows["runtime_seconds"]), 1.0e-30)
+            tangent_speedup = float(base["build_tangent_local"]) / max(float(rows["build_tangent_local"]), 1.0e-30)
+            lines.append(
+                f"| {ranks} | {float(base['runtime_seconds']):.3f} | {float(rows['runtime_seconds']):.3f} | "
+                f"{_fmt_ratio(runtime_speedup)} | {float(base['build_tangent_local']):.3f} | {float(rows['build_tangent_local']):.3f} | "
+                f"{_fmt_ratio(tangent_speedup)} | {abs(float(rows['lambda_last']) - float(base['lambda_last'])):.3e} | "
+                f"{abs(float(rows['omega_last']) - float(base['omega_last'])):.3e} | {abs(float(rows['umax_last']) - float(base['umax_last'])):.3e} |"
+            )
+
+    lines.extend(
+        [
+            "",
+            "## Artifact Layout",
+            "",
+            "- Per-kernel summaries, plots, and rank subdirectories are written under `kernel_<name>/` inside the output root.",
+            "- This root report compares the kernels directly while preserving the original per-kernel scaling artifacts.",
+        ]
+    )
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_constitutive_comparison_report(
+    report_path: Path,
+    *,
+    mesh_path: Path,
+    step_max: int,
+    tangent_kernel: str,
+    results_by_mode: dict[str, dict[int, dict[str, object]]],
+) -> None:
+    constitutive_modes = list(results_by_mode)
+    lines = [
+        "# 3D Hetero SSR P4 Constitutive Comparison",
+        "",
+        f"- Mesh: `{_mesh_label(mesh_path)}`",
+        "- Element order: `P4`",
+        f"- Tangent kernel: `{tangent_kernel}`",
+        f"- `step_max`: `{int(step_max)}`",
+        f"- Constitutive modes: `{', '.join(constitutive_modes)}`",
+        "",
+    ]
+
+    for constitutive_mode in constitutive_modes:
+        results = results_by_mode[constitutive_mode]
+        rank1 = results[min(results)]
+        best_rank = min(results, key=lambda ranks: float(results[ranks]["runtime_seconds"]))
+        lines.extend(
+            [
+                f"## `{constitutive_mode}`",
+                "",
+                f"- Rank-1 runtime: `{float(rank1['runtime_seconds']):.3f}` s",
+                f"- Rank-1 `local_constitutive`: `{float(rank1['local_constitutive']):.3f}` s",
+                f"- Rank-1 `local_constitutive_comm`: `{float(rank1['local_constitutive_comm']):.3f}` s",
+                f"- Best runtime rank: `{best_rank}`",
+                "",
+            ]
+        )
+
+    baseline = "overlap" if "overlap" in results_by_mode else constitutive_modes[0]
+    if "unique_exchange" in results_by_mode and baseline in results_by_mode:
+        common_ranks = sorted(set(results_by_mode[baseline]) & set(results_by_mode["unique_exchange"]))
+        lines.extend(
+            [
+                f"## `unique_exchange` vs `{baseline}`",
+                "",
+                "| Ranks | Runtime baseline [s] | Runtime unique_exchange [s] | Runtime speedup | Local constitutive baseline [s] | Local constitutive unique_exchange [s] | Local comm baseline [s] | Local comm unique_exchange [s] | |delta lambda| | |delta omega| | |delta Umax| |",
+                "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for ranks in common_ranks:
+            base = results_by_mode[baseline][ranks]
+            exchange = results_by_mode["unique_exchange"][ranks]
+            runtime_speedup = float(base["runtime_seconds"]) / max(float(exchange["runtime_seconds"]), 1.0e-30)
+            lines.append(
+                f"| {ranks} | {float(base['runtime_seconds']):.3f} | {float(exchange['runtime_seconds']):.3f} | "
+                f"{_fmt_ratio(runtime_speedup)} | {float(base['local_constitutive']):.3f} | {float(exchange['local_constitutive']):.3f} | "
+                f"{float(base['local_constitutive_comm']):.3f} | {float(exchange['local_constitutive_comm']):.3f} | "
+                f"{abs(float(exchange['lambda_last']) - float(base['lambda_last'])):.3e} | "
+                f"{abs(float(exchange['omega_last']) - float(base['omega_last'])):.3e} | "
+                f"{abs(float(exchange['umax_last']) - float(base['umax_last'])):.3e} |"
+            )
+
+    lines.extend(
+        [
+            "",
+            "## Artifact Layout",
+            "",
+            "- Per-mode results are written under `mode_<name>/kernel_<name>/` when multiple constitutive modes are requested.",
+            "- This report compares constitutive modes with the tangent kernel held fixed.",
+        ]
+    )
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a P4 strong-scaling study for 3D hetero SSR.")
     parser.add_argument("--mesh-path", type=Path, default=DEFAULT_MESH)
     parser.add_argument("--step-max", type=int, default=2)
     parser.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT)
     parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--constitutive-report-path", type=Path, default=DEFAULT_CONSTITUTIVE_REPORT)
     parser.add_argument("--reuse-existing", action="store_true", default=False)
     parser.add_argument("--ranks", type=int, nargs="+", default=list(DEFAULT_RANKS))
+    parser.add_argument("--kernels", type=str, nargs="+", default=list(DEFAULT_KERNELS))
+    parser.add_argument("--constitutive-modes", type=str, nargs="+", default=list(DEFAULT_CONSTITUTIVE_MODES))
     args = parser.parse_args()
 
     out_root = Path(args.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    results: dict[int, dict[str, object]] = {}
-    for ranks in [int(v) for v in args.ranks]:
-        out_dir = out_root / f"rank{ranks}"
-        info_path = out_dir / "data" / "run_info.json"
-        if args.reuse_existing and info_path.exists():
-            results[ranks] = _load_case_metrics(out_dir)
-            continue
-        _run_case(ranks=ranks, mesh_path=Path(args.mesh_path), step_max=int(args.step_max), out_dir=out_dir)
-        results[ranks] = _load_case_metrics(out_dir)
+    kernels = [str(v).lower() for v in args.kernels]
+    constitutive_modes = [str(v).lower() for v in args.constitutive_modes]
+    results_by_mode: dict[str, dict[str, dict[int, dict[str, object]]]] = {}
 
-    _write_csv(out_root, results=results)
-    _write_json(out_root, mesh_path=Path(args.mesh_path), step_max=int(args.step_max), results=results)
-    _write_plots(out_root, results=results)
-    _write_report(Path(args.report_path), mesh_path=Path(args.mesh_path), step_max=int(args.step_max), results=results)
+    for constitutive_mode in constitutive_modes:
+        mode_root = out_root if len(constitutive_modes) == 1 else out_root / f"mode_{constitutive_mode}"
+        mode_root.mkdir(parents=True, exist_ok=True)
+        results_by_kernel: dict[str, dict[int, dict[str, object]]] = {}
+        for kernel in kernels:
+            kernel_root = mode_root / f"kernel_{kernel}"
+            kernel_root.mkdir(parents=True, exist_ok=True)
+            results: dict[int, dict[str, object]] = {}
+            for ranks in [int(v) for v in args.ranks]:
+                out_dir = kernel_root / f"rank{ranks}"
+                info_path = out_dir / "data" / "run_info.json"
+                if args.reuse_existing and info_path.exists():
+                    results[ranks] = _load_case_metrics(out_dir)
+                    continue
+                _run_case(
+                    ranks=ranks,
+                    mesh_path=Path(args.mesh_path),
+                    step_max=int(args.step_max),
+                    tangent_kernel=kernel,
+                    constitutive_mode=constitutive_mode,
+                    out_dir=out_dir,
+                )
+                results[ranks] = _load_case_metrics(out_dir)
+
+            results_by_kernel[kernel] = results
+            _write_csv(kernel_root, results=results)
+            _write_json(
+                kernel_root,
+                mesh_path=Path(args.mesh_path),
+                step_max=int(args.step_max),
+                tangent_kernel=kernel,
+                constitutive_mode=constitutive_mode,
+                results=results,
+            )
+            _write_plots(kernel_root, results=results)
+            _write_report(
+                kernel_root / "report.md",
+                mesh_path=Path(args.mesh_path),
+                step_max=int(args.step_max),
+                tangent_kernel=kernel,
+                constitutive_mode=constitutive_mode,
+                results=results,
+            )
+
+        results_by_mode[constitutive_mode] = results_by_kernel
+        if len(kernels) > 1:
+            kernel_report_path = (
+                Path(args.report_path) if len(constitutive_modes) == 1 else mode_root / "kernel_comparison.md"
+            )
+            _write_kernel_comparison_report(
+                kernel_report_path,
+                mesh_path=Path(args.mesh_path),
+                step_max=int(args.step_max),
+                constitutive_mode=constitutive_mode,
+                results_by_kernel=results_by_kernel,
+            )
+
+    if len(constitutive_modes) > 1:
+        for kernel in kernels:
+            results_for_kernel = {
+                constitutive_mode: results_by_mode[constitutive_mode][kernel]
+                for constitutive_mode in constitutive_modes
+            }
+            report_path = (
+                Path(args.constitutive_report_path)
+                if len(kernels) == 1
+                else out_root / f"constitutive_comparison_kernel_{kernel}.md"
+            )
+            _write_constitutive_comparison_report(
+                report_path,
+                mesh_path=Path(args.mesh_path),
+                step_max=int(args.step_max),
+                tangent_kernel=kernel,
+                results_by_mode=results_for_kernel,
+            )
 
 
 if __name__ == "__main__":

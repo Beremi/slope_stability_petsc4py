@@ -6,7 +6,7 @@
 """Small Cython kernel primitives for inner-loop vector ops."""
 
 from libc.math cimport sqrt
-from libc.stdint cimport int64_t
+from libc.stdint cimport int32_t, uint8_t
 import numpy as np
 cimport numpy as cnp
 from mpi4py import MPI as PYMPI
@@ -18,12 +18,58 @@ cdef extern from "assemble_tangent_values_3d.h":
         const double *dphi3,
         const double *ds,
         const double *weight,
-        const int64_t *scatter_map,
+        const int32_t *scatter_map,
         int n_int,
         int n_elem,
         int n_p,
         int n_q,
         int nnz_out,
+        double *out_values
+    )
+    void assemble_tangent_values_3d_rows_c(
+        const double *dphi1,
+        const double *dphi2,
+        const double *dphi3,
+        const double *ds,
+        const double *weight,
+        const int32_t *row_slot_ptr,
+        const int32_t *slot_elem,
+        const uint8_t *slot_lrow,
+        const int32_t *slot_pos,
+        int n_int,
+        int n_rows,
+        int n_slots,
+        int n_p,
+        int n_q,
+        int nnz_out,
+        double *out_values
+    )
+    void assemble_overlap_strain_3d_c(
+        const double *dphi1,
+        const double *dphi2,
+        const double *dphi3,
+        const double *u_overlap,
+        const int32_t *elem_dof_lids,
+        int n_int,
+        int n_elem,
+        int n_p,
+        int n_q,
+        double *out_values
+    )
+    void assemble_force_3d_rows_c(
+        const double *dphi1,
+        const double *dphi2,
+        const double *dphi3,
+        const double *stress,
+        const double *weight,
+        const int32_t *row_slot_ptr,
+        const int32_t *slot_elem,
+        const uint8_t *slot_lrow,
+        int n_int,
+        int n_rows,
+        int n_slots,
+        int n_p,
+        int n_q,
         double *out_values
     )
 
@@ -235,7 +281,7 @@ def assemble_tangent_values_3d(
     cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi3,
     cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] ds,
     cnp.ndarray[cnp.float64_t, ndim=1, mode="c"] weight,
-    cnp.ndarray[cnp.int64_t, ndim=2, mode="c"] scatter_map,
+    cnp.ndarray[cnp.int32_t, ndim=2, mode="c"] scatter_map,
     int nnz_out,
 ):
     cdef int n_int = <int>dphi1.shape[0]
@@ -263,12 +309,155 @@ def assemble_tangent_values_3d(
         &dphi3[0, 0],
         &ds[0, 0],
         &weight[0],
-        <const int64_t *>&scatter_map[0, 0],
+        <const int32_t *>&scatter_map[0, 0],
         n_int,
         n_elem,
         n_p,
         n_q,
         nnz_out,
+        &out[0],
+    )
+    return out
+
+
+def assemble_tangent_values_3d_rows(
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi1,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi2,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi3,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] ds,
+    cnp.ndarray[cnp.float64_t, ndim=1, mode="c"] weight,
+    cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] row_slot_ptr,
+    cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] slot_elem,
+    cnp.ndarray[cnp.uint8_t, ndim=1, mode="c"] slot_lrow,
+    cnp.ndarray[cnp.int32_t, ndim=2, mode="c"] slot_pos,
+    int n_q,
+    int nnz_out,
+):
+    cdef int n_int = <int>dphi1.shape[0]
+    cdef int n_p = <int>dphi1.shape[1]
+    cdef int n_rows = <int>(row_slot_ptr.shape[0] - 1)
+    cdef int n_slots = <int>slot_elem.shape[0]
+    cdef cnp.ndarray[cnp.float64_t, ndim=1, mode="c"] out
+
+    if dphi2.shape[0] != n_int or dphi2.shape[1] != n_p or dphi3.shape[0] != n_int or dphi3.shape[1] != n_p:
+        raise ValueError("dphi arrays must have matching shapes")
+    if ds.shape[0] != n_int or ds.shape[1] != 36:
+        raise ValueError("ds must have shape (n_int, 36)")
+    if weight.shape[0] != n_int:
+        raise ValueError("weight length must match n_int")
+    if row_slot_ptr.shape[0] == 0:
+        raise ValueError("row_slot_ptr must have at least one entry")
+    if slot_lrow.shape[0] != n_slots:
+        raise ValueError("slot_lrow length must match slot count")
+    if slot_pos.shape[0] != n_slots or slot_pos.shape[1] != 3 * n_p:
+        raise ValueError("slot_pos must have shape (n_slots, 3*n_p)")
+    if n_q <= 0:
+        raise ValueError("n_q must be positive")
+    if n_slots == 0:
+        return np.zeros(nnz_out, dtype=np.float64)
+    out = np.zeros(nnz_out, dtype=np.float64)
+    assemble_tangent_values_3d_rows_c(
+        &dphi1[0, 0],
+        &dphi2[0, 0],
+        &dphi3[0, 0],
+        &ds[0, 0],
+        &weight[0],
+        &row_slot_ptr[0],
+        &slot_elem[0],
+        &slot_lrow[0],
+        &slot_pos[0, 0],
+        n_int,
+        n_rows,
+        n_slots,
+        n_p,
+        n_q,
+        nnz_out,
+        &out[0],
+    )
+    return out
+
+
+def assemble_overlap_strain_3d(
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi1,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi2,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi3,
+    cnp.ndarray[cnp.float64_t, ndim=1, mode="c"] u_overlap,
+    cnp.ndarray[cnp.int32_t, ndim=2, mode="c"] elem_dof_lids,
+    int n_q,
+):
+    cdef int n_int = <int>dphi1.shape[0]
+    cdef int n_p = <int>dphi1.shape[1]
+    cdef int n_elem = <int>elem_dof_lids.shape[0]
+    cdef cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] out
+
+    if dphi2.shape[0] != n_int or dphi2.shape[1] != n_p or dphi3.shape[0] != n_int or dphi3.shape[1] != n_p:
+        raise ValueError("dphi arrays must have matching shapes")
+    if elem_dof_lids.shape[1] != 3 * n_p:
+        raise ValueError("elem_dof_lids must have shape (n_elem, 3*n_p)")
+    if n_q <= 0:
+        raise ValueError("n_q must be positive")
+    if n_elem == 0:
+        return np.empty((0, 6), dtype=np.float64)
+    out = np.empty((n_int, 6), dtype=np.float64)
+    assemble_overlap_strain_3d_c(
+        &dphi1[0, 0],
+        &dphi2[0, 0],
+        &dphi3[0, 0],
+        &u_overlap[0],
+        &elem_dof_lids[0, 0],
+        n_int,
+        n_elem,
+        n_p,
+        n_q,
+        &out[0, 0],
+    )
+    return out
+
+
+def assemble_force_3d_rows(
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi1,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi2,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] dphi3,
+    cnp.ndarray[cnp.float64_t, ndim=2, mode="c"] stress,
+    cnp.ndarray[cnp.float64_t, ndim=1, mode="c"] weight,
+    cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] row_slot_ptr,
+    cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] slot_elem,
+    cnp.ndarray[cnp.uint8_t, ndim=1, mode="c"] slot_lrow,
+    int n_q,
+):
+    cdef int n_int = <int>dphi1.shape[0]
+    cdef int n_p = <int>dphi1.shape[1]
+    cdef int n_rows = <int>(row_slot_ptr.shape[0] - 1)
+    cdef int n_slots = <int>slot_elem.shape[0]
+    cdef cnp.ndarray[cnp.float64_t, ndim=1, mode="c"] out
+
+    if dphi2.shape[0] != n_int or dphi2.shape[1] != n_p or dphi3.shape[0] != n_int or dphi3.shape[1] != n_p:
+        raise ValueError("dphi arrays must have matching shapes")
+    if stress.shape[0] != n_int or stress.shape[1] != 6:
+        raise ValueError("stress must have shape (n_int, 6)")
+    if weight.shape[0] != n_int:
+        raise ValueError("weight length must match n_int")
+    if row_slot_ptr.shape[0] == 0:
+        raise ValueError("row_slot_ptr must have at least one entry")
+    if slot_lrow.shape[0] != n_slots:
+        raise ValueError("slot_lrow length must match slot count")
+    out = np.zeros(n_rows, dtype=np.float64)
+    if n_slots == 0:
+        return out
+    assemble_force_3d_rows_c(
+        &dphi1[0, 0],
+        &dphi2[0, 0],
+        &dphi3[0, 0],
+        &stress[0, 0],
+        &weight[0],
+        &row_slot_ptr[0],
+        &slot_elem[0],
+        &slot_lrow[0],
+        n_int,
+        n_rows,
+        n_slots,
+        n_p,
+        n_q,
         &out[0],
     )
     return out

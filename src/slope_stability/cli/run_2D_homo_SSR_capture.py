@@ -194,6 +194,7 @@ def run_capture(
     pc_hypre_strong_threshold: float | None = None,
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
+    tangent_kernel: str = "rows",
 ) -> dict:
     rank = int(PETSc.COMM_WORLD.getRank())
     out_dir = _ensure_dir(output_dir) if rank == 0 else output_dir
@@ -242,6 +243,7 @@ def run_capture(
     use_lightweight_mpi_path = bool(mpi_distribute_by_nodes and str(constitutive_mode).lower() != "global")
     B = None
     weight = np.zeros(n_int, dtype=np.float64)
+    elastic_rows = None
 
     if use_lightweight_mpi_path:
         elastic_rows = assemble_owned_elastic_rows_for_comm(
@@ -297,10 +299,13 @@ def run_capture(
             (row0 // coord.shape[0], row1 // coord.shape[0]),
             elem_type=elem_type,
             include_unique=(str(constitutive_mode).lower() != "overlap"),
+            include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
+            elastic_rows=elastic_rows if use_lightweight_mpi_path else None,
         )
         const_builder.set_owned_tangent_pattern(
             tangent_pattern,
             use_compiled=False,
+            tangent_kernel=tangent_kernel,
             constitutive_mode=constitutive_mode,
             use_compiled_constitutive=False,
         )
@@ -367,6 +372,7 @@ def run_capture(
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": str(constitutive_mode),
+        "tangent_kernel": str(tangent_kernel),
         "pc_hypre_coarsen_type": pc_hypre_coarsen_type,
         "pc_hypre_interp_type": pc_hypre_interp_type,
         "pc_hypre_strong_threshold": pc_hypre_strong_threshold,
@@ -591,7 +597,8 @@ def main() -> None:
     parser.add_argument("--pc_hypre_interp_type", type=str, default="ext+i")
     parser.add_argument("--pc_hypre_strong_threshold", type=float, default=None)
     parser.add_argument("--recycle_preconditioner", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--constitutive_mode", type=str, default="overlap", choices=["global", "overlap", "unique_gather"])
+    parser.add_argument("--constitutive_mode", type=str, default="overlap", choices=["global", "overlap", "unique_gather", "unique_exchange"])
+    parser.add_argument("--tangent_kernel", type=str, default="rows", choices=["legacy", "rows"])
     args = parser.parse_args()
 
     if args.out_dir is None:
@@ -632,6 +639,7 @@ def main() -> None:
         pc_hypre_strong_threshold=args.pc_hypre_strong_threshold,
         recycle_preconditioner=args.recycle_preconditioner,
         constitutive_mode=args.constitutive_mode,
+        tangent_kernel=args.tangent_kernel,
     )
     if PETSc.COMM_WORLD.getRank() == 0:
         print(json.dumps(result, indent=2))

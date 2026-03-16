@@ -25,7 +25,7 @@ class Assembly:
     n_elem: int
     elem: np.ndarray
     weight: np.ndarray
-    B: csr_matrix
+    B: csr_matrix | None
     dphi: dict[str, np.ndarray]
 
 
@@ -33,8 +33,14 @@ def assemble_strain_operator(coord: np.ndarray, elem: np.ndarray, elem_type: str
     if dim == 2:
         return _assemble_2d(coord, elem, elem_type)
     if dim == 3:
-        return _assemble_3d(coord, elem, elem_type)
+        return _assemble_3d(coord, elem, elem_type, build_matrix=True)
     raise ValueError("dim must be 2 or 3")
+
+
+def assemble_strain_geometry(coord: np.ndarray, elem: np.ndarray, elem_type: str, dim: int) -> Assembly:
+    if dim == 3:
+        return _assemble_3d(coord, elem, elem_type, build_matrix=False)
+    return assemble_strain_operator(coord, elem, elem_type, dim)
 
 
 def _point_ids(n_nodes_per_elem: int, n_elem: int, n_q: int) -> np.ndarray:
@@ -130,7 +136,7 @@ def _assemble_2d(coord: np.ndarray, elem: np.ndarray, elem_type: str) -> Assembl
     )
 
 
-def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str) -> Assembly:
+def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str, *, build_matrix: bool) -> Assembly:
     coord = _as_float(coord)
     elem = np.asarray(elem, dtype=np.int64)
 
@@ -193,33 +199,35 @@ def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str) -> Assembl
 
     n_strain = 6
 
-    n_b = 18 * n_p
-    vB = np.zeros((n_b, n_int), dtype=np.float64)
-    vB[0:n_b:18, :] = dphi1
-    vB[9:n_b:18, :] = dphi1
-    vB[17:n_b:18, :] = dphi1
-    vB[3:n_b:18, :] = dphi2
-    vB[7:n_b:18, :] = dphi2
-    vB[16:n_b:18, :] = dphi2
-    vB[5:n_b:18, :] = dphi3
-    vB[10:n_b:18, :] = dphi3
-    vB[14:n_b:18, :] = dphi3
+    B = None
+    if build_matrix:
+        n_b = 18 * n_p
+        vB = np.zeros((n_b, n_int), dtype=np.float64)
+        vB[0:n_b:18, :] = dphi1
+        vB[9:n_b:18, :] = dphi1
+        vB[17:n_b:18, :] = dphi1
+        vB[3:n_b:18, :] = dphi2
+        vB[7:n_b:18, :] = dphi2
+        vB[16:n_b:18, :] = dphi2
+        vB[5:n_b:18, :] = dphi3
+        vB[10:n_b:18, :] = dphi3
+        vB[14:n_b:18, :] = dphi3
 
-    aux = np.arange(1, 6 * n_int + 1, dtype=np.int64).reshape(6, n_int, order="F")
-    iB = np.tile(aux, (3 * n_p, 1))
+        aux = np.arange(1, 6 * n_int + 1, dtype=np.int64).reshape(6, n_int, order="F")
+        iB = np.tile(aux, (3 * n_p, 1))
 
-    aux1 = np.tile(np.arange(1, n_p + 1, dtype=np.int64), (3, 1))
-    aux2 = np.tile(np.array([[2], [1], [0]], dtype=np.int64), (1, n_p))
-    elem_sel = elem[aux1.reshape(-1, order="F") - 1, :]
-    offsets = np.kron(np.ones((1, n_elem), dtype=np.int64), (2 - aux2).reshape(-1, order="F")[:, None])
-    aux3 = 3 * elem_sel + offsets
-    jB = np.kron(aux3, np.ones((6, n_q), dtype=np.int64))
+        aux1 = np.tile(np.arange(1, n_p + 1, dtype=np.int64), (3, 1))
+        aux2 = np.tile(np.array([[2], [1], [0]], dtype=np.int64), (1, n_p))
+        elem_sel = elem[aux1.reshape(-1, order="F") - 1, :]
+        offsets = np.kron(np.ones((1, n_elem), dtype=np.int64), (2 - aux2).reshape(-1, order="F")[:, None])
+        aux3 = 3 * elem_sel + offsets
+        jB = np.kron(aux3, np.ones((6, n_q), dtype=np.int64))
 
-    B = coo_matrix(
-        (vB.reshape(-1, order="F"), (iB.reshape(-1, order="F") - 1, jB.reshape(-1, order="F"))),
-        shape=(6 * n_int, 3 * n_nodes),
-    ).tocsr()
-    B.eliminate_zeros()
+        B = coo_matrix(
+            (vB.reshape(-1, order="F"), (iB.reshape(-1, order="F") - 1, jB.reshape(-1, order="F"))),
+            shape=(6 * n_int, 3 * n_nodes),
+        ).tocsr()
+        B.eliminate_zeros()
 
     weight = np.tile(np.asarray(wf, dtype=np.float64), n_elem) * np.abs(det_j)
 

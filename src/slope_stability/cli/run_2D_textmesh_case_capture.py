@@ -148,6 +148,7 @@ def run_capture(
     pc_hypre_strong_threshold: float | None = None,
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
+    tangent_kernel: str = "rows",
     seepage_linear_tolerance: float = 1e-10,
     seepage_linear_max_iter: int = 500,
     seepage_water_unit_weight: float = 9.81,
@@ -300,10 +301,13 @@ def run_capture(
         (row0 // coord.shape[0], row1 // coord.shape[0]),
         elem_type=elem_type,
         include_unique=(str(constitutive_mode).lower() != "overlap"),
+        include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
+        elastic_rows=elastic_rows,
     )
     const_builder.set_owned_tangent_pattern(
         tangent_pattern,
         use_compiled=True,
+        tangent_kernel=tangent_kernel,
         constitutive_mode=constitutive_mode,
         use_compiled_constitutive=True,
     )
@@ -363,6 +367,7 @@ def run_capture(
         "pc_hypre_strong_threshold": pc_hypre_strong_threshold,
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": constitutive_mode,
+        "tangent_kernel": str(tangent_kernel),
         "mesh_dir": str(mesh_dir),
     }
 

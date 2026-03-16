@@ -19,6 +19,41 @@ DEFAULT_OUT_ROOT = ROOT / "artifacts" / "p2_p4_compare_rank8_final"
 DEFAULT_REPORT = Path(__file__).resolve().parent / "report_p2_vs_p4_rank8_final.md"
 
 
+def _load_memory_guard_summary(path: Path | None) -> dict[str, float | int | bool | str] | None:
+    if path is None or not path.exists():
+        return None
+    path = path.resolve()
+
+    peak_rss_gib = 0.0
+    min_available_gib = np.inf
+    sample_count = 0
+    guard_triggered = False
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        event = json.loads(line)
+        sample_count += 1
+        if str(event.get("event", "")) == "guard_triggered":
+            guard_triggered = True
+        if "rss_gib" in event:
+            peak_rss_gib = max(peak_rss_gib, float(event["rss_gib"]))
+        if "mem_available_gib" in event:
+            min_available_gib = min(min_available_gib, float(event["mem_available_gib"]))
+
+    if not np.isfinite(min_available_gib):
+        min_available_gib = 0.0
+
+    return {
+        "path": str(path.relative_to(ROOT)),
+        "peak_rss_gib": float(peak_rss_gib),
+        "min_available_gib": float(min_available_gib),
+        "sample_count": int(sample_count),
+        "guard_triggered": bool(guard_triggered),
+    }
+
+
 def _load_progress_summary(out_dir: Path) -> dict[str, int]:
     progress_path = out_dir / "data" / "progress.jsonl"
     init_accepted_states = 0
@@ -65,6 +100,8 @@ def _run_order(
     out_dir: Path,
     max_deflation_basis_vectors: int,
     store_step_u: bool,
+    tangent_kernel: str,
+    constitutive_mode: str,
 ) -> dict[str, object]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
@@ -79,6 +116,10 @@ def _run_order(
         str(mesh_path),
         "--elem_type",
         str(order).upper(),
+        "--tangent_kernel",
+        str(tangent_kernel),
+        "--constitutive_mode",
+        str(constitutive_mode),
         "--step_max",
         str(int(step_max)),
         "--max_deflation_basis_vectors",
@@ -120,6 +161,8 @@ def _load_metrics(out_dir: Path) -> dict[str, object]:
     timings = run_info["timings"]
     linear = timings["linear"]
     constitutive = timings["constitutive"]
+    owned_pattern = run_info.get("owned_tangent_pattern", {})
+    owned_stats_max = owned_pattern.get("stats_max", {})
     final_accepted_states = int(progress["final_accepted_states"] or info["step_count"])
     init_accepted_states = int(progress["init_accepted_states"])
     return {
@@ -169,6 +212,7 @@ def _load_metrics(out_dir: Path) -> dict[str, object]:
         "local_strain": float(constitutive["local_strain"]),
         "local_constitutive": float(constitutive["local_constitutive"]),
         "continuation_wall_time": float(timings["continuation_total_wall_time"]),
+        "owned_tangent_pattern_stats_max": dict(owned_stats_max),
     }
 
 
@@ -290,7 +334,18 @@ def _plot_timing_breakdown(plot_dir: Path, *, p2: dict[str, object], p4: dict[st
     return path
 
 
-def _write_summary_json(out_root: Path, *, mesh_path: Path, mpi_ranks: int, step_max: int, p2: dict[str, object], p4: dict[str, object]) -> Path:
+def _write_summary_json(
+    out_root: Path,
+    *,
+    mesh_path: Path,
+    mpi_ranks: int,
+    step_max: int,
+    p2: dict[str, object],
+    p4: dict[str, object],
+    p4_memory_guard: dict[str, float | int | bool | str] | None,
+) -> Path:
+    out_root = out_root.resolve()
+    mesh_path = mesh_path.resolve()
     path = out_root / "summary.json"
 
     def _to_serializable(value):
@@ -310,6 +365,7 @@ def _write_summary_json(out_root: Path, *, mesh_path: Path, mpi_ranks: int, step
         "step_max": int(step_max),
         "P2": _to_serializable(p2),
         "P4": _to_serializable(p4),
+        "P4_memory_guard": _to_serializable(p4_memory_guard),
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
@@ -325,9 +381,14 @@ def _write_report(
     plot_paths: dict[str, Path],
     p2: dict[str, object],
     p4: dict[str, object],
+    p4_memory_guard: dict[str, float | int | bool | str] | None,
 ) -> None:
+    report_path = report_path.resolve()
+    out_root = out_root.resolve()
+    mesh_path = mesh_path.resolve()
+
     def rel(path: Path) -> str:
-        return os.path.relpath(path, start=report_path.parent)
+        return os.path.relpath(path.resolve(), start=report_path.parent)
 
     lines = [
         "# 3D Hetero SSR: P2 vs P4 Final-State Comparison",
@@ -337,6 +398,8 @@ def _write_report(
         f"- `step_max`: `{int(step_max)}`",
         "- Runner: `slope_stability.cli.run_3D_hetero_SSR_capture`",
         f"- Raw artifacts: `{out_root.relative_to(ROOT)}`",
+        f"- Tangent kernel: `{p2.get('tangent_kernel', 'unknown')}`",
+        f"- Constitutive mode: `{p2.get('constitutive_mode', 'unknown')}`",
         "",
         "## Headline Metrics",
         "",
@@ -378,6 +441,42 @@ def _write_report(
         f"| Local strain | {p2['local_strain']:.3f} | {p4['local_strain']:.3f} | {_format_ratio(p4['local_strain'], p2['local_strain'])} |",
         f"| Local constitutive | {p2['local_constitutive']:.3f} | {p4['local_constitutive']:.3f} | {_format_ratio(p4['local_constitutive'], p2['local_constitutive'])} |",
         "",
+        "## Owned Pattern Bytes",
+        "",
+        "| Metric | P2 | P4 | P4 / P2 |",
+        "| --- | ---: | ---: | ---: |",
+        f"| `scatter_bytes` | {float(p2['owned_tangent_pattern_stats_max'].get('scatter_bytes', 0.0)):.0f} | {float(p4['owned_tangent_pattern_stats_max'].get('scatter_bytes', 0.0)):.0f} | {_format_ratio(float(p4['owned_tangent_pattern_stats_max'].get('scatter_bytes', 0.0)), float(p2['owned_tangent_pattern_stats_max'].get('scatter_bytes', 0.0)))} |",
+        f"| `row_slot_bytes` | {float(p2['owned_tangent_pattern_stats_max'].get('row_slot_bytes', 0.0)):.0f} | {float(p4['owned_tangent_pattern_stats_max'].get('row_slot_bytes', 0.0)):.0f} | {_format_ratio(float(p4['owned_tangent_pattern_stats_max'].get('row_slot_bytes', 0.0)), float(p2['owned_tangent_pattern_stats_max'].get('row_slot_bytes', 0.0)))} |",
+        f"| `overlap_B_bytes` | {float(p2['owned_tangent_pattern_stats_max'].get('overlap_B_bytes', 0.0)):.0f} | {float(p4['owned_tangent_pattern_stats_max'].get('overlap_B_bytes', 0.0)):.0f} | {_format_ratio(float(p4['owned_tangent_pattern_stats_max'].get('overlap_B_bytes', 0.0)), float(p2['owned_tangent_pattern_stats_max'].get('overlap_B_bytes', 0.0)))} |",
+        f"| `unique_B_bytes` | {float(p2['owned_tangent_pattern_stats_max'].get('unique_B_bytes', 0.0)):.0f} | {float(p4['owned_tangent_pattern_stats_max'].get('unique_B_bytes', 0.0)):.0f} | {_format_ratio(float(p4['owned_tangent_pattern_stats_max'].get('unique_B_bytes', 0.0)), float(p2['owned_tangent_pattern_stats_max'].get('unique_B_bytes', 0.0)))} |",
+        f"| `dphi_bytes` | {float(p2['owned_tangent_pattern_stats_max'].get('dphi_bytes', 0.0)):.0f} | {float(p4['owned_tangent_pattern_stats_max'].get('dphi_bytes', 0.0)):.0f} | {_format_ratio(float(p4['owned_tangent_pattern_stats_max'].get('dphi_bytes', 0.0)), float(p2['owned_tangent_pattern_stats_max'].get('dphi_bytes', 0.0)))} |",
+        "",
+        "## Memory Guard",
+        "",
+    ]
+    if p4_memory_guard is None:
+        lines.extend(
+            [
+                "- No `P4` memory guard log was provided for this report.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "| Metric | P4 guarded run |",
+                "| --- | ---: |",
+                f"| Peak RSS [GiB] | {float(p4_memory_guard['peak_rss_gib']):.3f} |",
+                f"| Minimum MemAvailable [GiB] | {float(p4_memory_guard['min_available_gib']):.3f} |",
+                f"| Samples | {int(p4_memory_guard['sample_count'])} |",
+                f"| Guard triggered | {'yes' if bool(p4_memory_guard['guard_triggered']) else 'no'} |",
+                f"| Guard log | `{p4_memory_guard['path']}` |",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
         "## Plots",
         "",
         f"![Continuation curves]({rel(plot_paths['continuation'])})",
@@ -391,7 +490,8 @@ def _write_report(
         "- This comparison uses the same tet4 `.msh` source mesh and elevates it in-memory to `tet10`/`tri6` for `P2` and `tet35`/`tri15` for `P4` after loading.",
         "- The current VTU/export path linearizes higher-order simplex cells for visualization. Solver-side assembly still uses the full elevated connectivity.",
         "- On this mesh, both orders terminated naturally after the same continuation reach. The large difference is computational cost, not a different final branch point.",
-    ]
+        ]
+    )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -404,7 +504,10 @@ def main() -> None:
     parser.add_argument("--store-step-u", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT)
     parser.add_argument("--report-path", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--p4-memory-log", type=Path, default=None)
     parser.add_argument("--reuse-existing", action="store_true", default=False)
+    parser.add_argument("--tangent-kernel", type=str, default="rows")
+    parser.add_argument("--constitutive-mode", type=str, default="overlap")
     args = parser.parse_args()
 
     out_root = Path(args.out_root)
@@ -424,7 +527,11 @@ def main() -> None:
             out_dir=p2_dir,
             max_deflation_basis_vectors=args.max_deflation_basis_vectors,
             store_step_u=args.store_step_u,
+            tangent_kernel=args.tangent_kernel,
+            constitutive_mode=args.constitutive_mode,
         )
+    p2["tangent_kernel"] = str(args.tangent_kernel)
+    p2["constitutive_mode"] = str(args.constitutive_mode)
 
     if args.reuse_existing and (p4_dir / "data" / "run_info.json").exists():
         p4 = _load_metrics(p4_dir)
@@ -437,7 +544,11 @@ def main() -> None:
             out_dir=p4_dir,
             max_deflation_basis_vectors=args.max_deflation_basis_vectors,
             store_step_u=args.store_step_u,
+            tangent_kernel=args.tangent_kernel,
+            constitutive_mode=args.constitutive_mode,
         )
+    p4["tangent_kernel"] = str(args.tangent_kernel)
+    p4["constitutive_mode"] = str(args.constitutive_mode)
 
     plot_dir = out_root / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +557,16 @@ def main() -> None:
         "iterations": _plot_iterations(plot_dir, p2=p2, p4=p4),
         "timing": _plot_timing_breakdown(plot_dir, p2=p2, p4=p4),
     }
-    _write_summary_json(out_root, mesh_path=Path(args.mesh_path), mpi_ranks=int(args.mpi_ranks), step_max=int(args.step_max), p2=p2, p4=p4)
+    p4_memory_guard = _load_memory_guard_summary(Path(args.p4_memory_log)) if args.p4_memory_log is not None else None
+    _write_summary_json(
+        out_root,
+        mesh_path=Path(args.mesh_path),
+        mpi_ranks=int(args.mpi_ranks),
+        step_max=int(args.step_max),
+        p2=p2,
+        p4=p4,
+        p4_memory_guard=p4_memory_guard,
+    )
     _write_report(
         Path(args.report_path),
         mesh_path=Path(args.mesh_path),
@@ -456,6 +576,7 @@ def main() -> None:
         plot_paths=plot_paths,
         p2=p2,
         p4=p4,
+        p4_memory_guard=p4_memory_guard,
     )
 
 

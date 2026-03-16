@@ -97,6 +97,12 @@ def _destroy_petsc_mat(A) -> None:
         A.destroy()
 
 
+def _cleanup_pre_solve_iteration_mats(*, K_tangent, K_r, use_full_operator: bool) -> None:
+    _destroy_petsc_mat(K_tangent)
+    if not bool(use_full_operator):
+        _destroy_petsc_mat(K_r)
+
+
 def _local_owned_rows_from_field(field: np.ndarray, pattern) -> np.ndarray:
     row0, row1 = pattern.owned_row_range
     flat = np.asarray(field, dtype=np.float64).reshape(-1, order="F")
@@ -235,6 +241,7 @@ def newton(
             else:
                 criterion = float(np.linalg.norm(F_free - f_free)) / norm_f
             if criterion < tol:
+                _cleanup_pre_solve_iteration_mats(K_tangent=K_tangent, K_r=K_r, use_full_operator=use_full_operator)
                 break
         else:
             if use_local_build:
@@ -425,6 +432,7 @@ def newton_ind_ssr(
             rel_resid = criterion / norm_f
             residual_hist[it - 1] = rel_resid
             if rel_resid < tol and it > 1:
+                _cleanup_pre_solve_iteration_mats(K_tangent=K_tangent, K_r=K_r, use_full_operator=use_full_operator)
                 break
         else:
             if use_local_build:
@@ -671,6 +679,7 @@ def newton_ind_ll(
             rel_resid = criterion / norm_f
             residual_hist[it - 1] = rel_resid
             if rel_resid < tol and it > 1:
+                _cleanup_pre_solve_iteration_mats(K_tangent=K_tangent, K_r=K_r, use_full_operator=use_full_operator)
                 break
         else:
             if use_local_build:

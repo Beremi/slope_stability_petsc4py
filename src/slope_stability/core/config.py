@@ -49,6 +49,7 @@ class ExecutionConfig:
     node_ordering: str = "block_metis"
     mpi_distribute_by_nodes: bool = True
     constitutive_mode: str = "overlap"
+    tangent_kernel: str = "rows"
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,7 @@ class Run3DSSRConfig:
             "compiled_outer": self.linear_solver.compiled_outer,
             "recycle_preconditioner": self.linear_solver.recycle_preconditioner,
             "constitutive_mode": self.execution.constitutive_mode,
+            "tangent_kernel": self.execution.tangent_kernel,
             "elem_type": self.problem.elem_type,
             "davis_type": self.problem.davis_type,
             "material_rows": self.material_rows(),
@@ -206,6 +208,7 @@ def load_run_3d_ssr_config(path: str | Path) -> Run3DSSRConfig:
         node_ordering=str(execution_data.get("node_ordering", "block_metis")),
         mpi_distribute_by_nodes=bool(execution_data.get("mpi_distribute_by_nodes", True)),
         constitutive_mode=str(execution_data.get("constitutive_mode", "overlap")),
+        tangent_kernel=str(execution_data.get("tangent_kernel", "rows")),
     )
 
     continuation = ContinuationConfig(

@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
-from petsc4py import PETSc
+try:  # pragma: no cover - PETSc is optional in some test/benchmark environments
+    from petsc4py import PETSc
+except Exception:  # pragma: no cover
+    PETSc = None
 
 _PETSC_MAT_CSR_REFS: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
@@ -46,14 +49,22 @@ def unflatten_field(vec: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
 def to_numpy_vector(x) -> np.ndarray:
     """Convert a PETSc vector or array-like to ``np.ndarray``."""
 
-    if isinstance(x, PETSc.Vec):
+    if PETSc is not None and isinstance(x, PETSc.Vec):
         return x.getArray(readonly=False).copy()
     return np.asarray(x, dtype=np.float64)
 
 
-def to_petsc_vector(vec: np.ndarray, comm: PETSc.Comm = PETSc.COMM_WORLD) -> PETSc.Vec:
+def _require_petsc() -> None:
+    if PETSc is None:
+        raise RuntimeError("petsc4py is required for this operation")
+
+
+def to_petsc_vector(vec: np.ndarray, comm=None):
     """Create a PETSc vector from ``np.ndarray`` without extra casts."""
 
+    _require_petsc()
+    if comm is None:
+        comm = PETSc.COMM_WORLD
     arr = np.asarray(vec, dtype=np.float64).ravel()
     v = PETSc.Vec().create(comm=comm)
     v.setSizes(len(arr))
@@ -61,7 +72,7 @@ def to_petsc_vector(vec: np.ndarray, comm: PETSc.Comm = PETSc.COMM_WORLD) -> PET
     return v
 
 
-def owned_block_range(n_blocks: int, block_size: int, comm: PETSc.Comm) -> tuple[int, int]:
+def owned_block_range(n_blocks: int, block_size: int, comm) -> tuple[int, int]:
     """Return a contiguous row-ownership range aligned to node blocks."""
 
     size = int(comm.getSize())
@@ -74,12 +85,13 @@ def owned_block_range(n_blocks: int, block_size: int, comm: PETSc.Comm) -> tuple
 def global_array_to_petsc_vec(
     vec: np.ndarray,
     *,
-    comm: PETSc.Comm,
+    comm,
     ownership_range: tuple[int, int] | None = None,
     bsize: int | None = None,
-) -> PETSc.Vec:
+):
     """Create a PETSc vector from a global dense array using local ownership."""
 
+    _require_petsc()
     arr = np.asarray(vec, dtype=np.float64).reshape(-1)
     if ownership_range is None or int(comm.getSize()) == 1:
         return PETSc.Vec().createWithArray(arr.copy(), size=arr.size, bsize=bsize, comm=comm)
@@ -93,18 +105,20 @@ def local_array_to_petsc_vec(
     local: np.ndarray,
     *,
     global_size: int,
-    comm: PETSc.Comm,
+    comm,
     bsize: int | None = None,
-) -> PETSc.Vec:
+):
     """Create a distributed PETSc vector from already-owned local entries."""
 
+    _require_petsc()
     arr = np.asarray(local, dtype=np.float64).reshape(-1)
     return PETSc.Vec().createWithArray(arr.copy(), size=(arr.size, global_size), bsize=bsize, comm=comm)
 
 
-def petsc_vec_to_global_array(vec: PETSc.Vec) -> np.ndarray:
+def petsc_vec_to_global_array(vec) -> np.ndarray:
     """Collect a distributed PETSc vector onto all ranks as a dense array."""
 
+    _require_petsc()
     local = vec.getArray(readonly=False).copy()
     comm = vec.getComm()
     if int(comm.getSize()) == 1:
@@ -115,18 +129,19 @@ def petsc_vec_to_global_array(vec: PETSc.Vec) -> np.ndarray:
 
 def to_petsc_aij_matrix(
     A,
-    comm: PETSc.Comm | None = None,
+    comm=None,
     *,
     block_size: int | None = None,
     ownership_range: tuple[int, int] | None = None,
-) -> PETSc.Mat:
+):
     """Convert a dense/scipy matrix into a PETSc AIJ matrix."""
 
-    if isinstance(A, PETSc.Mat):
+    if PETSc is not None and isinstance(A, PETSc.Mat):
         return A
 
     import scipy.sparse as sp
 
+    _require_petsc()
     if comm is None:
         comm = PETSc.COMM_SELF
 
@@ -172,13 +187,14 @@ def local_csr_to_petsc_aij_matrix(
     A_local,
     *,
     global_shape: tuple[int, int],
-    comm: PETSc.Comm,
+    comm,
     block_size: int | None = None,
-) -> PETSc.Mat:
+):
     """Create a distributed PETSc AIJ matrix from already-owned CSR rows."""
 
     import scipy.sparse as sp
 
+    _require_petsc()
     csr = A_local.tocsr() if sp.issparse(A_local) else sp.csr_matrix(np.asarray(A_local, dtype=np.float64))
     indptr = np.array(csr.indptr, dtype=PETSc.IntType, copy=True)
     indices = np.array(csr.indices, dtype=PETSc.IntType, copy=True)
@@ -196,14 +212,15 @@ def local_csr_to_petsc_aij_matrix(
 
 
 def update_petsc_aij_matrix_csr(
-    A: PETSc.Mat,
+    A,
     *,
     indptr: np.ndarray,
     indices: np.ndarray,
     data: np.ndarray,
-) -> PETSc.Mat:
+):
     """Overwrite values of an existing AIJ matrix on the same CSR pattern."""
 
+    _require_petsc()
     if not isinstance(A, PETSc.Mat):
         raise TypeError("A must be a PETSc Mat")
     A.setValuesCSR(
@@ -218,7 +235,7 @@ def update_petsc_aij_matrix_csr(
 def release_petsc_aij_matrix(A) -> None:
     """Release cached CSR buffers associated with a PETSc matrix."""
 
-    if isinstance(A, PETSc.Mat):
+    if PETSc is not None and isinstance(A, PETSc.Mat):
         _PETSC_MAT_CSR_REFS.pop(int(A.handle), None)
 
 
@@ -228,7 +245,7 @@ def matvec_to_numpy(A, x: np.ndarray) -> np.ndarray:
     Supports dense/sparse/scipy and PETSc matrices.
     """
 
-    if isinstance(A, PETSc.Mat):
+    if PETSc is not None and isinstance(A, PETSc.Mat):
         xv = global_array_to_petsc_vec(
             x,
             comm=A.getComm(),
@@ -244,7 +261,7 @@ def matvec_to_numpy(A, x: np.ndarray) -> np.ndarray:
 def extract_submatrix_free(A, free_idx: np.ndarray):
     """Extract the free-free block used for constrained systems."""
 
-    if isinstance(A, PETSc.Mat):
+    if PETSc is not None and isinstance(A, PETSc.Mat):
         iset = PETSc.IS().createGeneral(free_idx.astype(PETSc.IntType), comm=A.getComm())
         return A.createSubMatrix(iset, iset)
     return A[np.ix_(free_idx, free_idx)]
@@ -255,7 +272,7 @@ def to_scipy_csr_from_petsc(A):
 
     import scipy.sparse as sp
 
-    if isinstance(A, PETSc.Mat):
+    if PETSc is not None and isinstance(A, PETSc.Mat):
         rows, cols, vals = A.getValuesCSR()
         return sp.csr_matrix((vals, cols, rows), shape=A.size)
     return A.tocsr()

@@ -77,6 +77,7 @@ def run_capture(
     pc_hypre_strong_threshold: float | None = None,
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
+    tangent_kernel: str = "rows",
     seepage_linear_tolerance: float = 1e-10,
     seepage_linear_max_iter: int = 500,
 ) -> dict:
@@ -224,14 +225,18 @@ def run_capture(
         elem,
         q_mask,
         material_identifier,
-            materials,
-            (row0 // coord.shape[0], row1 // coord.shape[0]),
-            elem_type=elem_type,
-            include_unique=(str(constitutive_mode).lower() != "overlap"),
-        )
+        materials,
+        (row0 // coord.shape[0], row1 // coord.shape[0]),
+        elem_type=elem_type,
+        include_unique=(str(constitutive_mode).lower() != "overlap"),
+        include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
+        include_overlap_B=(str(tangent_kernel).lower() == "legacy"),
+        elastic_rows=elastic_rows,
+    )
     const_builder.set_owned_tangent_pattern(
         tangent_pattern,
         use_compiled=True,
+        tangent_kernel=tangent_kernel,
         constitutive_mode=constitutive_mode,
         use_compiled_constitutive=True,
     )
@@ -282,6 +287,7 @@ def run_capture(
         "pc_hypre_strong_threshold": pc_hypre_strong_threshold,
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": constitutive_mode,
+        "tangent_kernel": str(tangent_kernel),
         "mesh_file": str(mesh_path),
         "seepage_linear_tolerance": float(seepage_linear_tolerance),
         "seepage_linear_max_iter": int(seepage_linear_max_iter),
@@ -415,7 +421,8 @@ def main() -> None:
     parser.add_argument("--pc_hypre_interp_type", type=str, default="ext+i")
     parser.add_argument("--pc_hypre_strong_threshold", type=float, default=None)
     parser.add_argument("--recycle_preconditioner", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--constitutive_mode", type=str, default="overlap", choices=["global", "overlap", "unique_gather"])
+    parser.add_argument("--constitutive_mode", type=str, default="overlap", choices=["global", "overlap", "unique_gather", "unique_exchange"])
+    parser.add_argument("--tangent_kernel", type=str, default="rows", choices=["legacy", "rows"])
     parser.add_argument("--seepage_linear_tolerance", type=float, default=1e-10)
     parser.add_argument("--seepage_linear_max_iter", type=int, default=500)
     args = parser.parse_args()
@@ -444,6 +451,7 @@ def main() -> None:
         pc_hypre_strong_threshold=args.pc_hypre_strong_threshold,
         recycle_preconditioner=args.recycle_preconditioner,
         constitutive_mode=args.constitutive_mode,
+        tangent_kernel=args.tangent_kernel,
         seepage_linear_tolerance=args.seepage_linear_tolerance,
         seepage_linear_max_iter=args.seepage_linear_max_iter,
     )

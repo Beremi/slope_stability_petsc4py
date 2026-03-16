@@ -29,7 +29,10 @@ from .core.run_config import (
     load_run_case_config,
 )
 from .export import write_debug_bundle_h5, write_history_json, write_vtu
-from .mpi.context import MPIContext
+try:  # pragma: no cover - PETSc is optional in some unit-test environments
+    from .mpi.context import MPIContext
+except Exception:  # pragma: no cover
+    MPIContext = None
 
 __all__ = [
     "__version__",
@@ -49,5 +52,7 @@ __all__ = [
     "write_debug_bundle_h5",
     "write_history_json",
     "write_vtu",
-    "MPIContext",
 ]
+
+if MPIContext is not None:
+    __all__.append("MPIContext")

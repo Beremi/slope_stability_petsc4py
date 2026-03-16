@@ -309,6 +309,7 @@ def run_capture(
     compiled_outer: bool = False,
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
+    tangent_kernel: str = "rows",
     max_deflation_basis_vectors: int = 48,
     store_step_u: bool = True,
 ) -> dict:
@@ -383,6 +384,8 @@ def run_capture(
 
     B = None
     weight = np.zeros(n_int, dtype=np.float64)
+    elastic_rows = None
+    tangent_pattern = None
 
     if use_lightweight_mpi_path:
         elastic_rows = assemble_owned_elastic_rows_for_comm(
@@ -444,10 +447,14 @@ def run_capture(
             (row0 // coord.shape[0], row1 // coord.shape[0]),
             elem_type=elem_type,
             include_unique=(str(constitutive_mode).lower() != "overlap"),
+            include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
+            include_overlap_B=(str(tangent_kernel).lower() == "legacy"),
+            elastic_rows=elastic_rows if use_lightweight_mpi_path else None,
         )
         const_builder.set_owned_tangent_pattern(
             tangent_pattern,
             use_compiled=True,
+            tangent_kernel=tangent_kernel,
             constitutive_mode=constitutive_mode,
             use_compiled_constitutive=True,
         )
@@ -540,6 +547,7 @@ def run_capture(
         "compiled_outer": bool(compiled_outer),
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": constitutive_mode,
+        "tangent_kernel": str(tangent_kernel),
     }
 
     t0 = perf_counter()
@@ -640,6 +648,22 @@ def run_capture(
 
     const_times = const_builder.get_total_time()
     const_times_max = {key: float(mpi_comm.allreduce(float(val), op=MPI.MAX)) for key, val in const_times.items()}
+    tangent_pattern_stats_max = None
+    tangent_pattern_stats_sum = None
+    tangent_pattern_timings_max = None
+    if tangent_pattern is not None:
+        tangent_pattern_stats_max = {
+            key: float(mpi_comm.allreduce(float(val), op=MPI.MAX))
+            for key, val in tangent_pattern.stats.items()
+        }
+        tangent_pattern_stats_sum = {
+            key: float(mpi_comm.allreduce(float(val), op=MPI.SUM))
+            for key, val in tangent_pattern.stats.items()
+        }
+        tangent_pattern_timings_max = {
+            key: float(mpi_comm.allreduce(float(val), op=MPI.MAX))
+            for key, val in tangent_pattern.timings.items()
+        }
     linear_summary = {
         "init_linear_iterations": int(stats.get("init_linear_iterations", init_linear["init_linear_iterations"])),
         "init_linear_solve_time": float(stats.get("init_linear_solve_time", init_linear["init_linear_solve_time"])),
@@ -678,6 +702,11 @@ def run_capture(
             "linear": linear_summary,
             "continuation_total_wall_time": float(stats.get("total_wall_time", runtime)),
         },
+        "owned_tangent_pattern": {
+            "stats_max": tangent_pattern_stats_max,
+            "stats_sum": tangent_pattern_stats_sum,
+            "timings_max": tangent_pattern_timings_max,
+        } if tangent_pattern is not None else None,
     }
 
     if rank == 0:
@@ -786,8 +815,9 @@ def main() -> None:
         "--constitutive_mode",
         type=str,
         default="overlap",
-        choices=["global", "overlap", "unique_gather"],
+        choices=["global", "overlap", "unique_gather", "unique_exchange"],
     )
+    parser.add_argument("--tangent_kernel", type=str, default="rows", choices=["legacy", "rows"])
     args = parser.parse_args()
 
     if args.out_dir is None:
@@ -828,6 +858,7 @@ def main() -> None:
         compiled_outer=args.compiled_outer,
         recycle_preconditioner=args.recycle_preconditioner,
         constitutive_mode=args.constitutive_mode,
+        tangent_kernel=args.tangent_kernel,
         max_deflation_basis_vectors=args.max_deflation_basis_vectors,
         store_step_u=args.store_step_u,
     )

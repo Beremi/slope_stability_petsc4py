@@ -57,6 +57,7 @@ class ExecutionConfig:
     node_ordering: str = "block_metis"
     mpi_distribute_by_nodes: bool = True
     constitutive_mode: str = "overlap"
+    tangent_kernel: str = "rows"
 
 
 @dataclass(frozen=True)
@@ -226,6 +227,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         node_ordering=str(execution_data.get("node_ordering", "block_metis")),
         mpi_distribute_by_nodes=bool(execution_data.get("mpi_distribute_by_nodes", True)),
         constitutive_mode=str(execution_data.get("constitutive_mode", "overlap")),
+        tangent_kernel=str(execution_data.get("tangent_kernel", "rows")),
     )
     continuation = ContinuationConfig(
         method=str(continuation_data.get("method", "indirect")),

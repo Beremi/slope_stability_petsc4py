@@ -10,7 +10,13 @@ import numpy as np
 from scipy.sparse import block_diag, csc_matrix, csr_matrix, coo_matrix
 
 from .reduction import reduction
-from ..fem.distributed_tangent import OwnedTangentPattern, assemble_owned_tangent_matrix, assemble_owned_tangent_values
+from ..fem.distributed_tangent import (
+    DEFAULT_TANGENT_KERNEL,
+    OwnedTangentPattern,
+    assemble_overlap_strain,
+    assemble_owned_force_from_local_stress,
+    assemble_owned_tangent_values,
+)
 from ..utils import (
     IterationHistory,
     local_csr_to_petsc_aij_matrix,
@@ -24,11 +30,19 @@ try:  # pragma: no cover - PETSc is optional in some tests
     from petsc4py import PETSc
 except Exception:  # pragma: no cover
     PETSc = None
+try:  # pragma: no cover - mpi4py is optional in some tests
+    from mpi4py import MPI as PYMPI
+except Exception:  # pragma: no cover
+    PYMPI = None
 
 try:  # pragma: no cover - compiled extension is optional during tests
     from slope_stability import _kernels
 except Exception:  # pragma: no cover
     _kernels = None
+
+
+_OWNED_UNIQUE_EXCHANGE_S_TAG = 42117
+_OWNED_UNIQUE_EXCHANGE_DS_TAG = 42118
 
 
 
@@ -851,9 +865,13 @@ def _batch_constitutive_problem_local(
 
 def _gather_owned_rows(local_rows: np.ndarray, global_size: int, comm) -> np.ndarray:
     local = np.asarray(local_rows, dtype=np.float64).reshape(-1)
-    if comm is None or int(comm.getSize()) == 1:
+    mpi_comm = comm.tompi4py() if comm is not None and hasattr(comm, "tompi4py") else comm
+    if mpi_comm is None:
         return local
-    parts = comm.tompi4py().allgather(local)
+    size = int(mpi_comm.getSize()) if hasattr(mpi_comm, "getSize") else int(mpi_comm.Get_size())
+    if size == 1:
+        return local
+    parts = mpi_comm.allgather(local)
     if not parts:
         return local
     gathered = np.concatenate(parts)
@@ -864,9 +882,13 @@ def _gather_owned_rows(local_rows: np.ndarray, global_size: int, comm) -> np.nda
 
 def _gather_owned_free_rows(local_rows: np.ndarray, global_size: int, comm) -> np.ndarray:
     local = np.asarray(local_rows, dtype=np.float64).reshape(-1)
-    if comm is None or int(comm.getSize()) == 1:
+    mpi_comm = comm.tompi4py() if comm is not None and hasattr(comm, "tompi4py") else comm
+    if mpi_comm is None:
         return local
-    parts = comm.tompi4py().allgather(local)
+    size = int(mpi_comm.getSize()) if hasattr(mpi_comm, "getSize") else int(mpi_comm.Get_size())
+    if size == 1:
+        return local
+    parts = mpi_comm.allgather(local)
     if not parts:
         return local
     gathered = np.concatenate(parts)
@@ -875,19 +897,115 @@ def _gather_owned_free_rows(local_rows: np.ndarray, global_size: int, comm) -> n
     return gathered
 
 
-def _owned_force_from_local_stress(pattern: OwnedTangentPattern, stress_local: np.ndarray) -> np.ndarray:
-    stress_local = np.asarray(stress_local, dtype=np.float64)
-    if stress_local.shape[0] != int(pattern.n_strain):
-        raise ValueError(f"stress_local must have shape ({int(pattern.n_strain)}, n_int_local)")
-    load = (np.asarray(pattern.overlap_assembly_weight, dtype=np.float64)[None, :] * stress_local).reshape(-1, order="F")
-    overlap_force = pattern.overlap_B.T.dot(load)
-    owned_force = np.asarray(overlap_force[pattern.owned_local_overlap_dofs], dtype=np.float64).copy()
-    owned_force[~np.asarray(pattern.owned_free_mask, dtype=bool)] = 0.0
-    return owned_force
+def _owned_force_from_local_stress(
+    pattern: OwnedTangentPattern,
+    stress_local: np.ndarray,
+    *,
+    use_compiled: bool,
+) -> np.ndarray:
+    return assemble_owned_force_from_local_stress(pattern, stress_local, use_compiled=use_compiled)
 
 
-def _owned_free_force_from_local_stress(pattern: OwnedTangentPattern, stress_local: np.ndarray) -> np.ndarray:
-    owned_force = _owned_force_from_local_stress(pattern, stress_local)
+def _exchange_owned_constitutive_overlap(
+    pattern: OwnedTangentPattern,
+    S_unique: np.ndarray,
+    DS_unique: np.ndarray | None,
+    *,
+    return_tangent: bool,
+    comm,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    n_overlap = int(np.asarray(pattern.local_int_indices, dtype=np.int64).size)
+    S_local = np.empty((int(pattern.n_strain), n_overlap), dtype=np.float64)
+    DS_local = np.empty((int(pattern.n_strain * pattern.n_strain), n_overlap), dtype=np.float64) if return_tangent else None
+    filled = np.zeros(n_overlap, dtype=bool)
+
+    owner_mask = np.asarray(pattern.local_overlap_owner_mask, dtype=bool)
+    owner_pos = np.asarray(pattern.local_overlap_to_unique_pos, dtype=np.int32)
+    if np.any(owner_mask):
+        unique_pos = owner_pos[owner_mask]
+        S_local[:, owner_mask] = np.asarray(S_unique[:, unique_pos], dtype=np.float64)
+        if return_tangent and DS_local is not None and DS_unique is not None:
+            DS_local[:, owner_mask] = np.asarray(DS_unique[:, unique_pos], dtype=np.float64)
+        filled[owner_mask] = True
+
+    mpi_comm = comm.tompi4py() if comm is not None and hasattr(comm, "tompi4py") else comm
+    if mpi_comm is None:
+        if not np.all(filled):
+            raise RuntimeError("Owned constitutive exchange left overlap integration points unfilled in serial mode")
+        return S_local, DS_local
+
+    size = int(mpi_comm.getSize()) if hasattr(mpi_comm, "getSize") else int(mpi_comm.Get_size())
+    if size == 1:
+        if not np.all(filled):
+            raise RuntimeError("Owned constitutive exchange left overlap integration points unfilled for single-rank communicator")
+        return S_local, DS_local
+
+    send_neighbor_ranks = np.asarray(pattern.send_neighbor_ranks, dtype=np.int32)
+    send_ptr = np.asarray(pattern.send_ptr, dtype=np.int32)
+    send_unique_pos = np.asarray(pattern.send_unique_pos, dtype=np.int32)
+    recv_neighbor_ranks = np.asarray(pattern.recv_neighbor_ranks, dtype=np.int32)
+    recv_ptr = np.asarray(pattern.recv_ptr, dtype=np.int32)
+    recv_overlap_pos = np.asarray(pattern.recv_overlap_pos, dtype=np.int32)
+
+    requests = []
+    recv_s_buffers: list[np.ndarray] = []
+    recv_ds_buffers: list[np.ndarray] = []
+
+    for idx, neighbor_rank in enumerate(recv_neighbor_ranks.tolist()):
+        r0 = int(recv_ptr[idx])
+        r1 = int(recv_ptr[idx + 1])
+        count = r1 - r0
+        recv_s = np.empty((count, int(pattern.n_strain)), dtype=np.float64)
+        recv_s_buffers.append(recv_s)
+        requests.append(mpi_comm.Irecv(recv_s, source=int(neighbor_rank), tag=_OWNED_UNIQUE_EXCHANGE_S_TAG))
+        if return_tangent and DS_local is not None:
+            recv_ds = np.empty((count, int(pattern.n_strain * pattern.n_strain)), dtype=np.float64)
+            recv_ds_buffers.append(recv_ds)
+            requests.append(mpi_comm.Irecv(recv_ds, source=int(neighbor_rank), tag=_OWNED_UNIQUE_EXCHANGE_DS_TAG))
+
+    send_s_buffers: list[np.ndarray] = []
+    send_ds_buffers: list[np.ndarray] = []
+    for idx, neighbor_rank in enumerate(send_neighbor_ranks.tolist()):
+        s0 = int(send_ptr[idx])
+        s1 = int(send_ptr[idx + 1])
+        unique_pos = send_unique_pos[s0:s1]
+        send_s = np.ascontiguousarray(np.asarray(S_unique[:, unique_pos], dtype=np.float64).T, dtype=np.float64)
+        send_s_buffers.append(send_s)
+        requests.append(mpi_comm.Isend(send_s, dest=int(neighbor_rank), tag=_OWNED_UNIQUE_EXCHANGE_S_TAG))
+        if return_tangent and DS_local is not None and DS_unique is not None:
+            send_ds = np.ascontiguousarray(np.asarray(DS_unique[:, unique_pos], dtype=np.float64).T, dtype=np.float64)
+            send_ds_buffers.append(send_ds)
+            requests.append(mpi_comm.Isend(send_ds, dest=int(neighbor_rank), tag=_OWNED_UNIQUE_EXCHANGE_DS_TAG))
+
+    if requests:
+        if hasattr(PYMPI, "Request"):
+            PYMPI.Request.Waitall(requests)
+        else:  # pragma: no cover - mpi4py import is guarded above
+            for req in requests:
+                req.Wait()
+
+    for idx, _neighbor_rank in enumerate(recv_neighbor_ranks.tolist()):
+        r0 = int(recv_ptr[idx])
+        r1 = int(recv_ptr[idx + 1])
+        overlap_pos = recv_overlap_pos[r0:r1]
+        S_local[:, overlap_pos] = recv_s_buffers[idx].T
+        filled[overlap_pos] = True
+        if return_tangent and DS_local is not None:
+            DS_local[:, overlap_pos] = recv_ds_buffers[idx].T
+
+    if not np.all(filled):
+        missing = np.flatnonzero(~filled)
+        raise RuntimeError(f"Owned constitutive exchange left {missing.size} overlap integration points unfilled")
+    return S_local, DS_local
+
+
+def _owned_free_force_from_local_stress(
+    pattern: OwnedTangentPattern,
+    stress_local: np.ndarray,
+    *,
+    use_compiled: bool,
+) -> np.ndarray:
+    owned_force = _owned_force_from_local_stress(pattern, stress_local, use_compiled=use_compiled)
     return np.asarray(owned_force[np.asarray(pattern.owned_free_local_rows, dtype=np.int64)], dtype=np.float64)
 
 
@@ -1110,10 +1228,15 @@ class ConstitutiveOperator:
         self.time_local_force_gather = []
         self.owned_tangent_pattern: OwnedTangentPattern | None = None
         self.use_compiled_owned_tangent = True
+        self.owned_tangent_kernel = DEFAULT_TANGENT_KERNEL
         self.use_compiled_owned_constitutive = True
         self.owned_constitutive_mode = "global"
         self._owned_local_S = None
         self._owned_local_DS = None
+        self._owned_tangent_mat = None
+        self._owned_tangent_indptr = None
+        self._owned_tangent_indices = None
+        self._owned_tangent_values = None
         self._owned_regularized_mat = None
         self._owned_regularized_indptr = None
         self._owned_regularized_indices = None
@@ -1141,17 +1264,23 @@ class ConstitutiveOperator:
         pattern: OwnedTangentPattern,
         *,
         use_compiled: bool = True,
+        tangent_kernel: str = DEFAULT_TANGENT_KERNEL,
         constitutive_mode: str = "global",
         use_compiled_constitutive: bool = True,
     ) -> None:
         self.owned_tangent_pattern = pattern
         self.use_compiled_owned_tangent = bool(use_compiled)
+        self.owned_tangent_kernel = str(tangent_kernel).lower()
         self.use_compiled_owned_constitutive = bool(use_compiled_constitutive)
         self.owned_constitutive_mode = str(constitutive_mode).lower()
         self.release_petsc_caches()
 
     def _local_comm(self):
-        return PETSc.COMM_WORLD if PETSc is not None else None
+        if PETSc is not None:
+            return PETSc.COMM_WORLD
+        if PYMPI is not None:
+            return PYMPI.COMM_WORLD
+        return None
 
     def _clear_owned_local_cache(self) -> None:
         self._owned_local_S = None
@@ -1175,9 +1304,11 @@ class ConstitutiveOperator:
             raise ValueError("Owned tangent pattern not configured")
 
         t0 = perf_counter()
-        u_flat = np.asarray(U, dtype=np.float64).reshape(-1, order="F")
-        u_overlap = u_flat[np.asarray(pattern.overlap_global_dofs, dtype=np.int64)]
-        E_local = (pattern.overlap_B @ u_overlap).reshape(self.n_strain, -1, order="F")
+        E_local = assemble_overlap_strain(
+            pattern,
+            U,
+            use_compiled=self.use_compiled_owned_constitutive,
+        )
         self.time_local_strain.append(perf_counter() - t0)
 
         local_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
@@ -1277,10 +1408,15 @@ class ConstitutiveOperator:
         parts = [(unique_idx, np.asarray(S_unique, dtype=np.float64))]
         if return_tangent:
             parts = [(unique_idx, np.asarray(S_unique, dtype=np.float64), np.asarray(DS_unique, dtype=np.float64))]
-        if comm is None or int(comm.getSize()) == 1:
+        mpi_comm = comm.tompi4py() if comm is not None and hasattr(comm, "tompi4py") else comm
+        if mpi_comm is None:
             gathered_parts = parts
         else:
-            gathered_parts = comm.tompi4py().allgather(parts[0])
+            size = int(mpi_comm.getSize()) if hasattr(mpi_comm, "getSize") else int(mpi_comm.Get_size())
+            if size == 1:
+                gathered_parts = parts
+            else:
+                gathered_parts = mpi_comm.allgather(parts[0])
 
         S_global = np.zeros((self.n_strain, self.n_int), dtype=np.float64)
         DS_global = np.zeros((self.n_strain * self.n_strain, self.n_int), dtype=np.float64) if return_tangent else None
@@ -1299,11 +1435,82 @@ class ConstitutiveOperator:
         self.S = S_global
         self.DS = DS_global
 
+    def _evaluate_owned_unique_exchange_constitutive(self, U, *, return_tangent: bool) -> None:
+        pattern = self.owned_tangent_pattern
+        if pattern is None:
+            raise ValueError("Owned tangent pattern not configured")
+
+        n_local = int(np.asarray(pattern.unique_local_int_indices, dtype=np.int64).size)
+        t0 = perf_counter()
+        if n_local:
+            u_flat = np.asarray(U, dtype=np.float64).reshape(-1, order="F")
+            u_unique = u_flat[np.asarray(pattern.unique_global_dofs, dtype=np.int64)]
+            E_unique = pattern.unique_B @ u_unique
+            E_unique = np.asarray(E_unique, dtype=np.float64).reshape(self.n_strain, -1, order="F")
+        else:
+            E_unique = np.empty((self.n_strain, 0), dtype=np.float64)
+        self.time_local_strain.append(perf_counter() - t0)
+
+        unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
+        t1 = perf_counter()
+        c_bar_unique = self._owned_unique_c_bar
+        sin_phi_unique = self._owned_unique_sin_phi
+        if c_bar_unique is None or sin_phi_unique is None:
+            if self.c_bar is None or self.sin_phi is None:
+                raise ValueError("Material reduction not set. Call reduction(lambda) first.")
+            c_bar_unique = np.asarray(self.c_bar[unique_idx], dtype=np.float64)
+            sin_phi_unique = np.asarray(self.sin_phi[unique_idx], dtype=np.float64)
+        if return_tangent:
+            S_unique, DS_unique = _batch_constitutive_problem_local(
+                E_unique,
+                c_bar_unique,
+                sin_phi_unique,
+                self.shear[unique_idx],
+                self.bulk[unique_idx],
+                self.lame[unique_idx],
+                dim=self.dim,
+                return_tangent=True,
+                use_compiled=self.use_compiled_owned_constitutive,
+            )
+            DS_unique = np.asarray(DS_unique, dtype=np.float64)
+        else:
+            S_unique = _batch_constitutive_problem_local(
+                E_unique,
+                c_bar_unique,
+                sin_phi_unique,
+                self.shear[unique_idx],
+                self.bulk[unique_idx],
+                self.lame[unique_idx],
+                dim=self.dim,
+                return_tangent=False,
+                use_compiled=self.use_compiled_owned_constitutive,
+            )
+            DS_unique = None
+        self.time_local_constitutive.append(perf_counter() - t1)
+
+        t2 = perf_counter()
+        S_local, DS_local = _exchange_owned_constitutive_overlap(
+            pattern,
+            np.asarray(S_unique, dtype=np.float64),
+            DS_unique,
+            return_tangent=return_tangent,
+            comm=self._local_comm(),
+        )
+        self.time_local_constitutive_comm.append(perf_counter() - t2)
+
+        self._owned_local_S = np.asarray(S_local, dtype=np.float64)
+        self._owned_local_DS = np.asarray(DS_local, dtype=np.float64) if DS_local is not None else None
+        self.S = None
+        self.DS = None
+
     def _evaluate_owned_constitutive(self, U, *, return_tangent: bool) -> None:
         mode = str(self.owned_constitutive_mode).lower()
         self._clear_owned_local_cache()
         if mode == "overlap":
             self._evaluate_owned_overlap_constitutive(U, return_tangent=return_tangent)
+            return
+        if mode == "unique_exchange":
+            self._evaluate_owned_unique_exchange_constitutive(U, return_tangent=return_tangent)
             return
         if mode in {"unique", "unique_gather", "no_overlap", "partitioned"}:
             self._evaluate_owned_unique_gather_constitutive(U, return_tangent=return_tangent)
@@ -1317,19 +1524,47 @@ class ConstitutiveOperator:
             raise RuntimeError("PETSc is required for the owned tangent matrix path")
 
         t0 = perf_counter()
-        local_matrix = assemble_owned_tangent_matrix(
-            self.owned_tangent_pattern,
+        pattern = self.owned_tangent_pattern
+        tang = assemble_owned_tangent_values(
+            pattern,
             self._owned_local_DS if self._owned_local_DS is not None else self.DS,
             use_compiled=self.use_compiled_owned_tangent,
+            kernel=self.owned_tangent_kernel,
         )
+        tang = np.asarray(tang, dtype=np.float64)
+        if self._owned_tangent_values is None or self._owned_tangent_values.shape != tang.shape:
+            self._owned_tangent_values = np.empty_like(tang)
+        values = self._owned_tangent_values
+        np.copyto(values, tang)
         self.time_build_tangent_local.append(perf_counter() - t0)
-        global_size = int(self.owned_tangent_pattern.local_matrix_pattern.shape[1])
-        return local_csr_to_petsc_aij_matrix(
-            local_matrix,
-            global_shape=(global_size, global_size),
-            comm=PETSc.COMM_WORLD,
-            block_size=self.dim,
-        )
+
+        if self._owned_tangent_indptr is None:
+            self._owned_tangent_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
+        if self._owned_tangent_indices is None:
+            self._owned_tangent_indices = np.array(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType, copy=True)
+
+        if self._owned_tangent_mat is None:
+            global_size = int(pattern.local_matrix_pattern.shape[1])
+            from scipy.sparse import csr_matrix
+
+            local_matrix = csr_matrix(
+                (np.array(values, dtype=np.float64, copy=True), self._owned_tangent_indices, self._owned_tangent_indptr),
+                shape=pattern.local_matrix_pattern.shape,
+            )
+            self._owned_tangent_mat = local_csr_to_petsc_aij_matrix(
+                local_matrix,
+                global_shape=(global_size, global_size),
+                comm=PETSc.COMM_WORLD,
+                block_size=self.dim,
+            )
+        else:
+            update_petsc_aij_matrix_csr(
+                self._owned_tangent_mat,
+                indptr=self._owned_tangent_indptr,
+                indices=self._owned_tangent_indices,
+                data=values,
+            )
+        return self._owned_tangent_mat
 
     def _build_owned_regularized_matrix(self, r: float):
         if self.owned_tangent_pattern is None:
@@ -1343,6 +1578,7 @@ class ConstitutiveOperator:
             pattern,
             self._owned_local_DS if self._owned_local_DS is not None else self.DS,
             use_compiled=self.use_compiled_owned_tangent,
+            kernel=self.owned_tangent_kernel,
         )
         tang = np.asarray(tang, dtype=np.float64)
         if self._owned_regularized_values is None or self._owned_regularized_values.shape != tang.shape:
@@ -1465,7 +1701,11 @@ class ConstitutiveOperator:
         t0 = perf_counter()
         if self._owned_local_S is not None and self.owned_tangent_pattern is not None:
             t_force = perf_counter()
-            owned_force = _owned_force_from_local_stress(self.owned_tangent_pattern, self._owned_local_S[: self.n_strain])
+            owned_force = _owned_force_from_local_stress(
+                self.owned_tangent_pattern,
+                self._owned_local_S[: self.n_strain],
+                use_compiled=self.use_compiled_owned_tangent,
+            )
             self.time_local_force_assembly.append(perf_counter() - t_force)
             t_gather = perf_counter()
             global_size = int(self.owned_tangent_pattern.local_matrix_pattern.shape[1])
@@ -1485,6 +1725,7 @@ class ConstitutiveOperator:
             owned_force = _owned_force_from_local_stress(
                 self.owned_tangent_pattern,
                 self._owned_local_S[: self.n_strain],
+                use_compiled=self.use_compiled_owned_tangent,
             )
             self.time_local_force_assembly.append(perf_counter() - t0)
             self.time_build_F.append(perf_counter() - t0)
@@ -1500,6 +1741,7 @@ class ConstitutiveOperator:
             owned_force_free = _owned_free_force_from_local_stress(
                 self.owned_tangent_pattern,
                 self._owned_local_S[: self.n_strain],
+                use_compiled=self.use_compiled_owned_tangent,
             )
             self.time_local_force_assembly.append(perf_counter() - t_force)
             t_gather = perf_counter()
@@ -1521,6 +1763,7 @@ class ConstitutiveOperator:
             owned_force_free = _owned_free_force_from_local_stress(
                 self.owned_tangent_pattern,
                 self._owned_local_S[: self.n_strain],
+                use_compiled=self.use_compiled_owned_tangent,
             )
             self.time_local_force_assembly.append(perf_counter() - t0)
             self.time_build_F.append(perf_counter() - t0)
@@ -1676,6 +1919,13 @@ class ConstitutiveOperator:
         }
 
     def release_petsc_caches(self) -> None:
+        if PETSc is not None and self._owned_tangent_mat is not None:
+            release_petsc_aij_matrix(self._owned_tangent_mat)
+            self._owned_tangent_mat.destroy()
+        self._owned_tangent_mat = None
+        self._owned_tangent_indptr = None
+        self._owned_tangent_indices = None
+        self._owned_tangent_values = None
         if PETSc is not None and self._owned_regularized_mat is not None:
             release_petsc_aij_matrix(self._owned_regularized_mat)
             self._owned_regularized_mat.destroy()

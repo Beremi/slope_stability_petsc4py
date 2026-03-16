@@ -78,6 +78,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "pc_hypre_strong_threshold": linear.pc_hypre_strong_threshold,
             "recycle_preconditioner": linear.recycle_preconditioner,
             "constitutive_mode": cfg.execution.constitutive_mode,
+            "tangent_kernel": cfg.execution.tangent_kernel,
             **common_linear,
         }
         return run_2d_homo_ssr_capture, kwargs
@@ -121,6 +122,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "pc_hypre_strong_threshold": linear.pc_hypre_strong_threshold,
             "recycle_preconditioner": linear.recycle_preconditioner,
             "constitutive_mode": cfg.execution.constitutive_mode,
+            "tangent_kernel": cfg.execution.tangent_kernel,
             "seepage_linear_tolerance": cfg.seepage.linear_tolerance,
             "seepage_linear_max_iter": cfg.seepage.linear_max_iter,
             "seepage_water_unit_weight": cfg.seepage.water_unit_weight,
@@ -159,6 +161,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "compiled_outer": linear.compiled_outer,
             "recycle_preconditioner": linear.recycle_preconditioner,
             "constitutive_mode": cfg.execution.constitutive_mode,
+            "tangent_kernel": cfg.execution.tangent_kernel,
             **common_linear,
         }
         return run_3d_ssr_capture, kwargs
@@ -192,6 +195,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "pc_hypre_strong_threshold": linear.pc_hypre_strong_threshold,
             "recycle_preconditioner": linear.recycle_preconditioner,
             "constitutive_mode": cfg.execution.constitutive_mode,
+            "tangent_kernel": cfg.execution.tangent_kernel,
             "seepage_linear_tolerance": cfg.seepage.linear_tolerance,
             "seepage_linear_max_iter": cfg.seepage.linear_max_iter,
             **common_linear,
