@@ -155,7 +155,7 @@ Two real probe/harness bugs were found and fixed during this pivot:
 
 Relevant code paths:
 
-- `benchmarks/3d_hetero_ssr_default/probe_hypre_frozen.py`
+- `benchmarks/3d_hetero_ssr_default/archive/probe_hypre_frozen.py`
 - `src/slope_stability/linear/solver.py`
 - `src/slope_stability/cli/run_3D_hetero_SSR_capture.py`
 - `src/slope_stability/core/config.py`

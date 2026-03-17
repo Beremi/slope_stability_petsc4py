@@ -9,7 +9,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "compare_preconditioners.py"
+MODULE_PATH = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "archive" / "compare_preconditioners.py"
 
 
 def _load_module():

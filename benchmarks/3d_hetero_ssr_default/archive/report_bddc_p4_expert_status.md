@@ -30,8 +30,8 @@ Main code paths touched:
 - `src/slope_stability/utils.py`
 - `src/slope_stability/linear/solver.py`
 - `src/slope_stability/cli/run_3D_hetero_SSR_capture.py`
-- `benchmarks/3d_hetero_ssr_default/probe_bddc_elastic.py`
-- `benchmarks/3d_hetero_ssr_default/compare_preconditioners.py`
+- `benchmarks/3d_hetero_ssr_default/archive/probe_bddc_elastic.py`
+- `benchmarks/3d_hetero_ssr_default/archive/compare_preconditioners.py`
 
 Validation after these changes:
 

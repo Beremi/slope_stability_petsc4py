@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_probe_module():
-    probe_path = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "probe_bddc_elastic.py"
+    probe_path = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "archive" / "probe_bddc_elastic.py"
     spec = importlib.util.spec_from_file_location("probe_bddc_elastic", probe_path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None

@@ -36,7 +36,9 @@ from slope_stability.utils import (
 from slope_stability.fem.quadrature import quadrature_volume_3d
 
 
-ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_DIR = Path(__file__).resolve().parent
+BENCHMARK_DIR = SCRIPT_DIR.parent if SCRIPT_DIR.name == "archive" else SCRIPT_DIR
+ROOT = BENCHMARK_DIR.parents[1]
 
 
 def _parse_petsc_opt_entries(entries: list[str] | None) -> dict[str, str]:

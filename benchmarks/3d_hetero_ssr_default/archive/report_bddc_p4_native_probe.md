@@ -7,8 +7,8 @@ This note records the current `P4` status after switching the local BDDC elastic
 Relevant code paths:
 
 - [distributed_tangent.py](/home/beremi/repos/slope_stability-1/src/slope_stability/fem/distributed_tangent.py)
-- [probe_bddc_elastic.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/probe_bddc_elastic.py)
-- [compare_preconditioners.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/compare_preconditioners.py)
+- [probe_bddc_elastic.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/probe_bddc_elastic.py)
+- [compare_preconditioners.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/compare_preconditioners.py)
 
 ## What Changed
 

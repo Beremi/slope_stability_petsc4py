@@ -19,7 +19,7 @@ Implementation enabling these runs:
 
 Relevant code:
 
-- `benchmarks/3d_hetero_ssr_default/probe_hypre_frozen.py`
+- `benchmarks/3d_hetero_ssr_default/archive/probe_hypre_frozen.py`
 
 Baseline for contained hard-state comparison:
 

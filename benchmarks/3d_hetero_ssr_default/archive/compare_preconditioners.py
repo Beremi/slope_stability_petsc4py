@@ -18,18 +18,20 @@ import numpy as np
 import psutil
 
 
-ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_DIR = Path(__file__).resolve().parent
+BENCHMARK_DIR = SCRIPT_DIR.parent if SCRIPT_DIR.name == "archive" else SCRIPT_DIR
+ROOT = BENCHMARK_DIR.parents[1]
 DEFAULT_MESH = ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
 DEFAULT_OUT_ROOT = ROOT / "artifacts" / "p4_preconditioner_compare"
 DEFAULT_BASELINE_SUMMARY = ROOT / "artifacts" / "p2_p4_compare_rank8_final_memfix" / "summary.json"
-DEFAULT_BASELINE_REPORT = Path(__file__).resolve().parent / "report_p2_vs_p4_rank8_final_memfix.md"
-DEFAULT_RECYCLE_FAILURE_REPORT = Path(__file__).resolve().parent / "report_p4_rank8_recycle_guard80_failed.md"
-DEFAULT_FINAL_REPORT = Path(__file__).resolve().parent / "report_p4_preconditioner_full_trajectory.md"
-DEFAULT_STEP2_REPORT = Path(__file__).resolve().parent / "report_p4_preconditioner_step2.md"
-DEFAULT_BDDC_GATE_REPORT = Path(__file__).resolve().parent / "report_p4_bddc_gate.md"
-DEFAULT_BDDC_SHORT_REPORT = Path(__file__).resolve().parent / "report_bddc_short_runs.md"
-DEFAULT_BDDC_FULL_REPORT = Path(__file__).resolve().parent / "report_bddc_full_trajectory.md"
-DEFAULT_BDDC_SWEEP_REPORT = Path(__file__).resolve().parent / "report_bddc_param_sweep_v2.md"
+DEFAULT_BASELINE_REPORT = BENCHMARK_DIR / "report_p2_vs_p4_rank8_final_memfix.md"
+DEFAULT_RECYCLE_FAILURE_REPORT = BENCHMARK_DIR / "report_p4_rank8_recycle_guard80_failed.md"
+DEFAULT_FINAL_REPORT = SCRIPT_DIR / "report_p4_preconditioner_full_trajectory.md"
+DEFAULT_STEP2_REPORT = SCRIPT_DIR / "report_p4_preconditioner_step2.md"
+DEFAULT_BDDC_GATE_REPORT = SCRIPT_DIR / "report_p4_bddc_gate.md"
+DEFAULT_BDDC_SHORT_REPORT = SCRIPT_DIR / "report_bddc_short_runs.md"
+DEFAULT_BDDC_FULL_REPORT = SCRIPT_DIR / "report_bddc_full_trajectory.md"
+DEFAULT_BDDC_SWEEP_REPORT = SCRIPT_DIR / "report_bddc_param_sweep_v2.md"
 DEFAULT_SCREEN_RANKS = (1, 8)
 DEFAULT_SCALE_RANKS = (1, 2, 4, 8)
 DEFAULT_STEP2 = 2
@@ -1341,7 +1343,7 @@ def _run_probe_case(
         "-n",
         str(int(ranks)),
         sys.executable,
-        str(ROOT / "benchmarks" / "3d_hetero_ssr_default" / "probe_bddc_elastic.py"),
+        str(SCRIPT_DIR / "probe_bddc_elastic.py"),
         "--out-dir",
         str(out_dir),
         "--mesh-path",
@@ -2152,7 +2154,7 @@ def _run_bddc_sweep_workflow(
     reuse_existing: bool,
     requested_variants: tuple[str, ...] | None,
 ) -> dict[str, Any]:
-    plot_script = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "plot_p4_linear_convergence.py"
+    plot_script = SCRIPT_DIR / "plot_p4_linear_convergence.py"
     variant_lookup: dict[str, Variant] = dict(registry)
     summary: dict[str, Any] = {
         "linear_tolerance": float(linear_tolerance),

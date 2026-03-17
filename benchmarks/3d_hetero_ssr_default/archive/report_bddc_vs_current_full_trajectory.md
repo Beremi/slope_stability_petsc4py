@@ -31,7 +31,7 @@ After treating `preconditioner_matrix_source=elastic` as static after the first 
 ### P2 elastic probe
 
 - contained elastic `MATIS + PCBDDC` probes now complete successfully
-- see `benchmarks/3d_hetero_ssr_default/report_bddc_elastic_probe.md`
+- see `benchmarks/3d_hetero_ssr_default/archive/report_bddc_elastic_probe.md`
 
 ### P2 short continuation
 
@@ -40,7 +40,7 @@ After treating `preconditioner_matrix_source=elastic` as static after the first 
 - accepted-state count matched Hypre
 - runtime improved versus Hypre on this short case
 - peak RSS was still much higher than Hypre
-- see `benchmarks/3d_hetero_ssr_default/report_bddc_short_runs.md`
+- see `benchmarks/3d_hetero_ssr_default/archive/report_bddc_short_runs.md`
 
 ### P4 elastic probe
 

@@ -16,7 +16,7 @@
 - Lagged preconditioner policies with rebuild/reuse diagnostics.
 - HYPRE/GAMG/BDDC backend plumbing exposed through config and CLI.
 - MATIS + BDDC prototype path implemented and covered by serial/MPI smoke tests.
-- Dedicated preconditioner benchmark harness added in `benchmarks/3d_hetero_ssr_default/compare_preconditioners.py`.
+- Dedicated preconditioner benchmark harness added in `benchmarks/3d_hetero_ssr_default/archive/compare_preconditioners.py`.
 - Baseline-relative runtime cutoffs added to the screen stage so obviously non-competitive candidates are pruned early.
 
 ## Validation Completed Before Screening
