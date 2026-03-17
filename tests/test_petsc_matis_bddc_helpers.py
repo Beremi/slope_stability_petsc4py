@@ -140,9 +140,10 @@ def test_local_csr_to_petsc_matis_matrix_keeps_metadata_and_local_matrix() -> No
                 np.asarray(A_local.indptr, dtype=PETSc.IntType),
                 np.asarray(A_local.indices, dtype=PETSc.IntType),
             ),
-            "bddc_local_coordinates": np.repeat(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64), 2, axis=0),
+            "bddc_local_coordinates": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
             "bddc_local_nullspace_basis": basis,
             "bddc_local_near_nullspace_basis": basis,
+            "bddc_global_near_nullspace_basis": basis,
         },
     )
     metadata = get_petsc_matrix_metadata(mat)
@@ -152,7 +153,8 @@ def test_local_csr_to_petsc_matis_matrix_keeps_metadata_and_local_matrix() -> No
     assert local_mat is not None
     assert metadata["bddc_field_is_local"]
     assert metadata["bddc_local_adjacency"][0].shape == A_local.indptr.shape
-    assert np.asarray(metadata["bddc_local_coordinates"]).shape == (4, 2)
+    assert np.asarray(metadata["bddc_local_coordinates"]).shape == (2, 2)
+    assert mat.getNearNullSpace() is not None
     assert local_mat.getNullSpace() is not None
     assert local_mat.getNearNullSpace() is not None
 
@@ -292,7 +294,7 @@ def test_bddc_elastic_source_reuses_static_pmat_under_current_policy() -> None:
     P.destroy()
 
 
-def test_prepare_bddc_subdomain_pattern_marks_interface_primal_vertices() -> None:
+def test_prepare_bddc_subdomain_pattern_uses_no_explicit_primal_vertices_by_default() -> None:
     vertices = np.array(
         [
             [0.0, 1.0, 2.0, 3.0, 4.0],
@@ -314,10 +316,10 @@ def test_prepare_bddc_subdomain_pattern_marks_interface_primal_vertices() -> Non
         elem_type="P1",
     )
 
-    assert pattern.local_primal_vertices.size > 0
+    assert pattern.local_primal_vertices.size == 0
     assert int(pattern.stats["local_interface_nodes_count"]) > 0
     assert int(pattern.stats["local_primal_vertices_count"]) == int(pattern.local_primal_vertices.size)
-    assert bool(pattern.stats["explicit_primal_vertices_used"]) is True
+    assert bool(pattern.stats["explicit_primal_vertices_used"]) is False
 
 
 @pytest.mark.parametrize("elem_type,order", [("P1", 1), ("P2", 2), ("P4", 4)])

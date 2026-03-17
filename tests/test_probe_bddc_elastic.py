@@ -66,7 +66,7 @@ def test_native_bddc_probe_helpers_solve_small_problem() -> None:
                 np.asarray(A_local.indptr, dtype=PETSc.IntType),
                 np.asarray(A_local.indices, dtype=PETSc.IntType),
             ),
-            "bddc_local_coordinates": np.repeat(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64), 2, axis=0),
+            "bddc_local_coordinates": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
         },
     )
     args = SimpleNamespace(
@@ -83,6 +83,7 @@ def test_native_bddc_probe_helpers_solve_small_problem() -> None:
         pc_bddc_coarse_pc_type="lu",
         pc_bddc_dirichlet_approximate=None,
         pc_bddc_neumann_approximate=None,
+        pc_bddc_switch_static=True,
         pc_bddc_use_deluxe_scaling=False,
         pc_bddc_use_vertices=True,
         pc_bddc_use_edges=False,

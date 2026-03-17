@@ -327,6 +327,7 @@ def run_capture(
     pc_bddc_coarse_pc_type: str | None = None,
     pc_bddc_dirichlet_approximate: bool | None = None,
     pc_bddc_neumann_approximate: bool | None = None,
+    pc_bddc_switch_static: bool | None = None,
     pc_bddc_use_deluxe_scaling: bool | None = None,
     pc_bddc_use_vertices: bool | None = None,
     pc_bddc_use_edges: bool | None = None,
@@ -587,6 +588,8 @@ def run_capture(
         preconditioner_options["pc_bddc_dirichlet_approximate"] = bool(pc_bddc_dirichlet_approximate)
     if pc_bddc_neumann_approximate is not None:
         preconditioner_options["pc_bddc_neumann_approximate"] = bool(pc_bddc_neumann_approximate)
+    if pc_bddc_switch_static is not None:
+        preconditioner_options["pc_bddc_switch_static"] = bool(pc_bddc_switch_static)
     if pc_bddc_use_deluxe_scaling is not None:
         preconditioner_options["pc_bddc_use_deluxe_scaling"] = bool(pc_bddc_use_deluxe_scaling)
     if pc_bddc_use_vertices is not None:
@@ -664,6 +667,7 @@ def run_capture(
         "pc_bddc_coarse_pc_type": pc_bddc_coarse_pc_type,
         "pc_bddc_dirichlet_approximate": pc_bddc_dirichlet_approximate,
         "pc_bddc_neumann_approximate": pc_bddc_neumann_approximate,
+        "pc_bddc_switch_static": pc_bddc_switch_static,
         "pc_bddc_use_deluxe_scaling": pc_bddc_use_deluxe_scaling,
         "pc_bddc_use_vertices": pc_bddc_use_vertices,
         "pc_bddc_use_edges": pc_bddc_use_edges,
@@ -986,6 +990,7 @@ def main() -> None:
     parser.add_argument("--pc_bddc_coarse_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_dirichlet_approximate", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_neumann_approximate", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_switch_static", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_deluxe_scaling", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_vertices", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_edges", action=argparse.BooleanOptionalAction, default=None)
@@ -1061,6 +1066,7 @@ def main() -> None:
         pc_bddc_coarse_pc_type=args.pc_bddc_coarse_pc_type,
         pc_bddc_dirichlet_approximate=args.pc_bddc_dirichlet_approximate,
         pc_bddc_neumann_approximate=args.pc_bddc_neumann_approximate,
+        pc_bddc_switch_static=args.pc_bddc_switch_static,
         pc_bddc_use_deluxe_scaling=args.pc_bddc_use_deluxe_scaling,
         pc_bddc_use_vertices=args.pc_bddc_use_vertices,
         pc_bddc_use_edges=args.pc_bddc_use_edges,

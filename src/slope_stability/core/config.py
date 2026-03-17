@@ -109,6 +109,7 @@ class LinearSolverConfig:
     pc_bddc_coarse_pc_type: str | None = None
     pc_bddc_dirichlet_approximate: bool | None = None
     pc_bddc_neumann_approximate: bool | None = None
+    pc_bddc_switch_static: bool | None = None
     pc_bddc_use_deluxe_scaling: bool | None = None
     pc_bddc_use_vertices: bool | None = None
     pc_bddc_use_edges: bool | None = None
@@ -192,6 +193,7 @@ class Run3DSSRConfig:
             "pc_bddc_coarse_pc_type": self.linear_solver.pc_bddc_coarse_pc_type,
             "pc_bddc_dirichlet_approximate": self.linear_solver.pc_bddc_dirichlet_approximate,
             "pc_bddc_neumann_approximate": self.linear_solver.pc_bddc_neumann_approximate,
+            "pc_bddc_switch_static": self.linear_solver.pc_bddc_switch_static,
             "pc_bddc_use_deluxe_scaling": self.linear_solver.pc_bddc_use_deluxe_scaling,
             "pc_bddc_use_vertices": self.linear_solver.pc_bddc_use_vertices,
             "pc_bddc_use_edges": self.linear_solver.pc_bddc_use_edges,
@@ -382,6 +384,11 @@ def load_run_3d_ssr_config(path: str | Path) -> Run3DSSRConfig:
             None
             if linear_data.get("pc_bddc_neumann_approximate") is None
             else bool(linear_data.get("pc_bddc_neumann_approximate"))
+        ),
+        pc_bddc_switch_static=(
+            None
+            if linear_data.get("pc_bddc_switch_static") is None
+            else bool(linear_data.get("pc_bddc_switch_static"))
         ),
         pc_bddc_use_deluxe_scaling=(
             None

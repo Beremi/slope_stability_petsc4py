@@ -1660,7 +1660,7 @@ class ConstitutiveOperator:
                 np.asarray(pattern.local_adjacency_indptr, dtype=PETSc.IntType),
                 np.asarray(pattern.local_adjacency_indices, dtype=PETSc.IntType),
             ),
-            "bddc_local_coordinates": np.repeat(np.asarray(owned_coord.T, dtype=np.float64), int(pattern.dim), axis=0),
+            "bddc_local_coordinates": np.asarray(owned_coord.T, dtype=np.float64),
         }
         if pattern.local_field_dofs:
             metadata["bddc_field_is_local"] = tuple(
@@ -1681,6 +1681,17 @@ class ConstitutiveOperator:
         if basis.size:
             metadata["bddc_local_nullspace_basis"] = np.asarray(basis, dtype=np.float64)
             metadata["bddc_local_near_nullspace_basis"] = np.asarray(basis, dtype=np.float64)
+        if self.q_mask is not None and self.q_mask.size:
+            node0, node1 = tuple(int(v) for v in pattern.owned_node_range)
+            owned_q_mask = np.asarray(self.q_mask, dtype=bool)[:, node0:node1]
+            global_basis = make_near_nullspace_elasticity(
+                np.asarray(pattern.owned_coord, dtype=np.float64),
+                q_mask=owned_q_mask,
+                center_coordinates=True,
+                return_full=True,
+            )
+            if global_basis.size:
+                metadata["bddc_global_near_nullspace_basis"] = np.asarray(global_basis, dtype=np.float64)
         return metadata
 
     def _build_bddc_tangent_matrix(self):

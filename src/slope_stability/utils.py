@@ -250,6 +250,31 @@ def get_petsc_matrix_metadata(A) -> dict[str, object]:
     return dict(_PETSC_MAT_METADATA.get(int(A.handle), {}))
 
 
+def bddc_pc_coordinates_from_metadata(A):
+    """Return coordinates in the shape expected by PCBDDC for ``A``.
+
+    Metadata stores node-wise coordinates when available. MATIS in this repo is
+    assembled on dof-level maps, so PETSc may still expect one tuple per local
+    vector entry. Expand node-wise coordinates to the local MATIS vector layout
+    when needed.
+    """
+
+    metadata = get_petsc_matrix_metadata(A)
+    coordinates = metadata.get("bddc_local_coordinates")
+    if coordinates is None:
+        return None
+    arr = np.asarray(coordinates, dtype=np.float64)
+    if arr.ndim != 2 or PETSc is None or not isinstance(A, PETSc.Mat):
+        return arr
+    expected = int(metadata.get("matis_vector_local_size", arr.shape[0]))
+    if arr.shape[0] == expected:
+        return arr
+    block_size = int(A.getBlockSize() or 1)
+    if block_size > 1 and int(arr.shape[0]) * block_size == expected:
+        return np.repeat(arr, block_size, axis=0)
+    return arr
+
+
 def get_petsc_is_local_mat(A):
     """Return the locally stored SeqAIJ matrix for a MATIS matrix if registered."""
 
@@ -290,6 +315,44 @@ def _build_seq_nullspace(basis: np.ndarray | None):
         for j in range(arr.shape[1])
     ]
     nsp = PETSc.NullSpace().create(constant=False, vectors=vecs, comm=PETSc.COMM_SELF)
+    return nsp, vecs
+
+
+def _build_dist_nullspace(
+    comm,
+    basis: np.ndarray | None,
+    *,
+    global_size: int | None = None,
+    ownership_range: tuple[int, int] | None = None,
+    block_size: int | None = None,
+):
+    if PETSc is None or basis is None:
+        return None, []
+    arr = np.asarray(basis, dtype=np.float64)
+    if arr.size == 0:
+        return None, []
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    local_size = None if ownership_range is None else int(ownership_range[1] - ownership_range[0])
+    vecs = [
+        (
+            local_array_to_petsc_vec(
+                np.asarray(arr[:, j], dtype=np.float64),
+                global_size=int(global_size if global_size is not None else arr.shape[0]),
+                comm=comm,
+                bsize=block_size,
+            )
+            if ownership_range is not None and local_size is not None and int(arr.shape[0]) == local_size
+            else global_array_to_petsc_vec(
+                np.asarray(arr[:, j], dtype=np.float64),
+                comm=comm,
+                ownership_range=ownership_range,
+                bsize=block_size,
+            )
+        )
+        for j in range(arr.shape[1])
+    ]
+    nsp = PETSc.NullSpace().create(constant=False, vectors=vecs, comm=comm)
     return nsp, vecs
 
 
@@ -337,6 +400,17 @@ def local_csr_to_petsc_matis_matrix(
     mat.setISLocalMat(local_mat)
     if block_size is not None:
         mat.setBlockSize(int(block_size))
+    global_near_nullspace, global_near_nullspace_vecs = _build_dist_nullspace(
+        comm,
+        stored_metadata.get("bddc_global_near_nullspace_basis"),
+        global_size=int(global_size),
+        ownership_range=mat.getOwnershipRange() if int(comm.getSize()) > 1 else None,
+        block_size=block_size,
+    )
+    if global_near_nullspace is not None:
+        mat.setNearNullSpace(global_near_nullspace)
+        stored_metadata["bddc_global_near_nullspace"] = global_near_nullspace
+        stored_metadata["bddc_global_near_nullspace_vecs"] = global_near_nullspace_vecs
     mat.assemble()
     _PETSC_MAT_IS_REFS[int(mat.handle)] = (local_mat, lgmap)
     stored_metadata.setdefault("local_to_global", np.asarray(local_to_global_arr, dtype=np.int64))

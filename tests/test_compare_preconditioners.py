@@ -87,7 +87,7 @@ def test_step2_and_gate_reports_include_bddc_runtime_smokes() -> None:
         "runtime_seconds": 12.5,
         "peak_rss_gib": 4.0,
         "final_accepted_states": 2,
-        "bddc_local_primal_vertices_count": 6,
+        "bddc_local_primal_vertices_count": 0,
         "bddc_local_total_bytes": 2048.0,
         "pc_backend": "bddc",
     }
@@ -267,8 +267,7 @@ def test_variant_registry_contains_elastic_first_bddc_candidates() -> None:
     registry = module._variant_registry(include_nongalerkin=False)
 
     exact = registry["bddc_exact_elastic"]
-    ilu = registry["bddc_ilu_elastic"]
-    deluxe = registry["bddc_ilu_elastic_deluxe"]
+    gamg = registry["bddc_gamg_elastic"]
 
     assert "--preconditioner_matrix_source" in exact.cli_args
     assert "elastic" in exact.cli_args
@@ -276,11 +275,14 @@ def test_variant_registry_contains_elastic_first_bddc_candidates() -> None:
     assert "native_petsc" in exact.cli_args
     assert "--native_ksp_type" in exact.cli_args
     assert "cg" in exact.cli_args
+    assert "--pc_bddc_symmetric" in exact.cli_args
     assert "--pc_bddc_use_edges" in exact.cli_args
     assert "--pc_bddc_use_faces" in exact.cli_args
     assert "--no-pc_bddc_use_change_of_basis" in exact.cli_args
     assert "--no-pc_bddc_use_change_on_faces" in exact.cli_args
-    assert "--pc_bddc_dirichlet_approximate" in ilu.cli_args
-    assert "--pc_bddc_neumann_approximate" in ilu.cli_args
-    assert "--no-pc_bddc_use_deluxe_scaling" in ilu.cli_args
-    assert "--pc_bddc_use_deluxe_scaling" in deluxe.cli_args
+    assert "--pc_bddc_dirichlet_approximate" in gamg.cli_args
+    assert "--pc_bddc_neumann_approximate" in gamg.cli_args
+    assert "--pc_bddc_switch_static" in gamg.cli_args
+    assert "--pc_bddc_dirichlet_pc_type" in gamg.cli_args
+    assert "gamg" in gamg.cli_args
+    assert "--no-pc_bddc_use_deluxe_scaling" in gamg.cli_args

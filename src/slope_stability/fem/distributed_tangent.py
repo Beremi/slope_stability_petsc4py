@@ -1208,16 +1208,9 @@ def prepare_bddc_subdomain_pattern(
         if matches.size != 1:
             raise RuntimeError("Local Dirichlet BDDC row is missing its diagonal structural entry")
         constrained_diag_positions.append(int(start + matches[0]))
+    # Let PETSc derive the primal coarse space by default; forcing all interface
+    # dofs into the primal set over-constrains high-order runs.
     local_primal_vertices = np.empty(0, dtype=np.int32)
-    if interface_nodes_global.size:
-        interface_node_lids = np.asarray(node_lids[interface_nodes_global], dtype=np.int64)
-        primal_dofs = _global_dofs_for_nodes(interface_node_lids, dim)
-        if local_dirichlet_dofs.size:
-            keep = ~np.isin(primal_dofs, np.asarray(local_dirichlet_dofs, dtype=np.int64))
-            primal_dofs = np.asarray(primal_dofs[keep], dtype=np.int64)
-        if primal_dofs.size:
-            _ensure_int32_capacity("local_primal_vertices", int(primal_dofs.max(initial=0)))
-            local_primal_vertices = np.unique(primal_dofs.astype(np.int32, copy=False))
     t_elastic = perf_counter()
     if local_elements.size:
         _c0, _phi, _psi, shear, bulk, lame, _gamma = heterogenous_materials(

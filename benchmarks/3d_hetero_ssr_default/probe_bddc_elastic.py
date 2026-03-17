@@ -21,11 +21,14 @@ from slope_stability.linear.solver import SolverFactory
 from slope_stability.mesh.materials import MaterialSpec, heterogenous_materials
 from slope_stability.mesh.reorder import reorder_mesh_nodes
 from slope_stability.utils import (
+    bddc_pc_coordinates_from_metadata,
     extract_submatrix_free,
     get_petsc_matrix_metadata,
+    global_array_to_petsc_vec,
     local_csr_to_petsc_aij_matrix,
     matvec_to_numpy,
     owned_block_range,
+    petsc_vec_to_global_array,
     q_to_free_indices,
     release_petsc_aij_matrix,
 )
@@ -76,7 +79,7 @@ def _set_petsc_option(options, key: str, value) -> None:
 
 def _configure_bddc_pc_from_metadata(pc: PETSc.PC, Pmat: PETSc.Mat, *, use_coordinates: bool = True) -> None:
     metadata = get_petsc_matrix_metadata(Pmat)
-    coordinates = metadata.get("bddc_local_coordinates")
+    coordinates = bddc_pc_coordinates_from_metadata(Pmat)
     if coordinates is not None and use_coordinates:
         pc.setCoordinates(np.asarray(coordinates, dtype=np.float64))
     field_is = metadata.get("bddc_field_is_local")
@@ -157,6 +160,7 @@ def _build_native_petsc_ksp(args, *, operator_matrix: PETSc.Mat, preconditioning
         "pc_bddc_coarse_pc_type",
         "pc_bddc_dirichlet_approximate",
         "pc_bddc_neumann_approximate",
+        "pc_bddc_switch_static",
         "pc_bddc_use_deluxe_scaling",
         "pc_bddc_use_vertices",
         "pc_bddc_use_edges",
@@ -174,13 +178,18 @@ def _build_native_petsc_ksp(args, *, operator_matrix: PETSc.Mat, preconditioning
 
 
 def _native_petsc_ksp_solve_once(ksp: PETSc.KSP, A: PETSc.Mat, rhs_full: np.ndarray) -> tuple[np.ndarray, float, int, int]:
-    rhs = PETSc.Vec().createWithArray(np.asarray(rhs_full, dtype=np.float64), comm=A.getComm())
+    rhs = global_array_to_petsc_vec(
+        np.asarray(rhs_full, dtype=np.float64),
+        comm=A.getComm(),
+        ownership_range=A.getOwnershipRange() if int(A.getComm().getSize()) > 1 else None,
+        bsize=A.getBlockSize() or None,
+    )
     x = A.createVecRight()
     x.set(0.0)
     t0 = perf_counter()
     ksp.solve(rhs, x)
     elapsed = float(perf_counter() - t0)
-    solution = np.asarray(x.getArray(readonly=False), dtype=np.float64).copy()
+    solution = petsc_vec_to_global_array(x)
     reason = int(ksp.getConvergedReason())
     iterations = int(ksp.getIterationNumber())
     rhs.destroy()
@@ -621,6 +630,7 @@ def main() -> None:
     parser.add_argument("--pc_bddc_coarse_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_dirichlet_approximate", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_neumann_approximate", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_switch_static", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_deluxe_scaling", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_vertices", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_edges", action=argparse.BooleanOptionalAction, default=None)

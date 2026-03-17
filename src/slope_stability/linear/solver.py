@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - optional when PETSc is unavailable
 
 from ..core.config import LinearSolverConfig
 from ..utils import (
+    bddc_pc_coordinates_from_metadata,
     get_petsc_matrix_metadata,
     global_array_to_petsc_vec,
     owned_block_range,
@@ -1645,7 +1646,7 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         elif self._pc_backend == "bddc":
             inner_pc.setType(PETSc.PC.Type.BDDC)
             metadata = get_petsc_matrix_metadata(matrix_ref)
-            coordinates = metadata.get("bddc_local_coordinates")
+            coordinates = bddc_pc_coordinates_from_metadata(matrix_ref)
             if coordinates is not None and self.preconditioner_options.get("use_coordinates", True):
                 inner_pc.setCoordinates(np.asarray(coordinates, dtype=np.float64))
             field_is = metadata.get("bddc_field_is_local")
@@ -2518,6 +2519,8 @@ class SolverFactory:
             preconditioner_options["pc_bddc_dirichlet_approximate"] = config.pc_bddc_dirichlet_approximate
         if config.pc_bddc_neumann_approximate is not None:
             preconditioner_options["pc_bddc_neumann_approximate"] = config.pc_bddc_neumann_approximate
+        if config.pc_bddc_switch_static is not None:
+            preconditioner_options["pc_bddc_switch_static"] = config.pc_bddc_switch_static
         if config.pc_bddc_use_deluxe_scaling is not None:
             preconditioner_options["pc_bddc_use_deluxe_scaling"] = config.pc_bddc_use_deluxe_scaling
         if config.pc_bddc_use_vertices is not None:

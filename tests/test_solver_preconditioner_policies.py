@@ -107,6 +107,7 @@ def test_from_config_propagates_bddc_local_solver_options() -> None:
         pc_bddc_coarse_pc_type="gamg",
         pc_bddc_dirichlet_approximate=True,
         pc_bddc_neumann_approximate=True,
+        pc_bddc_switch_static=True,
         pc_bddc_use_deluxe_scaling=False,
         pc_bddc_use_vertices=True,
         pc_bddc_use_edges=True,
@@ -131,6 +132,7 @@ def test_from_config_propagates_bddc_local_solver_options() -> None:
     assert solver.preconditioner_options["pc_bddc_coarse_pc_type"] == "gamg"
     assert solver.preconditioner_options["pc_bddc_dirichlet_approximate"] is True
     assert solver.preconditioner_options["pc_bddc_neumann_approximate"] is True
+    assert solver.preconditioner_options["pc_bddc_switch_static"] is True
     assert solver.preconditioner_options["pc_bddc_use_deluxe_scaling"] is False
     assert solver.preconditioner_options["pc_bddc_use_vertices"] is True
     assert solver.preconditioner_options["pc_bddc_use_edges"] is True

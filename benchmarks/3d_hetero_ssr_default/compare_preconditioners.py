@@ -100,7 +100,7 @@ def _variant_registry(*, include_nongalerkin: bool) -> dict[str, Variant]:
         "current",
         "--preconditioner_rebuild_policy",
         "every_newton",
-        "--no-pc_bddc_symmetric",
+        "--pc_bddc_symmetric",
         "--pc_bddc_use_vertices",
         "--pc_bddc_use_edges",
         "--pc_bddc_use_faces",
@@ -262,6 +262,30 @@ def _variant_registry(*, include_nongalerkin: bool) -> dict[str, Variant]:
                 "preonly",
                 "--pc_bddc_coarse_pc_type",
                 "lu",
+                "--no-pc_bddc_use_deluxe_scaling",
+            ),
+        ),
+        "bddc_gamg_elastic": Variant(
+            name="bddc_gamg_elastic",
+            description="Elastic-first BDDC with approximate local GAMG and LU coarse solve",
+            category="bddc_elastic",
+            cli_args=(
+                *bddc_elastic_common,
+                "--pc_bddc_dirichlet_ksp_type",
+                "preonly",
+                "--pc_bddc_dirichlet_pc_type",
+                "gamg",
+                "--pc_bddc_neumann_ksp_type",
+                "preonly",
+                "--pc_bddc_neumann_pc_type",
+                "gamg",
+                "--pc_bddc_coarse_ksp_type",
+                "preonly",
+                "--pc_bddc_coarse_pc_type",
+                "lu",
+                "--pc_bddc_dirichlet_approximate",
+                "--pc_bddc_neumann_approximate",
+                "--pc_bddc_switch_static",
                 "--no-pc_bddc_use_deluxe_scaling",
             ),
         ),
@@ -1266,8 +1290,7 @@ BDDCCandidateNames = (
 
 BDDCElasticCandidateNames = (
     "bddc_exact_elastic",
-    "bddc_ilu_elastic",
-    "bddc_ilu_elastic_deluxe",
+    "bddc_gamg_elastic",
 )
 
 
