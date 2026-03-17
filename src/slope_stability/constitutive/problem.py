@@ -1656,12 +1656,22 @@ class ConstitutiveOperator:
         owned_coord = np.asarray(pattern.owned_coord, dtype=np.float64)
         metadata: dict[str, object] = {
             "bddc_dirichlet_local": np.asarray(pattern.local_dirichlet_dofs, dtype=np.int32),
-            "bddc_local_adjacency": (
+            "bddc_local_coordinates": np.asarray(owned_coord.T, dtype=np.float64),
+            "bddc_local_block_size": int(self.dim),
+            "bddc_adjacency_source": str(pattern.adjacency_source),
+        }
+        expected_global_dofs = (
+            int(self.dim) * np.repeat(np.asarray(pattern.local_nodes, dtype=np.int64), int(self.dim))
+            + np.tile(np.arange(int(self.dim), dtype=np.int64), int(pattern.local_nodes.size))
+        ).astype(np.int64, copy=False)
+        metadata["bddc_local_vertex_major_ordering"] = bool(
+            np.array_equal(np.asarray(pattern.local_global_dofs, dtype=np.int64), expected_global_dofs)
+        )
+        if int(pattern.local_adjacency_indptr.size) and int(pattern.local_adjacency_indices.size):
+            metadata["bddc_local_adjacency"] = (
                 np.asarray(pattern.local_adjacency_indptr, dtype=PETSc.IntType),
                 np.asarray(pattern.local_adjacency_indices, dtype=PETSc.IntType),
-            ),
-            "bddc_local_coordinates": np.asarray(owned_coord.T, dtype=np.float64),
-        }
+            )
         if pattern.local_field_dofs:
             metadata["bddc_field_is_local"] = tuple(
                 PETSc.IS().createGeneral(np.asarray(field, dtype=PETSc.IntType), comm=PETSc.COMM_SELF)
@@ -1694,7 +1704,7 @@ class ConstitutiveOperator:
                 metadata["bddc_global_near_nullspace_basis"] = np.asarray(global_basis, dtype=np.float64)
         return metadata
 
-    def _build_bddc_tangent_matrix(self):
+    def _build_bddc_tangent_matrix(self, *, local_mat_type: str = "aij"):
         if self.bddc_subdomain_pattern is None:
             raise ValueError("BDDC subdomain pattern not configured")
         if PETSc is None:
@@ -1735,6 +1745,7 @@ class ConstitutiveOperator:
                 comm=PETSc.COMM_WORLD,
                 block_size=self.dim,
                 local_vector_size=local_vector_size,
+                local_mat_type=local_mat_type,
                 metadata=metadata,
             )
         else:
@@ -1750,7 +1761,7 @@ class ConstitutiveOperator:
             self._bddc_tangent_mat.assemble()
         return self._bddc_tangent_mat
 
-    def _build_bddc_elastic_matrix(self):
+    def _build_bddc_elastic_matrix(self, *, local_mat_type: str = "aij"):
         if self.bddc_subdomain_pattern is None:
             raise ValueError("BDDC subdomain pattern not configured")
         if PETSc is None:
@@ -1779,11 +1790,12 @@ class ConstitutiveOperator:
                 comm=PETSc.COMM_WORLD,
                 block_size=self.dim,
                 local_vector_size=local_vector_size,
+                local_mat_type=local_mat_type,
                 metadata=self._bddc_matrix_metadata(pattern),
             )
         return self._bddc_elastic_mat
 
-    def _build_bddc_regularized_matrix(self, r: float):
+    def _build_bddc_regularized_matrix(self, r: float, *, local_mat_type: str = "aij"):
         if self.bddc_subdomain_pattern is None:
             raise ValueError("BDDC subdomain pattern not configured")
         if PETSc is None:
@@ -1825,6 +1837,7 @@ class ConstitutiveOperator:
                 comm=PETSc.COMM_WORLD,
                 block_size=self.dim,
                 local_vector_size=local_vector_size,
+                local_mat_type=local_mat_type,
                 metadata=self._bddc_matrix_metadata(pattern),
             )
         else:
@@ -2080,20 +2093,20 @@ class ConstitutiveOperator:
             raise RuntimeError("Regularized in-place matrix path requires owned_tangent_pattern")
         return self._build_owned_regularized_matrix(r)
 
-    def build_bddc_tangent_matrix(self):
+    def build_bddc_tangent_matrix(self, *, local_mat_type: str = "aij"):
         if self.bddc_subdomain_pattern is None:
             raise RuntimeError("BDDC subdomain pattern not configured")
-        return self._build_bddc_tangent_matrix()
+        return self._build_bddc_tangent_matrix(local_mat_type=local_mat_type)
 
-    def build_bddc_regularized_matrix(self, r: float):
+    def build_bddc_regularized_matrix(self, r: float, *, local_mat_type: str = "aij"):
         if self.bddc_subdomain_pattern is None:
             raise RuntimeError("BDDC subdomain pattern not configured")
-        return self._build_bddc_regularized_matrix(r)
+        return self._build_bddc_regularized_matrix(r, local_mat_type=local_mat_type)
 
-    def build_bddc_elastic_matrix(self):
+    def build_bddc_elastic_matrix(self, *, local_mat_type: str = "aij"):
         if self.bddc_subdomain_pattern is None:
             raise RuntimeError("BDDC subdomain pattern not configured")
-        return self._build_bddc_elastic_matrix()
+        return self._build_bddc_elastic_matrix(local_mat_type=local_mat_type)
 
     def build_F_K_regularized_all(self, lam: float, U, r: float):
         self.reduction(lam)

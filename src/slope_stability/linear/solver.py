@@ -776,8 +776,8 @@ class PetscKSPFGMRESSolver:
             "pc_hypre_boomeramg_vec_interp_variant": 2,
             "pc_hypre_boomeramg_vec_interp_qmax": 4,
             "pc_hypre_boomeramg_vec_interp_smooth": True,
-            "pc_hypre_boomeramg_coarsen_type": "PMIS",
-            "pc_hypre_boomeramg_interp_type": "ext+i-mm",
+            "pc_hypre_boomeramg_coarsen_type": "HMIS",
+            "pc_hypre_boomeramg_interp_type": "ext+i",
             "pc_hypre_boomeramg_P_max": 4,
             "pc_hypre_boomeramg_strong_threshold": 0.5,
             "pc_hypre_boomeramg_grid_sweeps_all": 1,
@@ -2495,14 +2495,16 @@ class SolverFactory:
             preconditioner_options["pc_hypre_boomeramg_interp_type"] = config.pc_hypre_interp_type
         if config.pc_hypre_strong_threshold is not None:
             preconditioner_options["pc_hypre_boomeramg_strong_threshold"] = config.pc_hypre_strong_threshold
+        if getattr(config, "pc_hypre_boomeramg_max_iter", None) is not None:
+            preconditioner_options["pc_hypre_boomeramg_max_iter"] = int(config.pc_hypre_boomeramg_max_iter)
         if config.pc_hypre_P_max is not None:
             preconditioner_options["pc_hypre_boomeramg_P_max"] = config.pc_hypre_P_max
         if config.pc_hypre_agg_nl is not None:
             preconditioner_options["pc_hypre_boomeramg_agg_nl"] = config.pc_hypre_agg_nl
         if config.pc_hypre_nongalerkin_tol is not None:
             preconditioner_options["pc_hypre_boomeramg_nongalerkin_tol"] = config.pc_hypre_nongalerkin_tol
-        if config.pc_bddc_symmetric:
-            preconditioner_options["pc_bddc_symmetric"] = True
+        if config.pc_bddc_symmetric is not None:
+            preconditioner_options["pc_bddc_symmetric"] = bool(config.pc_bddc_symmetric)
         if config.pc_bddc_dirichlet_ksp_type is not None:
             preconditioner_options["pc_bddc_dirichlet_ksp_type"] = config.pc_bddc_dirichlet_ksp_type
         if config.pc_bddc_dirichlet_pc_type is not None:
@@ -2519,6 +2521,10 @@ class SolverFactory:
             preconditioner_options["pc_bddc_dirichlet_approximate"] = config.pc_bddc_dirichlet_approximate
         if config.pc_bddc_neumann_approximate is not None:
             preconditioner_options["pc_bddc_neumann_approximate"] = config.pc_bddc_neumann_approximate
+        if getattr(config, "pc_bddc_monolithic", None) is not None:
+            preconditioner_options["pc_bddc_monolithic"] = bool(config.pc_bddc_monolithic)
+        if getattr(config, "pc_bddc_coarse_redundant_pc_type", None) is not None:
+            preconditioner_options["pc_bddc_coarse_redundant_pc_type"] = config.pc_bddc_coarse_redundant_pc_type
         if config.pc_bddc_switch_static is not None:
             preconditioner_options["pc_bddc_switch_static"] = config.pc_bddc_switch_static
         if config.pc_bddc_use_deluxe_scaling is not None:

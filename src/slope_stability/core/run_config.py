@@ -93,7 +93,7 @@ class LinearSolverConfig:
     print_level: int = 0
     use_as_preconditioner: bool = True
     factor_solver_type: str | None = None
-    pc_backend: str | None = None
+    pc_backend: str | None = "hypre"
     preconditioner_matrix_source: str = "tangent"
     preconditioner_matrix_policy: str = "current"
     preconditioner_rebuild_policy: str = "every_newton"
@@ -106,10 +106,11 @@ class LinearSolverConfig:
     pc_hypre_coarsen_type: str | None = "HMIS"
     pc_hypre_interp_type: str | None = "ext+i"
     pc_hypre_strong_threshold: float | None = None
+    pc_hypre_boomeramg_max_iter: int | None = 1
     pc_hypre_P_max: int | None = None
     pc_hypre_agg_nl: int | None = None
     pc_hypre_nongalerkin_tol: float | None = None
-    pc_bddc_symmetric: bool = False
+    pc_bddc_symmetric: bool | None = None
     pc_bddc_dirichlet_ksp_type: str | None = None
     pc_bddc_dirichlet_pc_type: str | None = None
     pc_bddc_neumann_ksp_type: str | None = None
@@ -118,6 +119,8 @@ class LinearSolverConfig:
     pc_bddc_coarse_pc_type: str | None = None
     pc_bddc_dirichlet_approximate: bool | None = None
     pc_bddc_neumann_approximate: bool | None = None
+    pc_bddc_monolithic: bool | None = None
+    pc_bddc_coarse_redundant_pc_type: str | None = None
     pc_bddc_switch_static: bool | None = None
     pc_bddc_use_deluxe_scaling: bool | None = None
     pc_bddc_use_vertices: bool | None = None
@@ -287,7 +290,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         factor_solver_type=(
             None if linear_data.get("factor_solver_type") is None else str(linear_data.get("factor_solver_type"))
         ),
-        pc_backend=(None if linear_data.get("pc_backend") is None else str(linear_data.get("pc_backend"))),
+        pc_backend=str(linear_data.get("pc_backend", "hypre")),
         preconditioner_matrix_source=str(linear_data.get("preconditioner_matrix_source", "tangent")),
         preconditioner_matrix_policy=str(linear_data.get("preconditioner_matrix_policy", "current")),
         preconditioner_rebuild_policy=str(linear_data.get("preconditioner_rebuild_policy", "every_newton")),
@@ -322,6 +325,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         pc_hypre_strong_threshold=(
             None if linear_data.get("pc_hypre_strong_threshold") is None else float(linear_data.get("pc_hypre_strong_threshold"))
         ),
+        pc_hypre_boomeramg_max_iter=int(linear_data.get("pc_hypre_boomeramg_max_iter", 1)),
         pc_hypre_P_max=(
             None if linear_data.get("pc_hypre_P_max") is None else int(linear_data.get("pc_hypre_P_max"))
         ),
@@ -333,7 +337,11 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
             if linear_data.get("pc_hypre_nongalerkin_tol") is None
             else float(linear_data.get("pc_hypre_nongalerkin_tol"))
         ),
-        pc_bddc_symmetric=bool(linear_data.get("pc_bddc_symmetric", False)),
+        pc_bddc_symmetric=(
+            None
+            if linear_data.get("pc_bddc_symmetric") is None
+            else bool(linear_data.get("pc_bddc_symmetric"))
+        ),
         pc_bddc_dirichlet_ksp_type=(
             None
             if linear_data.get("pc_bddc_dirichlet_ksp_type") is None
@@ -373,6 +381,16 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
             None
             if linear_data.get("pc_bddc_neumann_approximate") is None
             else bool(linear_data.get("pc_bddc_neumann_approximate"))
+        ),
+        pc_bddc_monolithic=(
+            None
+            if linear_data.get("pc_bddc_monolithic") is None
+            else bool(linear_data.get("pc_bddc_monolithic"))
+        ),
+        pc_bddc_coarse_redundant_pc_type=(
+            None
+            if linear_data.get("pc_bddc_coarse_redundant_pc_type") is None
+            else str(linear_data.get("pc_bddc_coarse_redundant_pc_type"))
         ),
         pc_bddc_switch_static=(
             None

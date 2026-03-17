@@ -72,9 +72,10 @@ def test_native_bddc_probe_helpers_solve_small_problem() -> None:
     args = SimpleNamespace(
         pc_backend="bddc",
         native_ksp_type="cg",
+        native_ksp_norm_type="unpreconditioned",
         linear_tolerance=1e-10,
         linear_max_iter=50,
-        pc_bddc_symmetric=False,
+        pc_bddc_symmetric=True,
         pc_bddc_dirichlet_ksp_type="preonly",
         pc_bddc_dirichlet_pc_type="lu",
         pc_bddc_neumann_ksp_type="preonly",
@@ -83,6 +84,8 @@ def test_native_bddc_probe_helpers_solve_small_problem() -> None:
         pc_bddc_coarse_pc_type="lu",
         pc_bddc_dirichlet_approximate=None,
         pc_bddc_neumann_approximate=None,
+        pc_bddc_monolithic=True,
+        pc_bddc_coarse_redundant_pc_type="svd",
         pc_bddc_switch_static=True,
         pc_bddc_use_deluxe_scaling=False,
         pc_bddc_use_vertices=True,
@@ -94,12 +97,13 @@ def test_native_bddc_probe_helpers_solve_small_problem() -> None:
         pc_hypre_coarsen_type=None,
         pc_hypre_interp_type=None,
         use_coordinates=True,
+        petsc_opt_map={},
     )
 
     A.setOption(PETSc.Mat.Option.SYMMETRIC, True)
     A.setOption(PETSc.Mat.Option.SPD, True)
     ksp, setup_elapsed = module._build_native_petsc_ksp(args, operator_matrix=A, preconditioning_matrix=P)
-    x, solve_elapsed, iterations, reason = module._native_petsc_ksp_solve_once(
+    x, solve_elapsed, iterations, reason, residual_history, relative_residual_history = module._native_petsc_ksp_solve_once(
         ksp,
         A,
         np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64),
@@ -111,9 +115,37 @@ def test_native_bddc_probe_helpers_solve_small_problem() -> None:
     assert reason > 0
     assert x.shape == (4,)
     assert np.all(np.isfinite(x))
+    assert residual_history
+    assert relative_residual_history
+    assert len(residual_history) == len(relative_residual_history)
 
     ksp.destroy()
     release_petsc_aij_matrix(P)
     P.destroy()
     release_petsc_aij_matrix(A)
     A.destroy()
+
+
+def test_parse_petsc_opt_entries_accepts_key_value_pairs() -> None:
+    module = _load_probe_module()
+    parsed = module._parse_petsc_opt_entries(
+        [
+            "pc_bddc_dirichlet_pc_gamg_threshold=0.05",
+            "pc_bddc_use_deluxe_scaling=true",
+        ]
+    )
+
+    assert parsed == {
+        "pc_bddc_dirichlet_pc_gamg_threshold": "0.05",
+        "pc_bddc_use_deluxe_scaling": "true",
+    }
+
+
+def test_is_global_petsc_option_detects_log_view_family() -> None:
+    module = _load_probe_module()
+
+    assert module._is_global_petsc_option("log_view") is True
+    assert module._is_global_petsc_option("log_view_memory") is True
+    assert module._is_global_petsc_option("options_left") is True
+    assert module._is_global_petsc_option("pc_view") is True
+    assert module._is_global_petsc_option("pc_bddc_dirichlet_pc_gamg_threshold") is False

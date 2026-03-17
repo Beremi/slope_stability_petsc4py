@@ -169,6 +169,42 @@ def test_local_csr_to_petsc_matis_matrix_keeps_metadata_and_local_matrix() -> No
     mat.destroy()
 
 
+def test_local_csr_to_petsc_matis_matrix_accepts_sbaij_local_reference() -> None:
+    A_local = csr_matrix(
+        np.array(
+            [
+                [4.0, 1.0, 0.0, 0.0, 0.5, 0.0],
+                [1.0, 5.0, 0.0, 0.0, 0.0, 0.5],
+                [0.0, 0.0, 6.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 7.0, 0.0, 0.0],
+                [0.5, 0.0, 0.0, 0.0, 3.0, 1.0],
+                [0.0, 0.5, 0.0, 0.0, 1.0, 4.0],
+            ],
+            dtype=np.float64,
+        )
+    )
+    mat = local_csr_to_petsc_matis_matrix(
+        A_local,
+        global_size=6,
+        local_to_global=np.arange(6, dtype=np.int64),
+        comm=PETSc.COMM_WORLD,
+        block_size=3,
+        local_mat_type="sbaij",
+        metadata={"bddc_local_coordinates": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64)},
+    )
+
+    metadata = get_petsc_matrix_metadata(mat)
+    local_mat = get_petsc_is_local_mat(mat)
+
+    assert str(mat.getType()).lower() == "is"
+    assert str(local_mat.getType()).lower() == "seqsbaij"
+    assert int(mat.getBlockSize()) == 3
+    assert int(local_mat.getBlockSize()) >= 1
+    assert metadata["matis_local_mat_type"] == "sbaij"
+
+    mat.destroy()
+
+
 def test_matlab_exact_solver_accepts_explicit_bddc_preconditioner() -> None:
     A_local = _local_block_matrix()
     P = local_csr_to_petsc_matis_matrix(

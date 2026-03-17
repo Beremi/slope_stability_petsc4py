@@ -23,6 +23,7 @@ from slope_stability.mesh.reorder import reorder_mesh_nodes
 from slope_stability.utils import (
     bddc_pc_coordinates_from_metadata,
     extract_submatrix_free,
+    get_petsc_is_local_mat,
     get_petsc_matrix_metadata,
     global_array_to_petsc_vec,
     local_csr_to_petsc_aij_matrix,
@@ -36,6 +37,37 @@ from slope_stability.fem.quadrature import quadrature_volume_3d
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _parse_petsc_opt_entries(entries: list[str] | None) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw in entries or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"Expected PETSc option in key=value form, got {raw!r}")
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"Expected non-empty PETSc option key in {raw!r}")
+        parsed[key] = value
+    return parsed
+
+
+def _native_ksp_norm_type(name: str):
+    normalized = str(name).strip().lower()
+    mapping = {
+        "default": PETSc.KSP.NormType.DEFAULT,
+        "preconditioned": PETSc.KSP.NormType.PRECONDITIONED,
+        "unpreconditioned": PETSc.KSP.NormType.UNPRECONDITIONED,
+        "natural": PETSc.KSP.NormType.NATURAL,
+        "none": PETSc.KSP.NormType.NONE,
+    }
+    if normalized not in mapping:
+        raise ValueError(f"Unsupported native KSP norm type {name!r}")
+    return mapping[normalized]
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -75,6 +107,22 @@ def _set_petsc_option(options, key: str, value) -> None:
         options[key] = "true" if value else "false"
     else:
         options[key] = value
+
+
+def _is_global_petsc_option(key: str) -> bool:
+    normalized = str(key).strip().lower()
+    return normalized.startswith("log_") or normalized in {
+        "options_left",
+        "memory_view",
+        "malloc_view",
+        "help",
+        "pc_view",
+        "ksp_view",
+        "ksp_converged_reason",
+        "ksp_monitor_singular_value",
+        "ksp_view_eigenvalues",
+        "log_trace",
+    }
 
 
 def _configure_bddc_pc_from_metadata(pc: PETSc.PC, Pmat: PETSc.Mat, *, use_coordinates: bool = True) -> None:
@@ -130,6 +178,7 @@ def _build_native_petsc_ksp(args, *, operator_matrix: PETSc.Mat, preconditioning
     ksp.setType(_native_ksp_type(args.native_ksp_type))
     ksp.setInitialGuessNonzero(False)
     ksp.setTolerances(rtol=float(args.linear_tolerance), atol=1e-30, max_it=int(args.linear_max_iter))
+    ksp.setNormType(_native_ksp_norm_type(args.native_ksp_norm_type))
     pc = ksp.getPC()
     backend = str(args.pc_backend).lower()
     if backend == "bddc":
@@ -160,6 +209,8 @@ def _build_native_petsc_ksp(args, *, operator_matrix: PETSc.Mat, preconditioning
         "pc_bddc_coarse_pc_type",
         "pc_bddc_dirichlet_approximate",
         "pc_bddc_neumann_approximate",
+        "pc_bddc_monolithic",
+        "pc_bddc_coarse_redundant_pc_type",
         "pc_bddc_switch_static",
         "pc_bddc_use_deluxe_scaling",
         "pc_bddc_use_vertices",
@@ -170,14 +221,22 @@ def _build_native_petsc_ksp(args, *, operator_matrix: PETSc.Mat, preconditioning
         "pc_bddc_check_level",
         "pc_hypre_coarsen_type",
         "pc_hypre_interp_type",
+        "pc_hypre_boomeramg_max_iter",
     ):
-        _set_petsc_option(opts, f"{prefix}{key}", getattr(args, key))
+        _set_petsc_option(opts, f"{prefix}{key}", getattr(args, key, None))
+    for key, value in getattr(args, "petsc_opt_map", {}).items():
+        target_key = str(key) if _is_global_petsc_option(str(key)) else f"{prefix}{key}"
+        _set_petsc_option(opts, target_key, value)
     ksp.setFromOptions()
     ksp.setUp()
     return ksp, float(perf_counter() - t0)
 
 
-def _native_petsc_ksp_solve_once(ksp: PETSc.KSP, A: PETSc.Mat, rhs_full: np.ndarray) -> tuple[np.ndarray, float, int, int]:
+def _native_petsc_ksp_solve_once(
+    ksp: PETSc.KSP,
+    A: PETSc.Mat,
+    rhs_full: np.ndarray,
+) -> tuple[np.ndarray, float, int, int, list[float], list[float]]:
     rhs = global_array_to_petsc_vec(
         np.asarray(rhs_full, dtype=np.float64),
         comm=A.getComm(),
@@ -186,15 +245,28 @@ def _native_petsc_ksp_solve_once(ksp: PETSc.KSP, A: PETSc.Mat, rhs_full: np.ndar
     )
     x = A.createVecRight()
     x.set(0.0)
+    residual_history: list[float] = []
+    rhs_norm = float(np.linalg.norm(np.asarray(rhs_full, dtype=np.float64).reshape(-1)))
+    rhs_norm = max(rhs_norm, 1.0)
+
+    def _monitor(_ksp, _it, rnorm):
+        residual_history.append(float(rnorm))
+
+    ksp.setMonitor(_monitor)
     t0 = perf_counter()
     ksp.solve(rhs, x)
     elapsed = float(perf_counter() - t0)
     solution = petsc_vec_to_global_array(x)
     reason = int(ksp.getConvergedReason())
     iterations = int(ksp.getIterationNumber())
+    if not residual_history:
+        residual = np.asarray(matvec_to_numpy(A, solution), dtype=np.float64).reshape(-1) - np.asarray(rhs_full, dtype=np.float64).reshape(-1)
+        residual_history = [float(np.linalg.norm(residual))]
+    relative_residual_history = [float(v / rhs_norm) for v in residual_history]
+    ksp.cancelMonitor()
     rhs.destroy()
     x.destroy()
-    return solution, elapsed, iterations, reason
+    return solution, elapsed, iterations, reason, residual_history, relative_residual_history
 
 
 def _build_problem(
@@ -203,6 +275,8 @@ def _build_problem(
     elem_type: str,
     node_ordering: str,
     material_rows: list[list[float]] | None,
+    adjacency_source: str,
+    corner_only_primals: bool,
 ):
     if material_rows is None:
         material_rows = load_material_rows_for_path(mesh_path)
@@ -273,6 +347,8 @@ def _build_problem(
         materials,
         (row0 // coord.shape[0], row1 // coord.shape[0]),
         elem_type=elem_type,
+        adjacency_source=adjacency_source,
+        corner_only_primals=corner_only_primals,
     )
 
     const_builder = ConstitutiveOperator(
@@ -318,6 +394,8 @@ def _build_solver(args, *, q_mask: np.ndarray, coord: np.ndarray):
         "pc_bddc_coarse_pc_type",
         "pc_bddc_dirichlet_approximate",
         "pc_bddc_neumann_approximate",
+        "pc_bddc_monolithic",
+        "pc_bddc_coarse_redundant_pc_type",
         "pc_bddc_use_deluxe_scaling",
         "pc_bddc_use_vertices",
         "pc_bddc_use_edges",
@@ -331,6 +409,7 @@ def _build_solver(args, *, q_mask: np.ndarray, coord: np.ndarray):
         value = getattr(args, key)
         if value is not None:
             options[key] = value
+    options.update(getattr(args, "petsc_opt_map", {}))
     return SolverFactory.create(
         args.solver_type,
         tolerance=float(args.linear_tolerance),
@@ -360,6 +439,8 @@ def run_probe(args) -> dict[str, object]:
         elem_type=str(args.elem_type),
         node_ordering=str(args.node_ordering),
         material_rows=None,
+        adjacency_source=str(args.adjacency_source),
+        corner_only_primals=bool(args.corner_only_primals),
     )
     free_idx = q_to_free_indices(q_mask)
     f_full = np.asarray(f_V, dtype=np.float64).reshape(-1, order="F")
@@ -374,7 +455,7 @@ def run_probe(args) -> dict[str, object]:
 
     Pmat = None
     if str(args.pc_backend).lower() == "bddc":
-        Pmat = const_builder.build_bddc_elastic_matrix()
+        Pmat = const_builder.build_bddc_elastic_matrix(local_mat_type=str(args.bddc_local_mat_type))
         if rank == 0 and emit is not None:
             emit(
                 "elastic_pmat_built",
@@ -386,6 +467,8 @@ def run_probe(args) -> dict[str, object]:
     solve_times: list[float] = []
     residual_norms: list[float] = []
     relative_residual_norms: list[float] = []
+    residual_histories: list[list[float]] = []
+    relative_residual_histories: list[list[float]] = []
     solve_deltas: list[dict[str, float]] = []
     iteration_counts: list[int] = []
     converged_reasons: list[int] = []
@@ -410,13 +493,19 @@ def run_probe(args) -> dict[str, object]:
             )
 
         for solve_idx in range(solve_count):
-            x_full, elapsed, iterations, reason = _native_petsc_ksp_solve_once(native_ksp, K_elast, f_full)
+            x_full, elapsed, iterations, reason, residual_history, relative_residual_history = _native_petsc_ksp_solve_once(
+                native_ksp,
+                K_elast,
+                f_full,
+            )
             residual = np.asarray(matvec_to_numpy(K_elast, x_full), dtype=np.float64).reshape(-1) - f_full
             residual_norm = float(np.linalg.norm(residual))
             relative_residual_norm = float(residual_norm / rhs_norm)
             solve_times.append(float(elapsed))
             residual_norms.append(float(residual_norm))
             relative_residual_norms.append(float(relative_residual_norm))
+            residual_histories.append([float(v) for v in residual_history])
+            relative_residual_histories.append([float(v) for v in relative_residual_history])
             iteration_counts.append(int(iterations))
             converged_reasons.append(int(reason))
             solution_norm = float(np.linalg.norm(x_full))
@@ -525,13 +614,32 @@ def run_probe(args) -> dict[str, object]:
         "pc_backend": str(args.pc_backend),
         "outer_solver_family": str(args.outer_solver_family),
         "native_ksp_type": None if str(args.outer_solver_family) != "native_petsc" else str(args.native_ksp_type),
+        "native_ksp_norm_type": None
+        if str(args.outer_solver_family) != "native_petsc"
+        else str(args.native_ksp_norm_type),
         "preconditioner_matrix_source": str(args.preconditioner_matrix_source),
+        "petsc_opt_map": dict(getattr(args, "petsc_opt_map", {})),
+        "pc_hypre_boomeramg_max_iter": (
+            None if args.pc_hypre_boomeramg_max_iter is None else int(args.pc_hypre_boomeramg_max_iter)
+        ),
+        "adjacency_source": str(args.adjacency_source),
+        "corner_only_primals": bool(args.corner_only_primals),
+        "bddc_local_mat_type": str(args.bddc_local_mat_type),
         "runtime_seconds": float(perf_counter() - t0),
         "setup_elapsed_s": float(setup_elapsed),
         "solve_count": int(solve_count),
         "solve_times_s": [float(v) for v in solve_times],
         "residual_norms": [float(v) for v in residual_norms],
         "relative_residual_norms": [float(v) for v in relative_residual_norms],
+        "reported_residual_histories": [[float(v) for v in hist] for hist in residual_histories],
+        "relative_reported_residual_histories": [[float(v) for v in hist] for hist in relative_residual_histories],
+        "residual_histories": [[float(v) for v in hist] for hist in residual_histories],
+        "relative_residual_histories": [[float(v) for v in hist] for hist in relative_residual_histories],
+        "reported_residual_history": ([] if not residual_histories else [float(v) for v in residual_histories[0]]),
+        "relative_reported_residual_history": (
+            [] if not relative_residual_histories else [float(v) for v in relative_residual_histories[0]]
+        ),
+        "final_relative_residual": (None if not relative_residual_norms else float(relative_residual_norms[-1])),
         "rhs_norm": float(rhs_norm),
         "solution_norm": float(solution_norm),
         "iteration_counts": [int(v) for v in iteration_counts],
@@ -544,12 +652,29 @@ def run_probe(args) -> dict[str, object]:
         "first_progress_elapsed_s": float(setup_elapsed),
         **diagnostics,
     }
+    if Pmat is not None:
+        pmat_metadata = get_petsc_matrix_metadata(Pmat)
+        local_mat = get_petsc_is_local_mat(Pmat)
+        result.update(
+            {
+                "pmat_type": str(Pmat.getType()),
+                "pmat_block_size": int(Pmat.getBlockSize()),
+                "local_pmat_type": (None if local_mat is None else str(local_mat.getType())),
+                "local_pmat_block_size": (None if local_mat is None else int(local_mat.getBlockSize())),
+                "matis_local_mat_type": pmat_metadata.get("matis_local_mat_type"),
+                "bddc_local_vertex_major_ordering": bool(pmat_metadata.get("bddc_local_vertex_major_ordering", False)),
+                "bddc_local_block_size": (
+                    None if pmat_metadata.get("bddc_local_block_size") is None else int(pmat_metadata["bddc_local_block_size"])
+                ),
+            }
+        )
     if bddc_pattern is not None:
         result.update(
             {
                 "bddc_local_total_bytes": float(bddc_pattern.stats.get("local_total_bytes", 0.0)),
                 "bddc_local_primal_vertices_count": float(bddc_pattern.stats.get("local_primal_vertices_count", 0.0)),
                 "bddc_local_interface_nodes_count": float(bddc_pattern.stats.get("local_interface_nodes_count", 0.0)),
+                "bddc_adjacency_source": str(bddc_pattern.adjacency_source),
             }
         )
 
@@ -608,6 +733,12 @@ def main() -> None:
     parser.add_argument("--linear_max_iter", type=int, default=200)
     parser.add_argument("--outer_solver_family", type=str, default="repo", choices=["repo", "native_petsc"])
     parser.add_argument("--native_ksp_type", type=str, default="cg", choices=["cg", "fgmres", "gmres"])
+    parser.add_argument(
+        "--native_ksp_norm_type",
+        type=str,
+        default="unpreconditioned",
+        choices=["default", "preconditioned", "unpreconditioned", "natural", "none"],
+    )
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_GAMG_NULLSPACE")
     parser.add_argument("--pc_backend", type=str, default="bddc", choices=["hypre", "gamg", "bddc"])
     parser.add_argument("--preconditioner_matrix_source", type=str, default="elastic", choices=["tangent", "regularized", "elastic"])
@@ -621,7 +752,8 @@ def main() -> None:
     parser.add_argument("--preconditioner_rebuild_interval", type=int, default=1)
     parser.add_argument("--pc_hypre_coarsen_type", type=str, default=None)
     parser.add_argument("--pc_hypre_interp_type", type=str, default=None)
-    parser.add_argument("--pc_bddc_symmetric", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--pc_hypre_boomeramg_max_iter", type=int, default=None)
+    parser.add_argument("--pc_bddc_symmetric", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_dirichlet_ksp_type", type=str, default=None)
     parser.add_argument("--pc_bddc_dirichlet_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_neumann_ksp_type", type=str, default=None)
@@ -630,6 +762,8 @@ def main() -> None:
     parser.add_argument("--pc_bddc_coarse_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_dirichlet_approximate", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_neumann_approximate", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_monolithic", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_coarse_redundant_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_switch_static", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_deluxe_scaling", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_vertices", action=argparse.BooleanOptionalAction, default=None)
@@ -638,8 +772,13 @@ def main() -> None:
     parser.add_argument("--pc_bddc_use_change_of_basis", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_change_on_faces", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_check_level", type=int, default=None)
+    parser.add_argument("--adjacency_source", type=str, default="csr", choices=["csr", "none", "topology"])
+    parser.add_argument("--corner_only_primals", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--bddc_local_mat_type", type=str, default="aij", choices=["aij", "sbaij"])
+    parser.add_argument("--petsc-opt", action="append", default=[], dest="petsc_opt")
     args = parser.parse_args()
     args.elem_type = validate_supported_elem_type(3, args.elem_type)
+    args.petsc_opt_map = _parse_petsc_opt_entries(args.petsc_opt)
     result = run_probe(args)
     if int(PETSc.COMM_WORLD.getRank()) == 0:
         print(json.dumps(result, indent=2))

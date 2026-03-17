@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ DEFAULT_STEP2_REPORT = Path(__file__).resolve().parent / "report_p4_precondition
 DEFAULT_BDDC_GATE_REPORT = Path(__file__).resolve().parent / "report_p4_bddc_gate.md"
 DEFAULT_BDDC_SHORT_REPORT = Path(__file__).resolve().parent / "report_bddc_short_runs.md"
 DEFAULT_BDDC_FULL_REPORT = Path(__file__).resolve().parent / "report_bddc_full_trajectory.md"
+DEFAULT_BDDC_SWEEP_REPORT = Path(__file__).resolve().parent / "report_bddc_param_sweep_v2.md"
 DEFAULT_SCREEN_RANKS = (1, 8)
 DEFAULT_SCALE_RANKS = (1, 2, 4, 8)
 DEFAULT_STEP2 = 2
@@ -452,6 +454,170 @@ def _variant_registry(*, include_nongalerkin: bool) -> dict[str, Variant]:
     }
 
 
+def _with_petsc_opts(base: tuple[str, ...], *entries: str) -> tuple[str, ...]:
+    args = list(base)
+    for entry in entries:
+        args.extend(["--petsc-opt", str(entry)])
+    return tuple(args)
+
+
+def _without_flags(base: tuple[str, ...], *flags: str) -> tuple[str, ...]:
+    remove = set(str(flag) for flag in flags)
+    return tuple(token for token in base if token not in remove)
+
+
+def _with_cli_pairs(base: tuple[str, ...], *pairs: str) -> tuple[str, ...]:
+    args = list(base)
+    args.extend(str(item) for item in pairs)
+    return tuple(args)
+
+
+def _bddc_sweep_registry(*, include_adaptive: bool) -> dict[str, Variant]:
+    probe_common = (
+        "--node-ordering",
+        "block_metis",
+        "--outer_solver_family",
+        "native_petsc",
+        "--native_ksp_type",
+        "cg",
+        "--native_ksp_norm_type",
+        "unpreconditioned",
+    )
+    bddc_common = (
+        *probe_common,
+        "--pc_backend",
+        "bddc",
+        "--preconditioner_matrix_source",
+        "elastic",
+        "--pc_bddc_symmetric",
+        "--pc_bddc_monolithic",
+        "--pc_bddc_coarse_redundant_pc_type",
+        "svd",
+        "--pc_bddc_use_vertices",
+        "--pc_bddc_use_edges",
+        "--pc_bddc_use_faces",
+        "--no-pc_bddc_use_change_of_basis",
+        "--no-pc_bddc_use_change_on_faces",
+        "--pc_bddc_check_level",
+        "2",
+    )
+    bddc_doc_base = (
+        *bddc_common,
+        "--bddc_local_mat_type",
+        "aij",
+        "--pc_bddc_dirichlet_approximate",
+        "--pc_bddc_neumann_approximate",
+        "--pc_bddc_switch_static",
+        "--pc_bddc_dirichlet_ksp_type",
+        "preonly",
+        "--pc_bddc_dirichlet_pc_type",
+        "gamg",
+        "--pc_bddc_neumann_ksp_type",
+        "preonly",
+        "--pc_bddc_neumann_pc_type",
+        "gamg",
+        "--pc_bddc_coarse_ksp_type",
+        "preonly",
+        "--pc_bddc_coarse_pc_type",
+        "lu",
+        "--no-pc_bddc_use_deluxe_scaling",
+    )
+    ex56_smooth = _with_petsc_opts(
+        tuple(bddc_doc_base),
+        "pc_bddc_dirichlet_pc_gamg_type=agg",
+        "pc_bddc_neumann_pc_gamg_type=agg",
+        "pc_bddc_dirichlet_pc_gamg_threshold=0.05",
+        "pc_bddc_neumann_pc_gamg_threshold=0.05",
+        "pc_bddc_dirichlet_pc_gamg_threshold_scale=0.0",
+        "pc_bddc_neumann_pc_gamg_threshold_scale=0.0",
+        "pc_bddc_dirichlet_pc_gamg_aggressive_coarsening=1",
+        "pc_bddc_neumann_pc_gamg_aggressive_coarsening=1",
+        "pc_bddc_dirichlet_pc_gamg_agg_nsmooths=1",
+        "pc_bddc_neumann_pc_gamg_agg_nsmooths=1",
+        "pc_bddc_dirichlet_pc_gamg_reuse_interpolation=true",
+        "pc_bddc_neumann_pc_gamg_reuse_interpolation=true",
+        "pc_bddc_dirichlet_pc_gamg_esteig_ksp_max_it=10",
+        "pc_bddc_neumann_pc_gamg_esteig_ksp_max_it=10",
+        "pc_bddc_dirichlet_mg_levels_ksp_type=chebyshev",
+        "pc_bddc_neumann_mg_levels_ksp_type=chebyshev",
+        "pc_bddc_dirichlet_mg_levels_ksp_max_it=1",
+        "pc_bddc_neumann_mg_levels_ksp_max_it=1",
+    )
+    ex56_deluxe = tuple(
+        "--pc_bddc_use_deluxe_scaling" if item == "--no-pc_bddc_use_deluxe_scaling" else item
+        for item in ex56_smooth
+    )
+    registry = {
+        "hypre_control_v2": Variant(
+            name="hypre_control_v2",
+            description="Native PETSc CG with Hypre HMIS + ext+i control",
+            category="sweep_control",
+            cli_args=(
+                *probe_common,
+                "--pc_backend",
+                "hypre",
+                "--pc_hypre_coarsen_type",
+                "HMIS",
+                "--pc_hypre_interp_type",
+                "ext+i",
+            ),
+        ),
+        "bddc_exact_lu_ref_v2": Variant(
+            name="bddc_exact_lu_ref_v2",
+            description="Exact BDDC reference with monolithic correction, coarse redundant SVD, and local LU",
+            category="sweep_reference",
+            cli_args=(
+                *bddc_common,
+                "--bddc_local_mat_type",
+                "sbaij",
+                "--pc_bddc_dirichlet_ksp_type",
+                "preonly",
+                "--pc_bddc_dirichlet_pc_type",
+                "lu",
+                "--pc_bddc_neumann_ksp_type",
+                "preonly",
+                "--pc_bddc_neumann_pc_type",
+                "lu",
+                "--pc_bddc_coarse_ksp_type",
+                "preonly",
+                "--pc_bddc_coarse_pc_type",
+                "lu",
+                "--no-pc_bddc_use_deluxe_scaling",
+            ),
+        ),
+        "bddc_gamg_doc_base_v2": Variant(
+            name="bddc_gamg_doc_base_v2",
+            description="Approximate local BDDC with monolithic correction, coarse redundant SVD, and local GAMG",
+            category="sweep_bddc",
+            cli_args=tuple(bddc_doc_base),
+        ),
+        "bddc_gamg_ex56_v2": Variant(
+            name="bddc_gamg_ex56_v2",
+            description="Doc-base BDDC plus ex56 local GAMG tuning",
+            category="sweep_bddc",
+            cli_args=ex56_smooth,
+        ),
+        "bddc_gamg_ex56_deluxe_v2": Variant(
+            name="bddc_gamg_ex56_deluxe_v2",
+            description="ex56-tuned BDDC plus deluxe scaling",
+            category="sweep_bddc",
+            cli_args=ex56_deluxe,
+        ),
+    }
+    if include_adaptive:
+        registry["bddc_gamg_ex71_adaptive2_v2"] = Variant(
+            name="bddc_gamg_ex71_adaptive2_v2",
+            description="ex56 + deluxe + adaptive threshold 2.0 + schur_layers 1",
+            category="sweep_bddc",
+            cli_args=_with_petsc_opts(
+                ex56_deluxe,
+                "pc_bddc_adaptive_threshold=2.0",
+                "pc_bddc_schur_layers=1",
+            ),
+        )
+    return registry
+
+
 def _load_progress_summary(out_dir: Path) -> dict[str, int]:
     progress_path = out_dir / "data" / "progress.jsonl"
     init_accepted_states = 0
@@ -615,6 +781,156 @@ def _load_case_metrics(
     else:
         metrics["peak_rss_gib"] = 0.0
     return metrics
+
+
+def _load_probe_metrics(
+    out_dir: Path,
+    *,
+    memory_summary: dict[str, Any] | None = None,
+    startup_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    data = json.loads((out_dir / "data" / "run_info.json").read_text(encoding="utf-8"))
+    stdout_path = out_dir.parent / f"{out_dir.name}.stdout.log"
+    stderr_path = out_dir.parent / f"{out_dir.name}.stderr.log"
+    petsc_log_path = out_dir.parent / f"{out_dir.name}.petsc.log"
+    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+    log_text = ""
+    if petsc_log_path.exists():
+        log_text = petsc_log_path.read_text(encoding="utf-8", errors="replace")
+    else:
+        log_text = stdout_text
+    coarse_info = _parse_bddc_coarse_info("\n".join([stdout_text, stderr_text]))
+    petsc_events = _parse_petsc_log_events(log_text)
+    metrics = {
+        "runtime_seconds": float(data["runtime_seconds"]),
+        "setup_elapsed_s": float(data["setup_elapsed_s"]),
+        "solve_times_s": [float(v) for v in data.get("solve_times_s", [])],
+        "solve_time": float(sum(float(v) for v in data.get("solve_times_s", []))),
+        "iteration_counts": [int(v) for v in data.get("iteration_counts", [])],
+        "iteration_count": int(data.get("iteration_counts", [0])[-1]) if data.get("iteration_counts") else 0,
+        "converged_reasons": [int(v) for v in data.get("converged_reasons", [])],
+        "converged_reason": int(data.get("converged_reasons", [0])[-1]) if data.get("converged_reasons") else 0,
+        "final_relative_residual": (
+            float(data["final_relative_residual"])
+            if data.get("final_relative_residual") is not None
+            else (
+                float(data.get("relative_residual_norms", [0.0])[-1])
+                if data.get("relative_residual_norms")
+                else 0.0
+            )
+        ),
+        "reported_residual_history": [float(v) for v in data.get("relative_reported_residual_history", [])],
+        "relative_residual_history": [float(v) for v in data.get("relative_reported_residual_history", [])],
+        "reported_residual_histories": [
+            [float(v) for v in hist] for hist in data.get("relative_reported_residual_histories", [])
+        ],
+        "pc_backend": str(data.get("pc_backend", "")),
+        "outer_solver_family": str(data.get("outer_solver_family", "")),
+        "native_ksp_type": data.get("native_ksp_type"),
+        "native_ksp_norm_type": data.get("native_ksp_norm_type"),
+        "preconditioner_matrix_source": str(data.get("preconditioner_matrix_source", "")),
+        "pmat_type": data.get("pmat_type"),
+        "pmat_block_size": data.get("pmat_block_size"),
+        "local_pmat_type": data.get("local_pmat_type"),
+        "local_pmat_block_size": data.get("local_pmat_block_size"),
+        "matis_local_mat_type": data.get("matis_local_mat_type"),
+        "bddc_local_vertex_major_ordering": bool(data.get("bddc_local_vertex_major_ordering", False)),
+        "bddc_local_block_size": data.get("bddc_local_block_size"),
+        "bddc_adjacency_source": data.get("bddc_adjacency_source", data.get("adjacency_source")),
+        "linear_total_rank_metric": float(data.get("linear_total_rank_metric", 0.0)),
+        "attempt_linear_preconditioner_time_total": float(data.get("attempt_linear_preconditioner_time_total", 0.0)),
+        "attempt_linear_solve_time_total": float(data.get("attempt_linear_solve_time_total", 0.0)),
+        "preconditioner_rebuild_count": int(data.get("preconditioner_rebuild_count", 0)),
+        "preconditioner_reuse_count": int(data.get("preconditioner_reuse_count", 0)),
+        "preconditioner_age_max": int(data.get("preconditioner_age_max", 0)),
+        "progress_file_created": bool((startup_summary or {}).get("progress_file_created", True)),
+        "first_progress_elapsed_s": (
+            None
+            if (startup_summary or {}).get("first_progress_elapsed_s") is None
+            else float((startup_summary or {})["first_progress_elapsed_s"])
+        ),
+        "startup_stall_reason": (startup_summary or {}).get("startup_stall_reason"),
+        "bddc_local_total_bytes": float(data.get("bddc_local_total_bytes", 0.0)),
+        "bddc_local_primal_vertices_count": int(float(data.get("bddc_local_primal_vertices_count", 0.0))),
+        "bddc_candidate_vertices": coarse_info.get("candidate_vertices"),
+        "bddc_candidate_edges": coarse_info.get("candidate_edges"),
+        "bddc_candidate_faces": coarse_info.get("candidate_faces"),
+        "bddc_coarse_size": coarse_info.get("coarse_size"),
+        "petsc_bddc_events": petsc_events,
+        "petsc_log": (_path_label(petsc_log_path) if petsc_log_path.exists() else None),
+    }
+    if memory_summary is not None:
+        metrics["memory_guard"] = dict(memory_summary)
+        metrics["peak_rss_gib"] = float(memory_summary.get("peak_rss_gib", 0.0))
+    else:
+        metrics["peak_rss_gib"] = 0.0
+    return metrics
+
+
+def _parse_bddc_coarse_info(text: str) -> dict[str, int | None]:
+    lowered = str(text)
+    patterns = {
+        "candidate_vertices": [
+            r"got\s+(\d+)\s+local candidate vertices",
+            r"candidate vertices[^0-9]*(\d+)",
+            r"vertices candidates[^0-9]*(\d+)",
+        ],
+        "candidate_edges": [
+            r"got\s+(\d+)\s+local candidate edges",
+            r"candidate edges[^0-9]*(\d+)",
+            r"edges candidates[^0-9]*(\d+)",
+        ],
+        "candidate_faces": [
+            r"got\s+(\d+)\s+local candidate faces",
+            r"candidate faces[^0-9]*(\d+)",
+            r"faces candidates[^0-9]*(\d+)",
+        ],
+        "coarse_size": [
+            r"size of coarse problem is\s+(\d+)",
+            r"coarse (?:problem )?(?:dimension|size)[^0-9]*(\d+)",
+            r"coarse dofs[^0-9]*(\d+)",
+        ],
+    }
+    parsed: dict[str, int | None] = {}
+    for key, variants in patterns.items():
+        parsed[key] = None
+        for pattern in variants:
+            match = re.search(pattern, lowered, flags=re.IGNORECASE)
+            if match:
+                parsed[key] = int(match.group(1))
+                break
+    return parsed
+
+
+def _parse_petsc_log_events(text: str) -> dict[str, float]:
+    events = {}
+    for event_name in (
+        "PC_BDDC_Topology",
+        "PC_BDDC_LocalSolvers",
+        "PC_BDDC_CorrectionSetUp",
+        "PC_BDDC_CoarseSetUp",
+        "PC_BDDC_ApproxSetUp",
+    ):
+        for line in str(text).splitlines():
+            if event_name not in line:
+                continue
+            numbers = re.findall(r"[-+]?(?:\\d+\\.\\d*|\\.\\d+|\\d+)(?:[Ee][-+]?\\d+)?", line)
+            if numbers:
+                events[event_name] = float(numbers[-1])
+                break
+    return events
+
+
+def _classify_probe_failure(*, startup_summary: dict[str, Any], stderr_path: Path) -> str:
+    if startup_summary.get("event") == "startup_stall":
+        return "startup_stall"
+    excerpt = _tail_text(stderr_path).lower()
+    if "unknown option" in excerpt or "unused database option" in excerpt:
+        return "unsupported_option"
+    if startup_summary:
+        return str(startup_summary.get("event", "runtime_failure"))
+    return "runtime_failure"
 
 
 def _tail_text(path: Path, *, n_lines: int = 40) -> str:
@@ -963,6 +1279,135 @@ def _run_case(
     }
 
 
+def _run_probe_case(
+    *,
+    variant: Variant,
+    ranks: int,
+    mesh_path: Path,
+    out_dir: Path,
+    elem_type: str,
+    mode: str,
+    linear_tolerance: float,
+    linear_max_iter: int,
+    guard_limit_gib: float | None,
+    wall_time_limit_s: float | None,
+    reuse_existing: bool,
+    startup_progress_timeout_s: float | None = None,
+    extra_petsc_opts: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    stdout_path = out_dir.parent / f"{out_dir.name}.stdout.log"
+    stderr_path = out_dir.parent / f"{out_dir.name}.stderr.log"
+    memory_log_path = out_dir.parent / f"{out_dir.name}.memory_guard.jsonl"
+    startup_summary_path = out_dir / "startup_summary.json"
+    petsc_log_path = out_dir.parent / f"{out_dir.name}.petsc.log"
+
+    if reuse_existing and (out_dir / "data" / "run_info.json").exists():
+        memory_summary = _load_memory_guard_summary(out_dir.parent / f"{out_dir.name}.memory_guard.jsonl")
+        startup_summary = json.loads(startup_summary_path.read_text(encoding="utf-8")) if startup_summary_path.exists() else None
+        return {
+            "status": "completed",
+            "out_dir": _path_label(out_dir),
+            "metrics": _load_probe_metrics(out_dir, memory_summary=memory_summary, startup_summary=startup_summary),
+            "startup_summary": startup_summary,
+        }
+    if reuse_existing and startup_summary_path.exists():
+        startup_summary = (
+            json.loads(startup_summary_path.read_text(encoding="utf-8"))
+            if startup_summary_path.exists()
+            else {}
+        )
+        memory_summary = _load_memory_guard_summary(memory_log_path)
+        result = {
+            "status": _classify_probe_failure(startup_summary=startup_summary, stderr_path=stderr_path),
+            "out_dir": _path_label(out_dir),
+            "stdout_log": _path_label(stdout_path),
+            "stderr_log": _path_label(stderr_path),
+            "memory_guard": memory_summary,
+            "failure_excerpt": _tail_text(stderr_path),
+            "startup_summary": startup_summary,
+        }
+        if startup_summary.get("backtrace_path"):
+            result["startup_backtrace"] = startup_summary["backtrace_path"]
+        return result
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+
+    cmd = [
+        "mpiexec",
+        "-n",
+        str(int(ranks)),
+        sys.executable,
+        str(ROOT / "benchmarks" / "3d_hetero_ssr_default" / "probe_bddc_elastic.py"),
+        "--out-dir",
+        str(out_dir),
+        "--mesh-path",
+        str(mesh_path),
+        "--elem-type",
+        str(elem_type).upper(),
+        "--mode",
+        str(mode),
+        "--linear_tolerance",
+        str(float(linear_tolerance)),
+        "--linear_max_iter",
+        str(int(linear_max_iter)),
+        *variant.cli_args,
+    ]
+    dynamic_petsc_opts = [
+        f"log_view=:{petsc_log_path}:ascii_info_detail",
+        "log_view_memory=true",
+        *[str(v) for v in extra_petsc_opts],
+    ]
+    for entry in dynamic_petsc_opts:
+        cmd.extend(["--petsc-opt", entry])
+
+    progress_path = out_dir / "data" / "progress.jsonl"
+    startup_backtrace_path = out_dir.parent / f"{out_dir.name}.startup_stall.bt.txt"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return_code, startup_summary = _run_monitored_command(
+        cmd=cmd,
+        cwd=ROOT,
+        env=env,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        memory_log_path=memory_log_path,
+        guard_limit_gib=guard_limit_gib,
+        wall_time_limit_s=wall_time_limit_s,
+        progress_path=progress_path,
+        startup_progress_timeout_s=startup_progress_timeout_s,
+        startup_backtrace_path=startup_backtrace_path,
+    )
+    startup_summary_path.write_text(json.dumps(startup_summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    memory_summary = _load_memory_guard_summary(memory_log_path)
+    if return_code != 0 or not (out_dir / "data" / "run_info.json").exists():
+        status = _classify_probe_failure(startup_summary=startup_summary, stderr_path=stderr_path)
+        result = {
+            "status": status,
+            "out_dir": _path_label(out_dir),
+            "stdout_log": _path_label(stdout_path),
+            "stderr_log": _path_label(stderr_path),
+            "memory_guard": memory_summary,
+            "failure_excerpt": _tail_text(stderr_path),
+            "startup_summary": startup_summary,
+        }
+        if startup_summary.get("backtrace_path"):
+            result["startup_backtrace"] = startup_summary["backtrace_path"]
+        return result
+
+    return {
+        "status": "completed",
+        "out_dir": _path_label(out_dir),
+        "stdout_log": _path_label(stdout_path),
+        "stderr_log": _path_label(stderr_path),
+        "memory_guard": memory_summary,
+        "startup_summary": startup_summary,
+        "metrics": _load_probe_metrics(out_dir, memory_summary=memory_summary, startup_summary=startup_summary),
+    }
+
+
 def _screen_variant(
     *,
     variant: Variant,
@@ -1293,6 +1738,13 @@ BDDCElasticCandidateNames = (
     "bddc_gamg_elastic",
 )
 
+BDDCSweepCandidateNames = (
+    "bddc_gamg_doc_base_v2",
+    "bddc_gamg_ex56_v2",
+    "bddc_gamg_ex56_deluxe_v2",
+    "bddc_gamg_ex71_adaptive2_v2",
+)
+
 
 def _bddc_runtime_metric(metrics: dict[str, Any]) -> float:
     return float(metrics.get("attempt_linear_preconditioner_time_total", 0.0)) + float(
@@ -1574,6 +2026,728 @@ def _run_bddc_prototype_workflow(
         startup_progress_timeout_s=float(startup_progress_timeout_p4_s),
     )
     return summary
+
+
+def _petsc_has_external_package(name: str) -> bool:
+    try:
+        from petsc4py import PETSc  # type: ignore
+
+        return bool(PETSc.Sys.hasExternalPackage(str(name)))
+    except Exception:
+        return False
+
+
+def _plot_sweep_histories(
+    *,
+    plot_script: Path,
+    out_path: Path,
+    title: str,
+    target: float,
+    runs: list[tuple[str, Path]],
+) -> Path:
+    cmd = [
+        sys.executable,
+        str(plot_script),
+        "--out",
+        str(out_path),
+        "--title",
+        str(title),
+        "--target",
+        str(float(target)),
+    ]
+    for label, path in runs:
+        cmd.extend(["--run", f"{label}={path}"])
+    subprocess.run(cmd, cwd=str(ROOT), check=True)
+    return out_path
+
+
+def _promote_bddc_sweep_candidates(*, screening: dict[str, Any], control_name: str = "hypre_control_v2") -> list[str]:
+    control = screening[control_name]
+    if control.get("status") != "completed":
+        return []
+    control_metrics = control["metrics"]
+    control_peak = float(control_metrics.get("peak_rss_gib", 0.0))
+    scored: list[tuple[int, float, float, str]] = []
+    for name, entry in screening.items():
+        if entry.get("variant_category") != "sweep_bddc":
+            continue
+        if entry.get("status") != "completed":
+            continue
+        metrics = entry["metrics"]
+        if int(metrics.get("converged_reason", 0)) <= 0:
+            continue
+        if float(metrics.get("final_relative_residual", np.inf)) > 1.0e-5:
+            continue
+        if control_peak > 0.0 and float(metrics.get("peak_rss_gib", 0.0)) > 1.5 * control_peak:
+            continue
+        if float(metrics.get("runtime_seconds", np.inf)) > 3.0 * float(control_metrics.get("runtime_seconds", np.inf)):
+            continue
+        scored.append(
+            (
+                int(metrics.get("iteration_count", 0)),
+                float(metrics.get("solve_time", 0.0)),
+                float(metrics.get("setup_elapsed_s", 0.0)),
+                name,
+            )
+        )
+    scored.sort()
+    if not scored:
+        return []
+    promoted = [scored[0][3]]
+    if len(scored) >= 2:
+        promoted.append(scored[1][3])
+    return promoted
+
+
+def _nonlinear_cli_from_linear_probe_variant(variant: Variant) -> tuple[str, ...]:
+    args = list(variant.cli_args)
+    retained: list[str] = []
+    i = 0
+    flag_only = {
+        "--pc_bddc_symmetric",
+        "--pc_bddc_dirichlet_approximate",
+        "--pc_bddc_neumann_approximate",
+        "--pc_bddc_monolithic",
+        "--pc_bddc_switch_static",
+        "--pc_bddc_use_deluxe_scaling",
+        "--pc_bddc_use_vertices",
+        "--pc_bddc_use_edges",
+        "--pc_bddc_use_faces",
+        "--no-pc_bddc_use_change_of_basis",
+        "--no-pc_bddc_use_change_on_faces",
+    }
+    one_value = {
+        "--pc_bddc_check_level",
+        "--pc_bddc_dirichlet_ksp_type",
+        "--pc_bddc_dirichlet_pc_type",
+        "--pc_bddc_neumann_ksp_type",
+        "--pc_bddc_neumann_pc_type",
+        "--pc_bddc_coarse_ksp_type",
+        "--pc_bddc_coarse_pc_type",
+        "--pc_bddc_coarse_redundant_pc_type",
+        "--petsc-opt",
+    }
+    while i < len(args):
+        token = args[i]
+        if token in flag_only:
+            retained.append(token)
+            i += 1
+            continue
+        if token in one_value and i + 1 < len(args):
+            retained.extend([token, args[i + 1]])
+            i += 2
+            continue
+        i += 1
+    return tuple(retained)
+
+
+def _run_bddc_sweep_workflow(
+    *,
+    registry: dict[str, Variant],
+    mesh_path: Path,
+    out_root: Path,
+    linear_tolerance: float,
+    linear_max_iter: int,
+    max_deflation_basis_vectors: int,
+    reuse_existing: bool,
+    requested_variants: tuple[str, ...] | None,
+) -> dict[str, Any]:
+    plot_script = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "plot_p4_linear_convergence.py"
+    variant_lookup: dict[str, Variant] = dict(registry)
+    summary: dict[str, Any] = {
+        "linear_tolerance": float(linear_tolerance),
+        "linear_max_iter": int(linear_max_iter),
+        "mumps_available": bool(_petsc_has_external_package("mumps")),
+        "phase0_note": "Supersedes bddc_param_sweep_v1 because v1 benchmarked BDDC without the corrected symmetric/monolithic/coarse-redundant baseline.",
+        "option_smokes": {},
+        "linear_screen": {},
+        "approximate_side_sweep": {},
+        "topology_sweep": {},
+        "promoted_candidates": [],
+        "diagnostic_linear": {},
+        "nonlinear_short": {},
+        "nonlinear_step10": {"status": "not_run"},
+        "rank8_linear": {"status": "not_run"},
+        "plots": {"overlays": {}, "aggregate": None},
+    }
+
+    enabled_names = list(BDDCSweepCandidateNames)
+    if requested_variants is not None:
+        enabled_names = [name for name in enabled_names if name in requested_variants]
+    if not bool(summary["mumps_available"]):
+        enabled_names = [name for name in enabled_names if name != "bddc_gamg_ex71_adaptive2_v2"]
+
+    smoke_registry = ["hypre_control_v2", "bddc_exact_lu_ref_v2", *enabled_names]
+    for name in smoke_registry:
+        variant = registry[name]
+        result = _run_probe_case(
+            variant=variant,
+            ranks=1,
+            mesh_path=mesh_path,
+            out_dir=out_root / "option_smokes" / name / "rank1_p4_single",
+            elem_type="P4",
+            mode="single_solve",
+            linear_tolerance=float(linear_tolerance),
+            linear_max_iter=int(linear_max_iter),
+            guard_limit_gib=None,
+            wall_time_limit_s=1200.0,
+            reuse_existing=reuse_existing,
+            startup_progress_timeout_s=180.0,
+        )
+        summary["option_smokes"][name] = {
+            "variant_category": variant.category,
+            "description": variant.description,
+            **result,
+        }
+    enabled_names = [
+        name
+        for name in enabled_names
+        if summary["option_smokes"].get(name, {}).get("status") == "completed"
+    ]
+
+    screen_names = ["hypre_control_v2"]
+    if summary["option_smokes"].get("bddc_exact_lu_ref_v2", {}).get("status") == "completed":
+        screen_names.append("bddc_exact_lu_ref_v2")
+    screen_names.extend(enabled_names)
+    for name in screen_names:
+        variant = registry[name]
+        result = _run_probe_case(
+            variant=variant,
+            ranks=2,
+            mesh_path=mesh_path,
+            out_dir=out_root / "linear_screen" / name / "rank2_p4_single",
+            elem_type="P4",
+            mode="single_solve",
+            linear_tolerance=float(linear_tolerance),
+            linear_max_iter=int(linear_max_iter),
+            guard_limit_gib=None,
+            wall_time_limit_s=3600.0,
+            reuse_existing=reuse_existing,
+            startup_progress_timeout_s=300.0,
+        )
+        summary["linear_screen"][name] = {
+            "variant_category": variant.category,
+            "description": variant.description,
+            **result,
+        }
+
+    hypre_linear = summary["linear_screen"].get("hypre_control_v2")
+    hypre_metrics = hypre_linear.get("metrics", {}) if hypre_linear and hypre_linear.get("status") == "completed" else {}
+    if hypre_linear and hypre_linear.get("status") == "completed":
+        hypre_run_info = out_root / "linear_screen" / "hypre_control_v2" / "rank2_p4_single" / "data" / "run_info.json"
+        overlay_dir = out_root / "plots"
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+        aggregate_runs: list[tuple[str, Path]] = [("hypre", hypre_run_info)]
+        for name in enabled_names:
+            entry = summary["linear_screen"].get(name, {})
+            if entry.get("status") != "completed":
+                continue
+            run_info_path = out_root / "linear_screen" / name / "rank2_p4_single" / "data" / "run_info.json"
+            plot_path = overlay_dir / f"{name}_vs_hypre.png"
+            _plot_sweep_histories(
+                plot_script=plot_script,
+                out_path=plot_path,
+                title=f"P4 Linear Elastic Convergence: Hypre vs {name}",
+                target=float(linear_tolerance),
+                runs=[("hypre", hypre_run_info), (name, run_info_path)],
+            )
+            summary["plots"]["overlays"][name] = _path_label(plot_path)
+            aggregate_runs.append((name, run_info_path))
+        if len(aggregate_runs) >= 2:
+            aggregate_path = overlay_dir / "p4_linear_top_candidates.png"
+            _plot_sweep_histories(
+                plot_script=plot_script,
+                out_path=aggregate_path,
+                title="P4 Linear Elastic Convergence: completed sweep candidates",
+                target=float(linear_tolerance),
+                runs=aggregate_runs[:4],
+            )
+            summary["plots"]["aggregate"] = _path_label(aggregate_path)
+
+    phase1_nonadaptive = [
+        name
+        for name in enabled_names
+        if name in summary["linear_screen"] and name != "bddc_gamg_ex71_adaptive2_v2"
+    ]
+    phase1_nonadaptive = [
+        name for name in phase1_nonadaptive if summary["linear_screen"][name].get("status") == "completed"
+    ]
+    phase1_nonadaptive.sort(
+        key=lambda name: (
+            int(summary["linear_screen"][name]["metrics"].get("iteration_count", 10**9)),
+            float(summary["linear_screen"][name]["metrics"].get("solve_time", np.inf)),
+            float(summary["linear_screen"][name]["metrics"].get("setup_elapsed_s", np.inf)),
+        )
+    )
+    best_nonadaptive_name = phase1_nonadaptive[0] if phase1_nonadaptive else None
+
+    if best_nonadaptive_name is not None:
+        base_variant = registry[best_nonadaptive_name]
+        exact_dir_variant = Variant(
+            name=f"{best_nonadaptive_name}_dir_exact_neu_approx",
+            description=f"{best_nonadaptive_name} with exact Dirichlet and approximate Neumann",
+            category="sweep_bddc",
+            cli_args=_without_flags(base_variant.cli_args, "--pc_bddc_dirichlet_approximate"),
+        )
+        exact_neu_variant = Variant(
+            name=f"{best_nonadaptive_name}_dir_approx_neu_exact",
+            description=f"{best_nonadaptive_name} with approximate Dirichlet and exact Neumann",
+            category="sweep_bddc",
+            cli_args=_without_flags(base_variant.cli_args, "--pc_bddc_neumann_approximate"),
+        )
+        both_variant = Variant(
+            name=f"{best_nonadaptive_name}_dir_approx_neu_approx",
+            description=f"{best_nonadaptive_name} with approximate Dirichlet and approximate Neumann",
+            category="sweep_bddc",
+            cli_args=tuple(base_variant.cli_args),
+        )
+        for variant in (exact_dir_variant, exact_neu_variant, both_variant):
+            variant_lookup[variant.name] = variant
+            run = _run_probe_case(
+                variant=variant,
+                ranks=2,
+                mesh_path=mesh_path,
+                out_dir=out_root / "approximate_side_sweep" / variant.name / "rank2_p4_single",
+                elem_type="P4",
+                mode="single_solve",
+                linear_tolerance=float(linear_tolerance),
+                linear_max_iter=int(linear_max_iter),
+                guard_limit_gib=None,
+                wall_time_limit_s=3600.0,
+                reuse_existing=reuse_existing,
+                startup_progress_timeout_s=300.0,
+            )
+            summary["approximate_side_sweep"][variant.name] = {
+                "variant_category": variant.category,
+                "description": variant.description,
+                **run,
+            }
+
+    combined_screening = dict(summary["linear_screen"])
+    combined_screening.update(summary["approximate_side_sweep"])
+    promoted = _promote_bddc_sweep_candidates(screening=combined_screening)
+
+    best_candidate_name = promoted[0] if promoted else None
+    best_candidate_metrics = combined_screening.get(best_candidate_name, {}).get("metrics", {}) if best_candidate_name else {}
+    needs_topology = False
+    if best_candidate_name and hypre_metrics:
+        candidate_faces = best_candidate_metrics.get("bddc_candidate_faces")
+        coarse_size = best_candidate_metrics.get("bddc_coarse_size")
+        iteration_count = float(best_candidate_metrics.get("iteration_count", np.inf))
+        hypre_iterations = max(float(hypre_metrics.get("iteration_count", 1.0)), 1.0)
+        needs_topology = (
+            candidate_faces in (None, 0)
+            or coarse_size is None
+            or int(coarse_size) < 24
+            or iteration_count > 2.0 * hypre_iterations
+        )
+
+    if best_candidate_name and needs_topology:
+        topology_base = variant_lookup.get(best_candidate_name)
+        if topology_base is None and best_nonadaptive_name is not None:
+            topology_base = registry[best_nonadaptive_name]
+        if topology_base is not None:
+            topology_variants = (
+                Variant(
+                    name=f"{topology_base.name}_adj_none",
+                    description=f"{topology_base.name} with PETSc-derived adjacency",
+                    category="sweep_bddc",
+                    cli_args=_with_cli_pairs(_without_flags(topology_base.cli_args, "--adjacency_source", "csr"), "--adjacency_source", "none"),
+                ),
+                Variant(
+                    name=f"{topology_base.name}_adj_csr",
+                    description=f"{topology_base.name} with CSR-derived adjacency",
+                    category="sweep_bddc",
+                    cli_args=_with_cli_pairs(_without_flags(topology_base.cli_args, "--adjacency_source", "none", "topology"), "--adjacency_source", "csr"),
+                ),
+                Variant(
+                    name=f"{topology_base.name}_adj_topology",
+                    description=f"{topology_base.name} with topology-derived adjacency",
+                    category="sweep_bddc",
+                    cli_args=_with_cli_pairs(_without_flags(topology_base.cli_args, "--adjacency_source", "none", "csr"), "--adjacency_source", "topology"),
+                ),
+                Variant(
+                    name=f"{topology_base.name}_adj_topology_corner",
+                    description=f"{topology_base.name} with topology-derived adjacency and corner-only primals",
+                    category="sweep_bddc",
+                    cli_args=_with_cli_pairs(
+                        _without_flags(topology_base.cli_args, "--adjacency_source", "none", "csr"),
+                        "--adjacency_source",
+                        "topology",
+                        "--corner_only_primals",
+                    ),
+                ),
+            )
+            for variant in topology_variants:
+                variant_lookup[variant.name] = variant
+                run = _run_probe_case(
+                    variant=variant,
+                    ranks=2,
+                    mesh_path=mesh_path,
+                    out_dir=out_root / "topology_sweep" / variant.name / "rank2_p4_single",
+                    elem_type="P4",
+                    mode="single_solve",
+                    linear_tolerance=float(linear_tolerance),
+                    linear_max_iter=int(linear_max_iter),
+                    guard_limit_gib=None,
+                    wall_time_limit_s=3600.0,
+                    reuse_existing=reuse_existing,
+                    startup_progress_timeout_s=300.0,
+                )
+                summary["topology_sweep"][variant.name] = {
+                    "variant_category": variant.category,
+                    "description": variant.description,
+                    **run,
+                }
+
+    combined_screening.update(summary["topology_sweep"])
+    if hypre_linear and hypre_linear.get("status") == "completed":
+        hypre_run_info = out_root / "linear_screen" / "hypre_control_v2" / "rank2_p4_single" / "data" / "run_info.json"
+        overlay_dir = out_root / "plots"
+        for phase_name, phase_entries in (
+            ("approximate_side_sweep", summary["approximate_side_sweep"]),
+            ("topology_sweep", summary["topology_sweep"]),
+        ):
+            for name, entry in phase_entries.items():
+                if entry.get("status") != "completed":
+                    continue
+                run_info_path = out_root / phase_name / name / "rank2_p4_single" / "data" / "run_info.json"
+                if not run_info_path.exists():
+                    continue
+                plot_path = overlay_dir / f"{name}_vs_hypre.png"
+                _plot_sweep_histories(
+                    plot_script=plot_script,
+                    out_path=plot_path,
+                    title=f"P4 Linear Elastic Convergence: Hypre vs {name}",
+                    target=float(linear_tolerance),
+                    runs=[("hypre", hypre_run_info), (name, run_info_path)],
+                )
+                summary["plots"]["overlays"][name] = _path_label(plot_path)
+    promoted = _promote_bddc_sweep_candidates(screening=combined_screening)
+    summary["promoted_candidates"] = promoted
+    if not promoted:
+        return summary
+
+    diag_targets = ["hypre_control_v2", *promoted[:2]]
+    for name in diag_targets:
+        variant = variant_lookup.get(name)
+        if variant is None:
+            continue
+        run = _run_probe_case(
+            variant=variant,
+            ranks=2,
+            mesh_path=mesh_path,
+            out_dir=out_root / "diagnostic_linear" / name / "rank2_p4_single",
+            elem_type="P4",
+            mode="single_solve",
+            linear_tolerance=float(linear_tolerance),
+            linear_max_iter=int(linear_max_iter),
+            guard_limit_gib=None,
+            wall_time_limit_s=3600.0,
+            reuse_existing=reuse_existing,
+            startup_progress_timeout_s=300.0,
+            extra_petsc_opts=("ksp_monitor_singular_value=true", "ksp_view_eigenvalues=true"),
+        )
+        summary["diagnostic_linear"][name] = run
+
+    best_name = promoted[0]
+    best_metrics = combined_screening[best_name]["metrics"]
+    if hypre_metrics:
+        if int(best_metrics.get("iteration_count", 10**9)) > int(np.ceil(1.5 * float(hypre_metrics.get("iteration_count", 0.0)))):
+            return summary
+        if float(best_metrics.get("runtime_seconds", np.inf)) > 2.0 * float(hypre_metrics.get("runtime_seconds", np.inf)):
+            return summary
+
+    hypre_short = _run_case(
+        variant=Variant(
+            name="hypre_control_v2_short",
+            description="Short nonlinear Hypre control",
+            category="sweep_control",
+            cli_args=(
+                "--solver_type",
+                "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+                "--pc_backend",
+                "hypre",
+                "--linear_tolerance",
+                str(float(linear_tolerance)),
+                "--pc_hypre_coarsen_type",
+                "HMIS",
+                "--pc_hypre_interp_type",
+                "ext+i",
+            ),
+        ),
+        ranks=2,
+        mesh_path=mesh_path,
+        step_max=1,
+        out_dir=out_root / "nonlinear_short" / "hypre_control_v2",
+        guard_limit_gib=None,
+        max_deflation_basis_vectors=max_deflation_basis_vectors,
+        elem_type="P4",
+        reuse_existing=reuse_existing,
+        startup_progress_timeout_s=300.0,
+    )
+    summary["nonlinear_short"]["hypre_control_v2"] = hypre_short
+    for name in promoted:
+        linear_variant = variant_lookup.get(name)
+        if linear_variant is None:
+            continue
+        nonlinear_opts = _nonlinear_cli_from_linear_probe_variant(linear_variant)
+        run = _run_case(
+            variant=Variant(
+                name=f"{name}_short",
+                description=f"Short nonlinear follow-up for {name}",
+                category="sweep_bddc",
+                cli_args=(
+                    "--solver_type",
+                    "PETSC_MATLAB_DFGMRES_GAMG_NULLSPACE",
+                    "--pc_backend",
+                    "bddc",
+                    "--preconditioner_matrix_source",
+                    "elastic",
+                    "--linear_tolerance",
+                    str(float(linear_tolerance)),
+                    *nonlinear_opts,
+                ),
+            ),
+            ranks=2,
+            mesh_path=mesh_path,
+            step_max=1,
+            out_dir=out_root / "nonlinear_short" / name,
+            guard_limit_gib=None,
+            max_deflation_basis_vectors=max_deflation_basis_vectors,
+            elem_type="P4",
+            reuse_existing=reuse_existing,
+            startup_progress_timeout_s=300.0,
+        )
+        accepted, reasons = _short_run_acceptance(candidate=run, control=hypre_short, runtime_factor_limit=2.0)
+        summary["nonlinear_short"][name] = {
+            **run,
+            "accepted": bool(accepted),
+            "acceptance_reasons": reasons,
+        }
+
+    accepted_candidates = [
+        name for name in promoted if bool(summary["nonlinear_short"].get(name, {}).get("accepted", False))
+    ]
+    if not accepted_candidates:
+        return summary
+
+    accepted_candidates.sort(key=lambda name: float(summary["nonlinear_short"][name]["metrics"]["linear_total_rank_metric"]))
+    best_name = accepted_candidates[0]
+    summary["nonlinear_step10"] = {
+        "winner": best_name,
+        "run": _run_case(
+            variant=Variant(
+                name=f"{best_name}_step10",
+                description=f"Rank-2 nonlinear step_max=10 for {best_name}",
+                category="sweep_bddc",
+                cli_args=(
+                    "--solver_type",
+                    "PETSC_MATLAB_DFGMRES_GAMG_NULLSPACE",
+                    "--pc_backend",
+                    "bddc",
+                    "--preconditioner_matrix_source",
+                    "elastic",
+                    "--linear_tolerance",
+                    str(float(linear_tolerance)),
+                    *_nonlinear_cli_from_linear_probe_variant(variant_lookup[best_name]),
+                ),
+            ),
+            ranks=2,
+            mesh_path=mesh_path,
+            step_max=10,
+            out_dir=out_root / "nonlinear_step10" / best_name,
+            guard_limit_gib=None,
+            max_deflation_basis_vectors=max_deflation_basis_vectors,
+            elem_type="P4",
+            reuse_existing=reuse_existing,
+            startup_progress_timeout_s=300.0,
+        ),
+    }
+
+    # Stage 4: optional rank-8 linear confirmation.
+    summary["rank8_linear"] = {
+        "winner": best_name,
+        "hypre_control_v2": _run_probe_case(
+            variant=registry["hypre_control_v2"],
+            ranks=8,
+            mesh_path=mesh_path,
+            out_dir=out_root / "rank8_linear" / "hypre_control_v2",
+            elem_type="P4",
+            mode="single_solve",
+            linear_tolerance=float(linear_tolerance),
+            linear_max_iter=int(linear_max_iter),
+            guard_limit_gib=None,
+            wall_time_limit_s=5400.0,
+            reuse_existing=reuse_existing,
+            startup_progress_timeout_s=300.0,
+        ),
+        "bddc": _run_probe_case(
+            variant=variant_lookup.get(best_name, registry[best_nonadaptive_name]) if best_nonadaptive_name is not None else variant_lookup[promoted[0]],
+            ranks=8,
+            mesh_path=mesh_path,
+            out_dir=out_root / "rank8_linear" / best_name,
+            elem_type="P4",
+            mode="single_solve",
+            linear_tolerance=float(linear_tolerance),
+            linear_max_iter=int(linear_max_iter),
+            guard_limit_gib=None,
+            wall_time_limit_s=5400.0,
+            reuse_existing=reuse_existing,
+            startup_progress_timeout_s=300.0,
+        ),
+    }
+    return summary
+
+
+def _bddc_sweep_report_lines(*, mesh_path: Path, summary_payload: dict[str, Any]) -> list[str]:
+    sweep = summary_payload["bddc_sweep"]
+    def _fmt(metrics: dict[str, Any], key: str, fmt: str) -> str:
+        if not metrics or metrics.get(key) is None:
+            return "-"
+        return format(float(metrics[key]), fmt)
+
+    def _fmt_int(metrics: dict[str, Any], key: str) -> str:
+        if not metrics or metrics.get(key) is None:
+            return "-"
+        return str(int(metrics[key]))
+
+    def _append_table(lines: list[str], title: str, entries: dict[str, Any]) -> None:
+        lines.extend(
+            [
+                "",
+                f"## {title}",
+                "",
+                "| Variant | Status | Iter | Setup [s] | Solve [s] | Runtime [s] | Rel. residual | Peak RSS [GiB] | Faces | Coarse |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for name, entry in entries.items():
+            metrics = entry.get("metrics", {})
+            lines.append(
+                f"| {name} | {entry.get('status', 'missing')} | "
+                f"{_fmt_int(metrics, 'iteration_count')} | "
+                f"{_fmt(metrics, 'setup_elapsed_s', '.3f')} | "
+                f"{_fmt(metrics, 'solve_time', '.3f')} | "
+                f"{_fmt(metrics, 'runtime_seconds', '.3f')} | "
+                f"{_fmt(metrics, 'final_relative_residual', '.3e')} | "
+                f"{_fmt(metrics, 'peak_rss_gib', '.3f')} | "
+                f"{_fmt_int(metrics, 'bddc_candidate_faces')} | "
+                f"{_fmt_int(metrics, 'bddc_coarse_size')} |"
+            )
+
+    lines = [
+        "# BDDC Parameter Sweep for P4 (V2)",
+        "",
+        f"- Mesh: `{_mesh_label(mesh_path)}`",
+        f"- Supersession note: {sweep.get('phase0_note')}",
+        "- PETSc sources consulted:",
+        "  - [`PCBDDC` manual page](https://petsc.org/release/manualpages/PC/PCBDDC/): baseline BDDC requirements and documented option families.",
+        "  - [`ex56`](https://petsc.org/main/src/snes/tutorials/ex56.c.html): elasticity-oriented approximate-local BDDC and GAMG tuning.",
+        "  - [`ex71`](https://petsc.org/main/src/ksp/ksp/tutorials/ex71.c.html): deluxe scaling and adaptive-threshold elasticity examples.",
+        "  - [`ex59`](https://petsc.org/main/src/ksp/ksp/tutorials/ex59.c.html): high-order adjacency/corner-primal customization reserved as the next escalation path.",
+        f"- Linear residual target: `{float(sweep['linear_tolerance']):.1e}`",
+        "- Linear probe: distributed `P4`, rank `2`, `A=P=K_elast`, native PETSc `CG`, `ksp_norm_type=unpreconditioned`.",
+        "- Corrected BDDC baseline: `pc_bddc_symmetric=true`, `pc_bddc_monolithic=true`, `pc_bddc_coarse_redundant_pc_type=svd`, `use_faces=true`.",
+        f"- MUMPS available: `{'yes' if sweep.get('mumps_available', False) else 'no'}`",
+        "",
+        "## Option Smokes",
+        "",
+        "| Variant | Status | First progress [s] |",
+        "| --- | --- | ---: |",
+    ]
+    for name, entry in sweep.get("option_smokes", {}).items():
+        startup = entry.get("startup_summary", {}) or {}
+        first_progress = startup.get("first_progress_elapsed_s")
+        first_text = "-" if first_progress is None else f"{float(first_progress):.3f}"
+        lines.append(f"| {name} | {entry.get('status', 'missing')} | {first_text} |")
+    _append_table(lines, "Phase 1: Rank-2 Linear Elastic Screen", sweep.get("linear_screen", {}))
+    if sweep.get("approximate_side_sweep"):
+        _append_table(lines, "Phase 2: One-Sided Approximate-Local Sweep", sweep.get("approximate_side_sweep", {}))
+    if sweep.get("topology_sweep"):
+        _append_table(lines, "Phase 3: Topology and Corner-Primal Sweep", sweep.get("topology_sweep", {}))
+    if sweep.get("plots", {}).get("overlays"):
+        lines.extend(["", "## Convergence Plots", ""])
+        for name, path in sweep["plots"]["overlays"].items():
+            lines.append(f"- `{name}` vs Hypre: [{Path(path).name}]({path})")
+    if sweep.get("plots", {}).get("aggregate"):
+        lines.append(f"- Aggregate completed-candidate plot: [{Path(sweep['plots']['aggregate']).name}]({sweep['plots']['aggregate']})")
+    lines.extend(
+        [
+            "",
+            f"- Promoted candidates: `{', '.join(sweep.get('promoted_candidates', [])) or 'none'}`",
+            "",
+            "## Diagnostics",
+            "",
+            "| Variant | Status | Runtime [s] | PETSc log |",
+            "| --- | --- | ---: | --- |",
+        ]
+    )
+    for name, entry in sweep.get("diagnostic_linear", {}).items():
+        metrics = entry.get("metrics", {})
+        lines.append(
+            f"| {name} | {entry.get('status', 'missing')} | {_fmt(metrics, 'runtime_seconds', '.3f')} | "
+            f"{metrics.get('petsc_log', '-') if metrics else '-'} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Short Nonlinear Follow-up",
+            "",
+            "| Variant | Status | Accepted | Runtime [s] | Accepted states | Linear total [s] |",
+            "| --- | --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for name, entry in sweep.get("nonlinear_short", {}).items():
+        metrics = entry.get("metrics", {})
+        accepted = entry.get("accepted")
+        accepted_text = "-" if accepted is None else ("yes" if accepted else "no")
+        lines.append(
+            f"| {name} | {entry.get('status', 'missing')} | {accepted_text} | "
+            f"{_fmt(metrics, 'runtime_seconds', '.3f')} | "
+            f"{_fmt_int(metrics, 'final_accepted_states')} | "
+            f"{_fmt(metrics, 'linear_total_rank_metric', '.3f')} |"
+        )
+    step10 = sweep.get("nonlinear_step10", {})
+    if step10.get("run"):
+        run = step10["run"]
+        lines.extend(
+            [
+                "",
+                f"- Rank-2 `step_max=10` winner: `{step10.get('winner')}`",
+                f"- Rank-2 `step_max=10` status: `{run.get('status', 'missing')}`",
+            ]
+        )
+    rank8 = sweep.get("rank8_linear", {})
+    if rank8.get("status") != "not_run" and rank8:
+        lines.extend(
+            [
+                "",
+                "## Optional Rank-8 Linear Confirmation",
+                "",
+                f"- Winner: `{rank8.get('winner')}`",
+            ]
+        )
+        for name in ("hypre_control_v2", "bddc"):
+            entry = rank8.get(name, {})
+            metrics = entry.get("metrics", {})
+            lines.append(
+                f"- `{name}`: status `{entry.get('status', 'missing')}`, "
+                f"runtime `{float(metrics.get('runtime_seconds', 0.0)):.3f} s`, "
+                f"iterations `{int(metrics.get('iteration_count', 0))}`"
+                if metrics
+                else f"- `{name}`: status `{entry.get('status', 'missing')}`"
+            )
+    lines.extend(
+        [
+            "",
+            "## Conclusion",
+            "",
+            "- This recovery sweep corrected the BDDC baseline before comparing variants: symmetry, monolithic correction, coarse redundant SVD, and faces were treated as mandatory, not optional.",
+            "- The next step is determined by the best completed elastic result only: continue local-GAMG tuning if iterations dropped materially, move to nonlinear mismatch only if the elastic probe is close enough to Hypre, or escalate topology classification if coarse information still looks weak.",
+        ]
+    )
+    return lines
 
 
 def _bddc_gate_report_lines(*, mesh_path: Path, summary_payload: dict[str, Any]) -> list[str]:
@@ -2062,6 +3236,115 @@ def _final_report_lines(
 
 def _write_summary_csv(path: Path, *, summary_payload: dict[str, Any]) -> None:
     rows: list[dict[str, Any]] = []
+    if "bddc_sweep" in summary_payload:
+        sweep = summary_payload["bddc_sweep"]
+        for stage_name in ("option_smokes", "linear_screen"):
+            for variant_name, entry in sweep.get(stage_name, {}).items():
+                rows.append(
+                    {
+                        "stage": stage_name,
+                        "variant": variant_name,
+                        "rank": 1 if stage_name == "option_smokes" else 2,
+                        "status": entry.get("status"),
+                        "runtime_seconds": entry.get("metrics", {}).get("runtime_seconds"),
+                        "linear_total_rank_metric": entry.get("metrics", {}).get("linear_total_rank_metric"),
+                        "pc_backend": entry.get("metrics", {}).get("pc_backend"),
+                        "preconditioner_matrix_policy": entry.get("metrics", {}).get("preconditioner_matrix_policy"),
+                        "preconditioner_rebuild_policy": entry.get("metrics", {}).get("preconditioner_rebuild_policy"),
+                        "peak_rss_gib": entry.get("metrics", {}).get("peak_rss_gib"),
+                        "final_accepted_states": entry.get("metrics", {}).get("final_accepted_states"),
+                        "first_progress_elapsed_s": entry.get("metrics", {}).get("first_progress_elapsed_s"),
+                        "progress_file_created": entry.get("metrics", {}).get("progress_file_created"),
+                        "startup_stall_reason": entry.get("metrics", {}).get("startup_stall_reason"),
+                    }
+                )
+        for variant_name, entry in sweep.get("nonlinear_short", {}).items():
+            rows.append(
+                {
+                    "stage": "nonlinear_short",
+                    "variant": variant_name,
+                    "rank": 2,
+                    "status": entry.get("status"),
+                    "runtime_seconds": entry.get("metrics", {}).get("runtime_seconds"),
+                    "linear_total_rank_metric": entry.get("metrics", {}).get("linear_total_rank_metric"),
+                    "pc_backend": entry.get("metrics", {}).get("pc_backend"),
+                    "preconditioner_matrix_policy": entry.get("metrics", {}).get("preconditioner_matrix_policy"),
+                    "preconditioner_rebuild_policy": entry.get("metrics", {}).get("preconditioner_rebuild_policy"),
+                    "peak_rss_gib": entry.get("metrics", {}).get("peak_rss_gib"),
+                    "final_accepted_states": entry.get("metrics", {}).get("final_accepted_states"),
+                    "first_progress_elapsed_s": entry.get("metrics", {}).get("first_progress_elapsed_s"),
+                    "progress_file_created": entry.get("metrics", {}).get("progress_file_created"),
+                    "startup_stall_reason": entry.get("metrics", {}).get("startup_stall_reason"),
+                }
+            )
+        step10 = sweep.get("nonlinear_step10", {}).get("run", {})
+        if step10:
+            rows.append(
+                {
+                    "stage": "nonlinear_step10",
+                    "variant": sweep.get("nonlinear_step10", {}).get("winner"),
+                    "rank": 2,
+                    "status": step10.get("status"),
+                    "runtime_seconds": step10.get("metrics", {}).get("runtime_seconds"),
+                    "linear_total_rank_metric": step10.get("metrics", {}).get("linear_total_rank_metric"),
+                    "pc_backend": step10.get("metrics", {}).get("pc_backend"),
+                    "preconditioner_matrix_policy": step10.get("metrics", {}).get("preconditioner_matrix_policy"),
+                    "preconditioner_rebuild_policy": step10.get("metrics", {}).get("preconditioner_rebuild_policy"),
+                    "peak_rss_gib": step10.get("metrics", {}).get("peak_rss_gib"),
+                    "final_accepted_states": step10.get("metrics", {}).get("final_accepted_states"),
+                    "first_progress_elapsed_s": step10.get("metrics", {}).get("first_progress_elapsed_s"),
+                    "progress_file_created": step10.get("metrics", {}).get("progress_file_created"),
+                    "startup_stall_reason": step10.get("metrics", {}).get("startup_stall_reason"),
+                }
+            )
+        for variant_name, entry in (
+            ("hypre_control_v2", sweep.get("rank8_linear", {}).get("hypre_control_v2", {})),
+            ("bddc", sweep.get("rank8_linear", {}).get("bddc", {})),
+        ):
+            if entry:
+                rows.append(
+                    {
+                        "stage": "rank8_linear",
+                        "variant": variant_name,
+                        "rank": 8,
+                        "status": entry.get("status"),
+                        "runtime_seconds": entry.get("metrics", {}).get("runtime_seconds"),
+                        "linear_total_rank_metric": entry.get("metrics", {}).get("linear_total_rank_metric"),
+                        "pc_backend": entry.get("metrics", {}).get("pc_backend"),
+                        "preconditioner_matrix_policy": entry.get("metrics", {}).get("preconditioner_matrix_policy"),
+                        "preconditioner_rebuild_policy": entry.get("metrics", {}).get("preconditioner_rebuild_policy"),
+                        "peak_rss_gib": entry.get("metrics", {}).get("peak_rss_gib"),
+                        "final_accepted_states": entry.get("metrics", {}).get("final_accepted_states"),
+                        "first_progress_elapsed_s": entry.get("metrics", {}).get("first_progress_elapsed_s"),
+                        "progress_file_created": entry.get("metrics", {}).get("progress_file_created"),
+                        "startup_stall_reason": entry.get("metrics", {}).get("startup_stall_reason"),
+                    }
+                )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(
+                fh,
+                fieldnames=[
+                    "stage",
+                    "variant",
+                    "rank",
+                    "status",
+                    "runtime_seconds",
+                    "linear_total_rank_metric",
+                    "pc_backend",
+                    "preconditioner_matrix_policy",
+                    "preconditioner_rebuild_policy",
+                    "peak_rss_gib",
+                    "final_accepted_states",
+                    "first_progress_elapsed_s",
+                    "progress_file_created",
+                    "startup_stall_reason",
+                ],
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        return
     if "bddc_prototype" in summary_payload:
         proto = summary_payload["bddc_prototype"]
         p2_short = proto.get("p2_short", {})
@@ -2270,7 +3553,7 @@ def _write_summary_csv(path: Path, *, summary_payload: dict[str, Any]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screen and compare PETSc preconditioner variants for 3D P4.")
-    parser.add_argument("--workflow", type=str, choices=["aij_screen", "bddc_proto"], default="aij_screen")
+    parser.add_argument("--workflow", type=str, choices=["aij_screen", "bddc_proto", "bddc_sweep"], default="aij_screen")
     parser.add_argument("--mesh-path", type=Path, default=DEFAULT_MESH)
     parser.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT)
     parser.add_argument("--baseline-summary", type=Path, default=DEFAULT_BASELINE_SUMMARY)
@@ -2281,6 +3564,7 @@ def main() -> None:
     parser.add_argument("--final-report", type=Path, default=DEFAULT_FINAL_REPORT)
     parser.add_argument("--bddc-short-report", type=Path, default=DEFAULT_BDDC_SHORT_REPORT)
     parser.add_argument("--bddc-full-report", type=Path, default=DEFAULT_BDDC_FULL_REPORT)
+    parser.add_argument("--bddc-sweep-report", type=Path, default=DEFAULT_BDDC_SWEEP_REPORT)
     parser.add_argument("--screen-ranks", type=int, nargs="+", default=DEFAULT_SCREEN_RANKS)
     parser.add_argument("--scale-ranks", type=int, nargs="+", default=DEFAULT_SCALE_RANKS)
     parser.add_argument("--screen-step-max", type=int, default=DEFAULT_STEP2)
@@ -2357,6 +3641,33 @@ def main() -> None:
                 )
             )
             + "\n",
+            encoding="utf-8",
+        )
+        return
+
+    if str(args.workflow) == "bddc_sweep":
+        registry = _bddc_sweep_registry(include_adaptive=bool(_petsc_has_external_package("mumps")))
+        summary = _run_bddc_sweep_workflow(
+            registry=registry,
+            mesh_path=args.mesh_path,
+            out_root=out_root,
+            linear_tolerance=1.0e-5,
+            linear_max_iter=500,
+            max_deflation_basis_vectors=int(args.max_deflation_basis_vectors),
+            reuse_existing=bool(args.reuse_existing),
+            requested_variants=(None if args.variants is None else tuple(str(v) for v in args.variants)),
+        )
+        summary_payload = {
+            "timestamp": _utc_now(),
+            "workflow": "bddc_sweep",
+            "mesh_path": _mesh_label(args.mesh_path),
+            "bddc_sweep": summary,
+        }
+        summary_json = out_root / "summary.json"
+        summary_json.write_text(json.dumps(summary_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _write_summary_csv(out_root / "summary.csv", summary_payload=summary_payload)
+        Path(args.bddc_sweep_report).write_text(
+            "\n".join(_bddc_sweep_report_lines(mesh_path=args.mesh_path, summary_payload=summary_payload)) + "\n",
             encoding="utf-8",
         )
         return

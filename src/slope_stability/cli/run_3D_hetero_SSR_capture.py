@@ -55,6 +55,23 @@ def _make_progress_logger(progress_dir: Path):
     return _write
 
 
+def _parse_petsc_opt_entries(entries: list[str] | None) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw in entries or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"Expected PETSc option in key=value form, got {raw!r}")
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"Expected non-empty PETSc option key in {raw!r}")
+        parsed[key] = value
+    return parsed
+
+
 def _collector_snapshot(solver) -> dict:
     collector = solver.iteration_collector
     return {
@@ -301,7 +318,7 @@ def run_capture(
     linear_max_iter: int = 100,
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     factor_solver_type: str | None = None,
-    pc_backend: str | None = None,
+    pc_backend: str | None = "hypre",
     preconditioner_matrix_source: str = "tangent",
     preconditioner_matrix_policy: str = "current",
     preconditioner_rebuild_policy: str = "every_newton",
@@ -312,13 +329,14 @@ def run_capture(
     pc_gamg_aggressive_coarsening: int | None = None,
     pc_gamg_aggressive_square_graph: bool | None = None,
     pc_gamg_aggressive_mis_k: int | None = None,
-    pc_hypre_coarsen_type: str | None = None,
-    pc_hypre_interp_type: str | None = None,
+    pc_hypre_coarsen_type: str | None = "HMIS",
+    pc_hypre_interp_type: str | None = "ext+i",
     pc_hypre_strong_threshold: float | None = None,
+    pc_hypre_boomeramg_max_iter: int | None = 1,
     pc_hypre_P_max: int | None = None,
     pc_hypre_agg_nl: int | None = None,
     pc_hypre_nongalerkin_tol: float | None = None,
-    pc_bddc_symmetric: bool = False,
+    pc_bddc_symmetric: bool | None = None,
     pc_bddc_dirichlet_ksp_type: str | None = None,
     pc_bddc_dirichlet_pc_type: str | None = None,
     pc_bddc_neumann_ksp_type: str | None = None,
@@ -327,6 +345,8 @@ def run_capture(
     pc_bddc_coarse_pc_type: str | None = None,
     pc_bddc_dirichlet_approximate: bool | None = None,
     pc_bddc_neumann_approximate: bool | None = None,
+    pc_bddc_monolithic: bool | None = None,
+    pc_bddc_coarse_redundant_pc_type: str | None = None,
     pc_bddc_switch_static: bool | None = None,
     pc_bddc_use_deluxe_scaling: bool | None = None,
     pc_bddc_use_vertices: bool | None = None,
@@ -335,6 +355,7 @@ def run_capture(
     pc_bddc_use_change_of_basis: bool | None = None,
     pc_bddc_use_change_on_faces: bool | None = None,
     pc_bddc_check_level: int | None = None,
+    petsc_opt: list[str] | None = None,
     compiled_outer: bool = False,
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
@@ -564,14 +585,16 @@ def run_capture(
             preconditioner_options["pc_hypre_boomeramg_interp_type"] = str(pc_hypre_interp_type)
         if pc_hypre_strong_threshold is not None:
             preconditioner_options["pc_hypre_boomeramg_strong_threshold"] = float(pc_hypre_strong_threshold)
+        if pc_hypre_boomeramg_max_iter is not None:
+            preconditioner_options["pc_hypre_boomeramg_max_iter"] = int(pc_hypre_boomeramg_max_iter)
         if pc_hypre_P_max is not None:
             preconditioner_options["pc_hypre_boomeramg_P_max"] = int(pc_hypre_P_max)
         if pc_hypre_agg_nl is not None:
             preconditioner_options["pc_hypre_boomeramg_agg_nl"] = int(pc_hypre_agg_nl)
         if pc_hypre_nongalerkin_tol is not None:
             preconditioner_options["pc_hypre_boomeramg_nongalerkin_tol"] = float(pc_hypre_nongalerkin_tol)
-    if pc_bddc_symmetric:
-        preconditioner_options["pc_bddc_symmetric"] = True
+    if pc_bddc_symmetric is not None:
+        preconditioner_options["pc_bddc_symmetric"] = bool(pc_bddc_symmetric)
     if pc_bddc_dirichlet_ksp_type is not None:
         preconditioner_options["pc_bddc_dirichlet_ksp_type"] = str(pc_bddc_dirichlet_ksp_type)
     if pc_bddc_dirichlet_pc_type is not None:
@@ -588,6 +611,10 @@ def run_capture(
         preconditioner_options["pc_bddc_dirichlet_approximate"] = bool(pc_bddc_dirichlet_approximate)
     if pc_bddc_neumann_approximate is not None:
         preconditioner_options["pc_bddc_neumann_approximate"] = bool(pc_bddc_neumann_approximate)
+    if pc_bddc_monolithic is not None:
+        preconditioner_options["pc_bddc_monolithic"] = bool(pc_bddc_monolithic)
+    if pc_bddc_coarse_redundant_pc_type is not None:
+        preconditioner_options["pc_bddc_coarse_redundant_pc_type"] = str(pc_bddc_coarse_redundant_pc_type)
     if pc_bddc_switch_static is not None:
         preconditioner_options["pc_bddc_switch_static"] = bool(pc_bddc_switch_static)
     if pc_bddc_use_deluxe_scaling is not None:
@@ -604,6 +631,7 @@ def run_capture(
         preconditioner_options["pc_bddc_use_change_on_faces"] = bool(pc_bddc_use_change_on_faces)
     if pc_bddc_check_level is not None:
         preconditioner_options["pc_bddc_check_level"] = int(pc_bddc_check_level)
+    preconditioner_options.update(_parse_petsc_opt_entries(petsc_opt))
 
     linear_system_solver = SolverFactory.create(
         solver_type,
@@ -655,10 +683,11 @@ def run_capture(
         "pc_hypre_coarsen_type": pc_hypre_coarsen_type,
         "pc_hypre_interp_type": pc_hypre_interp_type,
         "pc_hypre_strong_threshold": pc_hypre_strong_threshold,
+        "pc_hypre_boomeramg_max_iter": pc_hypre_boomeramg_max_iter,
         "pc_hypre_P_max": pc_hypre_P_max,
         "pc_hypre_agg_nl": pc_hypre_agg_nl,
         "pc_hypre_nongalerkin_tol": pc_hypre_nongalerkin_tol,
-        "pc_bddc_symmetric": bool(pc_bddc_symmetric),
+        "pc_bddc_symmetric": pc_bddc_symmetric,
         "pc_bddc_dirichlet_ksp_type": pc_bddc_dirichlet_ksp_type,
         "pc_bddc_dirichlet_pc_type": pc_bddc_dirichlet_pc_type,
         "pc_bddc_neumann_ksp_type": pc_bddc_neumann_ksp_type,
@@ -667,6 +696,8 @@ def run_capture(
         "pc_bddc_coarse_pc_type": pc_bddc_coarse_pc_type,
         "pc_bddc_dirichlet_approximate": pc_bddc_dirichlet_approximate,
         "pc_bddc_neumann_approximate": pc_bddc_neumann_approximate,
+        "pc_bddc_monolithic": pc_bddc_monolithic,
+        "pc_bddc_coarse_redundant_pc_type": pc_bddc_coarse_redundant_pc_type,
         "pc_bddc_switch_static": pc_bddc_switch_static,
         "pc_bddc_use_deluxe_scaling": pc_bddc_use_deluxe_scaling,
         "pc_bddc_use_vertices": pc_bddc_use_vertices,
@@ -675,6 +706,7 @@ def run_capture(
         "pc_bddc_use_change_of_basis": pc_bddc_use_change_of_basis,
         "pc_bddc_use_change_on_faces": pc_bddc_use_change_on_faces,
         "pc_bddc_check_level": pc_bddc_check_level,
+        "petsc_opt": list(petsc_opt or []),
         "compiled_outer": bool(compiled_outer),
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": constitutive_mode,
@@ -954,7 +986,7 @@ def main() -> None:
     parser.add_argument("--linear_max_iter", type=int, default=100)
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")
     parser.add_argument("--factor_solver_type", type=str, default=None)
-    parser.add_argument("--pc_backend", type=str, default=None, choices=["hypre", "gamg", "bddc"])
+    parser.add_argument("--pc_backend", type=str, default="hypre", choices=["hypre", "gamg", "bddc"])
     parser.add_argument(
         "--preconditioner_matrix_source",
         type=str,
@@ -978,10 +1010,11 @@ def main() -> None:
     parser.add_argument("--pc_hypre_coarsen_type", type=str, default="HMIS")
     parser.add_argument("--pc_hypre_interp_type", type=str, default="ext+i")
     parser.add_argument("--pc_hypre_strong_threshold", type=float, default=None)
+    parser.add_argument("--pc_hypre_boomeramg_max_iter", type=int, default=1)
     parser.add_argument("--pc_hypre_P_max", type=int, default=None)
     parser.add_argument("--pc_hypre_agg_nl", type=int, default=None)
     parser.add_argument("--pc_hypre_nongalerkin_tol", type=float, default=None)
-    parser.add_argument("--pc_bddc_symmetric", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--pc_bddc_symmetric", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_dirichlet_ksp_type", type=str, default=None)
     parser.add_argument("--pc_bddc_dirichlet_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_neumann_ksp_type", type=str, default=None)
@@ -990,6 +1023,8 @@ def main() -> None:
     parser.add_argument("--pc_bddc_coarse_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_dirichlet_approximate", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_neumann_approximate", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_monolithic", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_coarse_redundant_pc_type", type=str, default=None)
     parser.add_argument("--pc_bddc_switch_static", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_deluxe_scaling", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_vertices", action=argparse.BooleanOptionalAction, default=None)
@@ -998,6 +1033,7 @@ def main() -> None:
     parser.add_argument("--pc_bddc_use_change_of_basis", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_use_change_on_faces", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pc_bddc_check_level", type=int, default=None)
+    parser.add_argument("--petsc-opt", action="append", default=[], dest="petsc_opt")
     parser.add_argument("--compiled_outer", action="store_true", default=False)
     parser.add_argument("--recycle_preconditioner", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max_deflation_basis_vectors", type=int, default=48)
@@ -1054,6 +1090,7 @@ def main() -> None:
         pc_hypre_coarsen_type=args.pc_hypre_coarsen_type,
         pc_hypre_interp_type=args.pc_hypre_interp_type,
         pc_hypre_strong_threshold=args.pc_hypre_strong_threshold,
+        pc_hypre_boomeramg_max_iter=args.pc_hypre_boomeramg_max_iter,
         pc_hypre_P_max=args.pc_hypre_P_max,
         pc_hypre_agg_nl=args.pc_hypre_agg_nl,
         pc_hypre_nongalerkin_tol=args.pc_hypre_nongalerkin_tol,
@@ -1066,6 +1103,8 @@ def main() -> None:
         pc_bddc_coarse_pc_type=args.pc_bddc_coarse_pc_type,
         pc_bddc_dirichlet_approximate=args.pc_bddc_dirichlet_approximate,
         pc_bddc_neumann_approximate=args.pc_bddc_neumann_approximate,
+        pc_bddc_monolithic=args.pc_bddc_monolithic,
+        pc_bddc_coarse_redundant_pc_type=args.pc_bddc_coarse_redundant_pc_type,
         pc_bddc_switch_static=args.pc_bddc_switch_static,
         pc_bddc_use_deluxe_scaling=args.pc_bddc_use_deluxe_scaling,
         pc_bddc_use_vertices=args.pc_bddc_use_vertices,
@@ -1074,6 +1113,7 @@ def main() -> None:
         pc_bddc_use_change_of_basis=args.pc_bddc_use_change_of_basis,
         pc_bddc_use_change_on_faces=args.pc_bddc_use_change_on_faces,
         pc_bddc_check_level=args.pc_bddc_check_level,
+        petsc_opt=args.petsc_opt,
         compiled_outer=args.compiled_outer,
         recycle_preconditioner=args.recycle_preconditioner,
         constitutive_mode=args.constitutive_mode,

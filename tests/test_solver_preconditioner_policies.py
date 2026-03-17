@@ -99,6 +99,7 @@ def test_from_config_propagates_bddc_local_solver_options() -> None:
         solver_type="PETSC_MATLAB_DFGMRES_GAMG_NULLSPACE",
         pc_backend="bddc",
         preconditioner_matrix_source="elastic",
+        pc_bddc_symmetric=True,
         pc_bddc_dirichlet_ksp_type="preonly",
         pc_bddc_dirichlet_pc_type="ilu",
         pc_bddc_neumann_ksp_type="preonly",
@@ -107,6 +108,8 @@ def test_from_config_propagates_bddc_local_solver_options() -> None:
         pc_bddc_coarse_pc_type="gamg",
         pc_bddc_dirichlet_approximate=True,
         pc_bddc_neumann_approximate=True,
+        pc_bddc_monolithic=True,
+        pc_bddc_coarse_redundant_pc_type="svd",
         pc_bddc_switch_static=True,
         pc_bddc_use_deluxe_scaling=False,
         pc_bddc_use_vertices=True,
@@ -124,6 +127,7 @@ def test_from_config_propagates_bddc_local_solver_options() -> None:
     )
 
     assert solver.preconditioner_options["preconditioner_matrix_source"] == "elastic"
+    assert solver.preconditioner_options["pc_bddc_symmetric"] is True
     assert solver.preconditioner_options["pc_bddc_dirichlet_ksp_type"] == "preonly"
     assert solver.preconditioner_options["pc_bddc_dirichlet_pc_type"] == "ilu"
     assert solver.preconditioner_options["pc_bddc_neumann_ksp_type"] == "preonly"
@@ -132,6 +136,8 @@ def test_from_config_propagates_bddc_local_solver_options() -> None:
     assert solver.preconditioner_options["pc_bddc_coarse_pc_type"] == "gamg"
     assert solver.preconditioner_options["pc_bddc_dirichlet_approximate"] is True
     assert solver.preconditioner_options["pc_bddc_neumann_approximate"] is True
+    assert solver.preconditioner_options["pc_bddc_monolithic"] is True
+    assert solver.preconditioner_options["pc_bddc_coarse_redundant_pc_type"] == "svd"
     assert solver.preconditioner_options["pc_bddc_switch_static"] is True
     assert solver.preconditioner_options["pc_bddc_use_deluxe_scaling"] is False
     assert solver.preconditioner_options["pc_bddc_use_vertices"] is True
@@ -140,3 +146,19 @@ def test_from_config_propagates_bddc_local_solver_options() -> None:
     assert solver.preconditioner_options["pc_bddc_use_change_of_basis"] is True
     assert solver.preconditioner_options["pc_bddc_use_change_on_faces"] is True
     assert solver.preconditioner_options["pc_bddc_check_level"] == 2
+
+
+def test_from_config_propagates_hypre_cycle_limit() -> None:
+    config = LinearSolverConfig(
+        solver_type="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+        pc_backend="hypre",
+        pc_hypre_boomeramg_max_iter=2,
+    )
+
+    solver = SolverFactory.from_config(
+        config,
+        q_mask=np.array([[True, True]], dtype=bool),
+        coord=np.zeros((1, 2), dtype=np.float64),
+    )
+
+    assert solver.preconditioner_options["pc_hypre_boomeramg_max_iter"] == 2

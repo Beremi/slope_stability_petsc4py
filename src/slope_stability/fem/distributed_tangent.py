@@ -105,6 +105,7 @@ class BDDCSubdomainPattern:
     local_adjacency_indptr: np.ndarray
     local_adjacency_indices: np.ndarray
     local_primal_vertices: np.ndarray
+    adjacency_source: str
     n_p: int
     n_q: int
     stats: dict[str, float]
@@ -553,6 +554,75 @@ def _build_local_adjacency_from_csr(matrix: csr_matrix) -> tuple[np.ndarray, np.
     indptr = np.array(matrix.indptr, dtype=np.int32, copy=True)
     indices = np.array(matrix.indices, dtype=np.int32, copy=True)
     return indptr, indices
+
+
+def _build_local_adjacency_from_topology(
+    *,
+    elem_local: np.ndarray,
+    n_local_nodes: int,
+    dim: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    neighbors = [set([int(node)]) for node in range(int(n_local_nodes))]
+    elem_arr = np.asarray(elem_local, dtype=np.int64)
+    if elem_arr.size:
+        for e_local in range(int(elem_arr.shape[1])):
+            local_nodes = [int(v) for v in np.unique(np.asarray(elem_arr[:, e_local], dtype=np.int64)).tolist()]
+            for node in local_nodes:
+                neighbors[node].update(local_nodes)
+
+    indptr = np.zeros(int(n_local_nodes) * int(dim) + 1, dtype=np.int32)
+    rows: list[np.ndarray] = []
+    offset = 0
+    for node in range(int(n_local_nodes)):
+        adjacent_nodes = np.asarray(sorted(neighbors[node]), dtype=np.int64)
+        cols = (
+            int(dim) * np.repeat(adjacent_nodes, int(dim))
+            + np.tile(np.arange(int(dim), dtype=np.int64), adjacent_nodes.size)
+        ).astype(np.int32, copy=False)
+        cols.sort()
+        for comp in range(int(dim)):
+            row = int(dim) * int(node) + int(comp)
+            rows.append(np.asarray(cols, dtype=np.int32))
+            offset += int(cols.size)
+            indptr[row + 1] = offset
+    indices = np.concatenate(rows).astype(np.int32, copy=False) if rows else np.empty(0, dtype=np.int32)
+    return indptr, indices
+
+
+def _interface_corner_primal_vertices(
+    *,
+    coord_local: np.ndarray,
+    interface_nodes_local: np.ndarray,
+    local_dirichlet_dofs: np.ndarray,
+    dim: int,
+) -> np.ndarray:
+    interface_nodes = np.asarray(interface_nodes_local, dtype=np.int64).ravel()
+    if interface_nodes.size == 0:
+        return np.empty(0, dtype=np.int32)
+    coords = np.asarray(coord_local, dtype=np.float64)
+    interface_coords = coords[:, interface_nodes]
+    mins = np.min(interface_coords, axis=1)
+    maxs = np.max(interface_coords, axis=1)
+    dirichlet = set(int(v) for v in np.asarray(local_dirichlet_dofs, dtype=np.int32).tolist())
+    selected_nodes: list[int] = []
+    for mask in range(1 << int(dim)):
+        target = np.array(
+            [maxs[axis] if (mask >> axis) & 1 else mins[axis] for axis in range(int(dim))],
+            dtype=np.float64,
+        )
+        distances = np.linalg.norm(interface_coords.T - target[None, :], axis=1)
+        candidate = int(interface_nodes[int(np.argmin(distances))])
+        if candidate not in selected_nodes:
+            selected_nodes.append(candidate)
+    primal_dofs: list[int] = []
+    for node_local in selected_nodes:
+        for comp in range(int(dim)):
+            dof = int(dim) * int(node_local) + int(comp)
+            if dof not in dirichlet:
+                primal_dofs.append(dof)
+    if not primal_dofs:
+        return np.empty(0, dtype=np.int32)
+    return np.asarray(sorted(set(primal_dofs)), dtype=np.int32)
 
 
 def _project_values_onto_pattern(source: csr_matrix, pattern: csr_matrix) -> np.ndarray:
@@ -1115,6 +1185,8 @@ def prepare_bddc_subdomain_pattern(
     *,
     elem_type: str = "P2",
     overlap_local_int_indices: np.ndarray | None = None,
+    adjacency_source: str = "csr",
+    corner_only_primals: bool = False,
 ) -> BDDCSubdomainPattern:
     """Prepare a non-overlapping local subdomain pattern for MATIS/PCBDDC."""
 
@@ -1162,7 +1234,22 @@ def prepare_bddc_subdomain_pattern(
         free_mask_local=np.asarray(free_mask_local, dtype=bool),
         dim=dim,
     )
-    local_adjacency_indptr, local_adjacency_indices = _build_local_adjacency_from_csr(local_matrix_pattern)
+    adjacency_mode = str(adjacency_source).strip().lower()
+    if adjacency_mode not in {"csr", "none", "topology"}:
+        raise ValueError(
+            f"Unsupported BDDC adjacency_source {adjacency_source!r}; expected one of ['csr', 'none', 'topology']"
+        )
+    if adjacency_mode == "csr":
+        local_adjacency_indptr, local_adjacency_indices = _build_local_adjacency_from_csr(local_matrix_pattern)
+    elif adjacency_mode == "topology":
+        local_adjacency_indptr, local_adjacency_indices = _build_local_adjacency_from_topology(
+            elem_local=elem_local,
+            n_local_nodes=int(local_nodes.size),
+            dim=dim,
+        )
+    else:
+        local_adjacency_indptr = np.empty(0, dtype=np.int32)
+        local_adjacency_indices = np.empty(0, dtype=np.int32)
     pattern_time = perf_counter() - t_pattern
 
     n_q = int(asm.n_q)
@@ -1208,9 +1295,18 @@ def prepare_bddc_subdomain_pattern(
         if matches.size != 1:
             raise RuntimeError("Local Dirichlet BDDC row is missing its diagonal structural entry")
         constrained_diag_positions.append(int(start + matches[0]))
-    # Let PETSc derive the primal coarse space by default; forcing all interface
-    # dofs into the primal set over-constrains high-order runs.
-    local_primal_vertices = np.empty(0, dtype=np.int32)
+    interface_nodes_local = node_lids[interface_nodes_global] if interface_nodes_global.size else np.empty(0, dtype=np.int64)
+    if bool(corner_only_primals):
+        local_primal_vertices = _interface_corner_primal_vertices(
+            coord_local=coord_local,
+            interface_nodes_local=interface_nodes_local,
+            local_dirichlet_dofs=local_dirichlet_dofs,
+            dim=dim,
+        )
+    else:
+        # Let PETSc derive the primal coarse space by default; forcing all interface
+        # dofs into the primal set over-constrains high-order runs.
+        local_primal_vertices = np.empty(0, dtype=np.int32)
     t_elastic = perf_counter()
     if local_elements.size:
         _c0, _phi, _psi, shear, bulk, lame, _gamma = heterogenous_materials(
@@ -1267,6 +1363,7 @@ def prepare_bddc_subdomain_pattern(
         local_adjacency_indptr=np.ascontiguousarray(local_adjacency_indptr, dtype=np.int32),
         local_adjacency_indices=np.ascontiguousarray(local_adjacency_indices, dtype=np.int32),
         local_primal_vertices=np.ascontiguousarray(local_primal_vertices, dtype=np.int32),
+        adjacency_source=adjacency_mode,
         n_p=int(elem.shape[0]),
         n_q=n_q,
         stats={
@@ -1278,6 +1375,7 @@ def prepare_bddc_subdomain_pattern(
             "local_interface_nodes_count": float(int(interface_nodes_global.size)),
             "local_primal_vertices_count": float(int(local_primal_vertices.size)),
             "explicit_primal_vertices_used": float(bool(local_primal_vertices.size)),
+            "adjacency_source": float({"none": 0, "csr": 1, "topology": 2}[adjacency_mode]),
         },
         timings={
             "local_partition_s": float(partition_time),

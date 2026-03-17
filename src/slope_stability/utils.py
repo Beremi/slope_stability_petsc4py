@@ -286,20 +286,64 @@ def get_petsc_is_local_mat(A):
     return refs[0]
 
 
-def local_csr_to_petsc_seq_aij_matrix(A_local):
-    """Create a sequential AIJ PETSc matrix from local CSR data."""
+def local_csr_to_petsc_seq_matrix(A_local, *, mat_type: str = "aij", block_size: int | None = None):
+    """Create a sequential PETSc sparse matrix from local CSR data."""
 
     import scipy.sparse as sp
 
     _require_petsc()
     csr = A_local.tocsr() if sp.issparse(A_local) else sp.csr_matrix(np.asarray(A_local, dtype=np.float64))
+    normalized = str(mat_type).strip().lower()
+    if normalized not in {"aij", "sbaij"}:
+        raise ValueError(f"Unsupported local PETSc matrix type {mat_type!r}; expected 'aij' or 'sbaij'")
+    if normalized == "sbaij":
+        if csr.shape[0] != csr.shape[1]:
+            raise ValueError("SBAIJ local matrices must be square")
     indptr = np.array(csr.indptr, dtype=PETSc.IntType, copy=True)
     indices = np.array(csr.indices, dtype=PETSc.IntType, copy=True)
     data = np.array(csr.data, dtype=np.float64, copy=True)
-    mat = PETSc.Mat().createAIJ(size=csr.shape, csr=(indptr, indices, data), comm=PETSc.COMM_SELF)
+    if normalized == "sbaij":
+        bs = 1 if block_size is None else int(block_size)
+        if csr.shape[0] % bs != 0 or csr.shape[1] % bs != 0:
+            raise ValueError(f"SBAIJ local matrix shape {csr.shape} is not divisible by block size {bs}")
+        bsr = csr.tobsr(blocksize=(bs, bs))
+        block_indptr = [0]
+        block_indices: list[int] = []
+        block_data: list[np.ndarray] = []
+        for block_row in range(int(bsr.indptr.size) - 1):
+            start = int(bsr.indptr[block_row])
+            stop = int(bsr.indptr[block_row + 1])
+            for pos in range(start, stop):
+                block_col = int(bsr.indices[pos])
+                if block_col >= block_row:
+                    block_indices.append(block_col)
+                    block_data.append(np.asarray(bsr.data[pos], dtype=np.float64))
+            block_indptr.append(len(block_indices))
+        block_indptr_arr = np.asarray(block_indptr, dtype=PETSc.IntType)
+        block_indices_arr = np.asarray(block_indices, dtype=PETSc.IntType)
+        if block_data:
+            block_data_arr = np.ascontiguousarray(np.asarray(block_data, dtype=np.float64))
+        else:
+            block_data_arr = np.empty((0, bs, bs), dtype=np.float64)
+        mat = PETSc.Mat().createSBAIJ(
+            size=csr.shape,
+            bsize=bs,
+            csr=(block_indptr_arr, block_indices_arr, block_data_arr),
+            comm=PETSc.COMM_SELF,
+        )
+    else:
+        mat = PETSc.Mat().createAIJ(size=csr.shape, csr=(indptr, indices, data), comm=PETSc.COMM_SELF)
+    if block_size is not None and normalized != "sbaij":
+        mat.setBlockSize(int(block_size))
     mat.assemble()
     _PETSC_MAT_CSR_REFS[int(mat.handle)] = (indptr, indices, data)
     return mat
+
+
+def local_csr_to_petsc_seq_aij_matrix(A_local):
+    """Create a sequential AIJ PETSc matrix from local CSR data."""
+
+    return local_csr_to_petsc_seq_matrix(A_local, mat_type="aij")
 
 
 def _build_seq_nullspace(basis: np.ndarray | None):
@@ -364,13 +408,14 @@ def local_csr_to_petsc_matis_matrix(
     comm,
     block_size: int | None = None,
     local_vector_size: int | None = None,
+    local_mat_type: str = "aij",
     metadata: dict[str, object] | None = None,
 ):
     """Create a PETSc MATIS matrix from a local square CSR matrix."""
 
     _require_petsc()
     stored_metadata = dict(metadata or {})
-    local_mat = local_csr_to_petsc_seq_aij_matrix(A_local)
+    local_mat = local_csr_to_petsc_seq_matrix(A_local, mat_type=local_mat_type, block_size=block_size)
     if block_size is not None:
         local_mat.setBlockSize(int(block_size))
     local_nullspace, local_nullspace_vecs = _build_seq_nullspace(stored_metadata.get("bddc_local_nullspace_basis"))
@@ -417,6 +462,7 @@ def local_csr_to_petsc_matis_matrix(
     stored_metadata.setdefault("matis_local_size", int(n_local))
     stored_metadata.setdefault("matis_vector_local_size", int(vec_local))
     stored_metadata.setdefault("matis_global_size", int(global_size))
+    stored_metadata.setdefault("matis_local_mat_type", str(local_mat_type).strip().lower())
     _PETSC_MAT_METADATA[int(mat.handle)] = stored_metadata
     return mat
 
