@@ -42,6 +42,31 @@ def _collector_delta(before: dict, after: dict) -> dict:
     }
 
 
+def _basis_snapshot(solver):
+    getter = getattr(solver, "get_deflation_basis_snapshot", None)
+    if callable(getter):
+        return getter()
+    basis = getattr(solver, "deflation_basis", None)
+    if basis is None:
+        return None
+    return np.array(basis, dtype=np.float64, copy=True)
+
+
+def _basis_restore(solver, snapshot) -> None:
+    restore = getattr(solver, "restore_deflation_basis", None)
+    if callable(restore):
+        restore(snapshot)
+        return
+    if hasattr(solver, "deflation_basis"):
+        solver.deflation_basis = np.array(snapshot, dtype=np.float64, copy=True)
+
+
+def _notify_attempt(solver, *, success: bool) -> None:
+    notify = getattr(solver, "notify_continuation_attempt", None)
+    if callable(notify):
+        notify(success=bool(success))
+
+
 def init_phase_SSR_indirect_continuation(
     lambda_init: float,
     d_lambda_init: float,
@@ -279,6 +304,7 @@ def SSR_indirect_continuation(
             U_ini = d_omega * (U - U_old) / denom + U
 
         t_attempt = perf_counter()
+        basis_before_attempt = _basis_snapshot(linear_system_solver)
         snap_before = _collector_snapshot(linear_system_solver)
         U_it, lambda_candidate, flag, it_newt, history = newton_ind_ssr(
             U_ini,
@@ -292,8 +318,10 @@ def SSR_indirect_continuation(
             Q,
             f,
             constitutive_matrix_builder,
-            linear_system_solver.copy(),
+            linear_system_solver,
         )
+        _basis_restore(linear_system_solver, basis_before_attempt)
+        _notify_attempt(linear_system_solver, success=(flag == 0))
         snap_after = _collector_snapshot(linear_system_solver)
         attempt_delta = _collector_delta(snap_before, snap_after)
         attempt_wall = perf_counter() - t_attempt

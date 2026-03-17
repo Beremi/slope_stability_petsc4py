@@ -93,11 +93,38 @@ class LinearSolverConfig:
     print_level: int = 0
     use_as_preconditioner: bool = True
     factor_solver_type: str | None = None
+    pc_backend: str | None = None
+    preconditioner_matrix_source: str = "tangent"
+    preconditioner_matrix_policy: str = "current"
+    preconditioner_rebuild_policy: str = "every_newton"
+    preconditioner_rebuild_interval: int = 1
     pc_gamg_process_eq_limit: int | None = None
     pc_gamg_threshold: float | None = None
+    pc_gamg_aggressive_coarsening: int | None = None
+    pc_gamg_aggressive_square_graph: bool | None = None
+    pc_gamg_aggressive_mis_k: int | None = None
     pc_hypre_coarsen_type: str | None = "HMIS"
     pc_hypre_interp_type: str | None = "ext+i"
     pc_hypre_strong_threshold: float | None = None
+    pc_hypre_P_max: int | None = None
+    pc_hypre_agg_nl: int | None = None
+    pc_hypre_nongalerkin_tol: float | None = None
+    pc_bddc_symmetric: bool = False
+    pc_bddc_dirichlet_ksp_type: str | None = None
+    pc_bddc_dirichlet_pc_type: str | None = None
+    pc_bddc_neumann_ksp_type: str | None = None
+    pc_bddc_neumann_pc_type: str | None = None
+    pc_bddc_coarse_ksp_type: str | None = None
+    pc_bddc_coarse_pc_type: str | None = None
+    pc_bddc_dirichlet_approximate: bool | None = None
+    pc_bddc_neumann_approximate: bool | None = None
+    pc_bddc_use_deluxe_scaling: bool | None = None
+    pc_bddc_use_vertices: bool | None = None
+    pc_bddc_use_edges: bool | None = None
+    pc_bddc_use_faces: bool | None = None
+    pc_bddc_use_change_of_basis: bool | None = None
+    pc_bddc_use_change_on_faces: bool | None = None
+    pc_bddc_check_level: int | None = None
     compiled_outer: bool = False
     recycle_preconditioner: bool = True
 
@@ -259,11 +286,31 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         factor_solver_type=(
             None if linear_data.get("factor_solver_type") is None else str(linear_data.get("factor_solver_type"))
         ),
+        pc_backend=(None if linear_data.get("pc_backend") is None else str(linear_data.get("pc_backend"))),
+        preconditioner_matrix_source=str(linear_data.get("preconditioner_matrix_source", "tangent")),
+        preconditioner_matrix_policy=str(linear_data.get("preconditioner_matrix_policy", "current")),
+        preconditioner_rebuild_policy=str(linear_data.get("preconditioner_rebuild_policy", "every_newton")),
+        preconditioner_rebuild_interval=int(linear_data.get("preconditioner_rebuild_interval", 1)),
         pc_gamg_process_eq_limit=(
             None if linear_data.get("pc_gamg_process_eq_limit") is None else int(linear_data.get("pc_gamg_process_eq_limit"))
         ),
         pc_gamg_threshold=(
             None if linear_data.get("pc_gamg_threshold") is None else float(linear_data.get("pc_gamg_threshold"))
+        ),
+        pc_gamg_aggressive_coarsening=(
+            None
+            if linear_data.get("pc_gamg_aggressive_coarsening") is None
+            else int(linear_data.get("pc_gamg_aggressive_coarsening"))
+        ),
+        pc_gamg_aggressive_square_graph=(
+            None
+            if linear_data.get("pc_gamg_aggressive_square_graph") is None
+            else bool(linear_data.get("pc_gamg_aggressive_square_graph"))
+        ),
+        pc_gamg_aggressive_mis_k=(
+            None
+            if linear_data.get("pc_gamg_aggressive_mis_k") is None
+            else int(linear_data.get("pc_gamg_aggressive_mis_k"))
         ),
         pc_hypre_coarsen_type=(
             None if linear_data.get("pc_hypre_coarsen_type") is None else str(linear_data.get("pc_hypre_coarsen_type"))
@@ -273,6 +320,93 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         ),
         pc_hypre_strong_threshold=(
             None if linear_data.get("pc_hypre_strong_threshold") is None else float(linear_data.get("pc_hypre_strong_threshold"))
+        ),
+        pc_hypre_P_max=(
+            None if linear_data.get("pc_hypre_P_max") is None else int(linear_data.get("pc_hypre_P_max"))
+        ),
+        pc_hypre_agg_nl=(
+            None if linear_data.get("pc_hypre_agg_nl") is None else int(linear_data.get("pc_hypre_agg_nl"))
+        ),
+        pc_hypre_nongalerkin_tol=(
+            None
+            if linear_data.get("pc_hypre_nongalerkin_tol") is None
+            else float(linear_data.get("pc_hypre_nongalerkin_tol"))
+        ),
+        pc_bddc_symmetric=bool(linear_data.get("pc_bddc_symmetric", False)),
+        pc_bddc_dirichlet_ksp_type=(
+            None
+            if linear_data.get("pc_bddc_dirichlet_ksp_type") is None
+            else str(linear_data.get("pc_bddc_dirichlet_ksp_type"))
+        ),
+        pc_bddc_dirichlet_pc_type=(
+            None
+            if linear_data.get("pc_bddc_dirichlet_pc_type") is None
+            else str(linear_data.get("pc_bddc_dirichlet_pc_type"))
+        ),
+        pc_bddc_neumann_ksp_type=(
+            None
+            if linear_data.get("pc_bddc_neumann_ksp_type") is None
+            else str(linear_data.get("pc_bddc_neumann_ksp_type"))
+        ),
+        pc_bddc_neumann_pc_type=(
+            None
+            if linear_data.get("pc_bddc_neumann_pc_type") is None
+            else str(linear_data.get("pc_bddc_neumann_pc_type"))
+        ),
+        pc_bddc_coarse_ksp_type=(
+            None
+            if linear_data.get("pc_bddc_coarse_ksp_type") is None
+            else str(linear_data.get("pc_bddc_coarse_ksp_type"))
+        ),
+        pc_bddc_coarse_pc_type=(
+            None
+            if linear_data.get("pc_bddc_coarse_pc_type") is None
+            else str(linear_data.get("pc_bddc_coarse_pc_type"))
+        ),
+        pc_bddc_dirichlet_approximate=(
+            None
+            if linear_data.get("pc_bddc_dirichlet_approximate") is None
+            else bool(linear_data.get("pc_bddc_dirichlet_approximate"))
+        ),
+        pc_bddc_neumann_approximate=(
+            None
+            if linear_data.get("pc_bddc_neumann_approximate") is None
+            else bool(linear_data.get("pc_bddc_neumann_approximate"))
+        ),
+        pc_bddc_use_deluxe_scaling=(
+            None
+            if linear_data.get("pc_bddc_use_deluxe_scaling") is None
+            else bool(linear_data.get("pc_bddc_use_deluxe_scaling"))
+        ),
+        pc_bddc_use_vertices=(
+            None
+            if linear_data.get("pc_bddc_use_vertices") is None
+            else bool(linear_data.get("pc_bddc_use_vertices"))
+        ),
+        pc_bddc_use_edges=(
+            None
+            if linear_data.get("pc_bddc_use_edges") is None
+            else bool(linear_data.get("pc_bddc_use_edges"))
+        ),
+        pc_bddc_use_faces=(
+            None
+            if linear_data.get("pc_bddc_use_faces") is None
+            else bool(linear_data.get("pc_bddc_use_faces"))
+        ),
+        pc_bddc_use_change_of_basis=(
+            None
+            if linear_data.get("pc_bddc_use_change_of_basis") is None
+            else bool(linear_data.get("pc_bddc_use_change_of_basis"))
+        ),
+        pc_bddc_use_change_on_faces=(
+            None
+            if linear_data.get("pc_bddc_use_change_on_faces") is None
+            else bool(linear_data.get("pc_bddc_use_change_on_faces"))
+        ),
+        pc_bddc_check_level=(
+            None
+            if linear_data.get("pc_bddc_check_level") is None
+            else int(linear_data.get("pc_bddc_check_level"))
         ),
         compiled_outer=bool(linear_data.get("compiled_outer", False)),
         recycle_preconditioner=bool(linear_data.get("recycle_preconditioner", True)),

@@ -8,7 +8,7 @@ from time import perf_counter
 import numpy as np
 from scipy.sparse import csc_matrix, csr_matrix
 
-from ..mesh.materials import MaterialSpec
+from ..mesh.materials import MaterialSpec, heterogenous_materials
 from .assembly import assemble_strain_geometry, assemble_strain_operator
 from .distributed_elastic import OwnedElasticRows, assemble_owned_elastic_rows
 
@@ -71,6 +71,40 @@ class OwnedTangentPattern:
     slot_lrow: np.ndarray
     slot_pos: np.ndarray
     constrained_diag_positions: np.ndarray
+    n_p: int
+    n_q: int
+    stats: dict[str, float]
+    timings: dict[str, float]
+
+
+@dataclass(frozen=True)
+class BDDCSubdomainPattern:
+    """Local square subdomain assembly metadata for PETSc MATIS/PCBDDC."""
+
+    dim: int
+    n_strain: int
+    owned_node_range: tuple[int, int]
+    owned_coord: np.ndarray
+    local_nodes: np.ndarray
+    local_elements: np.ndarray
+    local_coord: np.ndarray
+    local_q_mask: np.ndarray
+    local_global_dofs: np.ndarray
+    local_matrix_pattern: csr_matrix
+    elastic_values: np.ndarray
+    local_assembly_weight: np.ndarray
+    dphi1: np.ndarray
+    dphi2: np.ndarray
+    dphi3: np.ndarray
+    local_int_indices: np.ndarray
+    overlap_local_positions: np.ndarray
+    scatter_map: np.ndarray
+    local_dirichlet_dofs: np.ndarray
+    constrained_diag_positions: np.ndarray
+    local_field_dofs: tuple[np.ndarray, ...]
+    local_adjacency_indptr: np.ndarray
+    local_adjacency_indices: np.ndarray
+    local_primal_vertices: np.ndarray
     n_p: int
     n_q: int
     stats: dict[str, float]
@@ -443,6 +477,84 @@ def _build_owned_row_structural_pattern(
     return csr_matrix((data, indices, indptr), shape=(n_local_rows, global_dofs))
 
 
+def _build_local_square_structural_pattern(
+    *,
+    elem_local: np.ndarray,
+    free_mask_local: np.ndarray,
+    dim: int,
+) -> csr_matrix:
+    n_nodes_local = int(np.asarray(free_mask_local, dtype=bool).size // int(dim))
+    local_dofs = int(dim) * n_nodes_local
+    row_cols: list[set[int]] = [set() for _ in range(local_dofs)]
+
+    for e_local in range(int(np.asarray(elem_local).shape[1])):
+        dofs = _global_dofs_for_nodes(np.asarray(elem_local[:, e_local], dtype=np.int64), int(dim))
+        dof_list = [int(v) for v in dofs.tolist()]
+        free_cols = [int(v) for v in dof_list if bool(free_mask_local[v])]
+        for row_local in dof_list:
+            if bool(free_mask_local[row_local]):
+                row_cols[row_local].update(free_cols)
+
+    for row_local in range(local_dofs):
+        if not bool(free_mask_local[row_local]):
+            row_cols[row_local] = {int(row_local)}
+
+    indptr = np.zeros(local_dofs + 1, dtype=np.int32)
+    indices_chunks: list[np.ndarray] = []
+    for row_local, cols in enumerate(row_cols):
+        cols_arr = np.asarray(sorted(cols), dtype=np.int32)
+        indices_chunks.append(cols_arr)
+        indptr[row_local + 1] = indptr[row_local] + cols_arr.size
+    indices = np.concatenate(indices_chunks) if indices_chunks else np.empty(0, dtype=np.int32)
+    data = np.ones(indices.size, dtype=np.float64)
+    return csr_matrix((data, indices, indptr), shape=(local_dofs, local_dofs))
+
+
+def _build_local_square_scatter_map(
+    *,
+    elem_local: np.ndarray,
+    local_matrix: csr_matrix,
+    free_mask_local: np.ndarray,
+    dim: int,
+) -> tuple[np.ndarray, int]:
+    n_p = int(np.asarray(elem_local).shape[0])
+    n_local_dof = int(dim) * n_p
+    row_maps: list[dict[int, int]] = []
+    for local_row in range(int(local_matrix.shape[0])):
+        start = int(local_matrix.indptr[local_row])
+        end = int(local_matrix.indptr[local_row + 1])
+        cols = np.asarray(local_matrix.indices[start:end], dtype=np.int64)
+        pos = np.arange(start, end, dtype=np.int64)
+        row_maps.append({int(c): int(p) for c, p in zip(cols.tolist(), pos.tolist(), strict=False)})
+
+    scatter = np.full((int(np.asarray(elem_local).shape[1]), n_local_dof * n_local_dof), -1, dtype=np.int32)
+    missing = 0
+    for e_local in range(int(np.asarray(elem_local).shape[1])):
+        dofs = _global_dofs_for_nodes(np.asarray(elem_local[:, e_local], dtype=np.int64), int(dim))
+        dof_list = [int(v) for v in dofs.tolist()]
+        for a, row_local in enumerate(dof_list):
+            if not bool(free_mask_local[row_local]):
+                continue
+            row_lookup = row_maps[row_local]
+            base = a * n_local_dof
+            for b, col_local in enumerate(dof_list):
+                if not bool(free_mask_local[col_local]):
+                    continue
+                pos = row_lookup.get(int(col_local))
+                if pos is None:
+                    missing += 1
+                    continue
+                scatter[e_local, base + b] = int(pos)
+    return scatter, missing
+
+
+def _build_local_adjacency_from_csr(matrix: csr_matrix) -> tuple[np.ndarray, np.ndarray]:
+    matrix = matrix.tocsr()
+    indptr = np.array(matrix.indptr, dtype=np.int32, copy=True)
+    indices = np.array(matrix.indices, dtype=np.int32, copy=True)
+    return indptr, indices
+
+
 def _project_values_onto_pattern(source: csr_matrix, pattern: csr_matrix) -> np.ndarray:
     values = np.zeros(pattern.nnz, dtype=np.float64)
     for local_row in range(pattern.shape[0]):
@@ -456,6 +568,152 @@ def _project_values_onto_pattern(source: csr_matrix, pattern: csr_matrix) -> np.
             if pos is not None:
                 values[pos] = float(val)
     return values
+
+
+def _elastic_tangent_entries(
+    *,
+    n_strain: int,
+    shear: np.ndarray,
+    lame: np.ndarray,
+    bulk: np.ndarray | None = None,
+) -> np.ndarray:
+    shear = np.asarray(shear, dtype=np.float64).ravel()
+    lame = np.asarray(lame, dtype=np.float64).ravel()
+    n_int = int(shear.size)
+    if int(lame.size) != n_int:
+        raise ValueError("lame and shear must match in size")
+
+    if n_strain == 3:
+        iota = np.array([1.0, 1.0, 0.0], dtype=np.float64)
+        vol_flat = np.outer(iota, iota).reshape(-1, order="F")
+        ident_flat = np.diag([1.0, 1.0, 0.5]).reshape(-1, order="F")
+        vol_coeff = lame
+    elif n_strain == 6:
+        bulk_arr = np.zeros(n_int, dtype=np.float64) if bulk is None else np.asarray(bulk, dtype=np.float64).ravel()
+        if int(bulk_arr.size) != n_int:
+            raise ValueError("bulk and shear must match in size")
+        iota = np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        vol_flat = np.outer(iota, iota).reshape(-1, order="F")
+        ident_flat = (np.diag([1.0, 1.0, 1.0, 0.5, 0.5, 0.5]) - np.outer(iota, iota) / 3.0).reshape(-1, order="F")
+        vol_coeff = bulk_arr
+    else:
+        raise ValueError(f"Unsupported n_strain={n_strain}")
+
+    return vol_flat[:, None] * vol_coeff[None, :] + 2.0 * ident_flat[:, None] * shear[None, :]
+
+
+def _assemble_scatter_pattern_values_python(
+    *,
+    dim: int,
+    n_strain: int,
+    n_p: int,
+    n_q: int,
+    dphi1: np.ndarray,
+    dphi2: np.ndarray,
+    dphi3: np.ndarray,
+    assembly_weight: np.ndarray,
+    scatter_map: np.ndarray,
+    ds_local: np.ndarray,
+    out_size: int,
+    constrained_diag_positions: np.ndarray | None = None,
+) -> np.ndarray:
+    n_elem = int(scatter_map.shape[0])
+    n_local_dof = int(dim) * int(n_p)
+    out = np.zeros(int(out_size), dtype=np.float64)
+
+    for e in range(n_elem):
+        ke = np.zeros((n_local_dof, n_local_dof), dtype=np.float64)
+        g_base = e * int(n_q)
+        for q in range(int(n_q)):
+            g = g_base + q
+            d_eq = ds_local[g].reshape(int(n_strain), int(n_strain), order="F") * float(assembly_weight[g])
+            b_eq = np.zeros((int(n_strain), n_local_dof), dtype=np.float64)
+            for i in range(int(n_p)):
+                dN1 = float(dphi1[g, i])
+                dN2 = float(dphi2[g, i])
+                c = int(dim) * i
+                if int(dim) == 2:
+                    b_eq[0, c + 0] = dN1
+                    b_eq[1, c + 1] = dN2
+                    b_eq[2, c + 0] = dN2
+                    b_eq[2, c + 1] = dN1
+                elif int(dim) == 3:
+                    dN3 = float(dphi3[g, i])
+                    b_eq[0, c + 0] = dN1
+                    b_eq[1, c + 1] = dN2
+                    b_eq[2, c + 2] = dN3
+                    b_eq[3, c + 0] = dN2
+                    b_eq[3, c + 1] = dN1
+                    b_eq[4, c + 1] = dN3
+                    b_eq[4, c + 2] = dN2
+                    b_eq[5, c + 0] = dN3
+                    b_eq[5, c + 2] = dN1
+                else:
+                    raise ValueError(f"Unsupported dimension {dim}")
+            ke += b_eq.T @ d_eq @ b_eq
+
+        smap = scatter_map[e]
+        active = smap >= 0
+        out[smap[active]] += ke.reshape(-1, order="C")[active]
+
+    if constrained_diag_positions is not None and int(np.asarray(constrained_diag_positions).size):
+        out[np.asarray(constrained_diag_positions, dtype=np.int64)] = 1.0
+    return out
+
+
+def _assemble_local_square_elastic_values(
+    *,
+    asm,
+    scatter_map: np.ndarray,
+    out_size: int,
+    constrained_diag_positions: np.ndarray,
+    shear: np.ndarray,
+    lame: np.ndarray,
+    bulk: np.ndarray | None = None,
+    use_compiled: bool = True,
+) -> np.ndarray:
+    ds_local = np.ascontiguousarray(
+        _elastic_tangent_entries(
+            n_strain=int(asm.n_strain),
+            shear=np.asarray(shear, dtype=np.float64),
+            lame=np.asarray(lame, dtype=np.float64),
+            bulk=None if bulk is None else np.asarray(bulk, dtype=np.float64),
+        ).T,
+        dtype=np.float64,
+    )
+    dphi1 = np.ascontiguousarray(np.asarray(asm.dphi["dphi1"], dtype=np.float64).T, dtype=np.float64)
+    dphi2 = np.ascontiguousarray(np.asarray(asm.dphi["dphi2"], dtype=np.float64).T, dtype=np.float64)
+    dphi3 = np.ascontiguousarray(np.asarray(asm.dphi.get("dphi3", np.empty((0, 0), dtype=np.float64))).T, dtype=np.float64)
+
+    if use_compiled and _kernels is not None and int(asm.dim) == 3 and int(asm.n_strain) == 6:
+        values = _kernels.assemble_tangent_values_3d(
+            dphi1,
+            dphi2,
+            dphi3,
+            ds_local,
+            np.ascontiguousarray(np.asarray(asm.weight, dtype=np.float64), dtype=np.float64),
+            np.ascontiguousarray(np.asarray(scatter_map, dtype=np.int32), dtype=np.int32),
+            int(out_size),
+        )
+        values = np.asarray(values, dtype=np.float64)
+        if int(np.asarray(constrained_diag_positions).size):
+            values[np.asarray(constrained_diag_positions, dtype=np.int64)] = 1.0
+        return values
+
+    return _assemble_scatter_pattern_values_python(
+        dim=int(asm.dim),
+        n_strain=int(asm.n_strain),
+        n_p=int(asm.elem.shape[0]),
+        n_q=int(asm.n_q),
+        dphi1=dphi1,
+        dphi2=dphi2,
+        dphi3=dphi3,
+        assembly_weight=np.asarray(asm.weight, dtype=np.float64),
+        scatter_map=np.asarray(scatter_map, dtype=np.int32),
+        ds_local=ds_local,
+        out_size=int(out_size),
+        constrained_diag_positions=np.asarray(constrained_diag_positions, dtype=np.int32),
+    )
 
 
 def _csr_storage_bytes(matrix: csr_matrix) -> int:
@@ -845,6 +1103,244 @@ def prepare_owned_tangent_pattern(
             "elastic_pattern_reused": float(bool(reused_elastic_rows)),
         },
     )
+
+
+def prepare_bddc_subdomain_pattern(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    q_mask: np.ndarray,
+    material_identifier: np.ndarray,
+    materials: list[MaterialSpec] | list[dict] | dict,
+    owned_node_range: tuple[int, int],
+    *,
+    elem_type: str = "P2",
+    overlap_local_int_indices: np.ndarray | None = None,
+) -> BDDCSubdomainPattern:
+    """Prepare a non-overlapping local subdomain pattern for MATIS/PCBDDC."""
+
+    coord = np.asarray(coord, dtype=np.float64)
+    elem = np.asarray(elem, dtype=np.int64)
+    q_mask = np.asarray(q_mask, dtype=bool)
+    material_identifier = np.asarray(material_identifier, dtype=np.int64).ravel()
+    dim, n_nodes = coord.shape
+    node0, node1 = tuple(int(v) for v in owned_node_range)
+
+    t_partition = perf_counter()
+    elem_owner_nodes = np.min(elem, axis=0)
+    local_elements = np.flatnonzero((elem_owner_nodes >= node0) & (elem_owner_nodes < node1)).astype(np.int64)
+    partition_time = perf_counter() - t_partition
+
+    if local_elements.size:
+        local_nodes = np.unique(elem[:, local_elements].reshape(-1, order="F")).astype(np.int64)
+        node_lids = np.full(n_nodes, -1, dtype=np.int64)
+        node_lids[local_nodes] = np.arange(local_nodes.size, dtype=np.int64)
+        coord_local = coord[:, local_nodes]
+        elem_local = node_lids[elem[:, local_elements]]
+    else:
+        local_nodes = np.empty(0, dtype=np.int64)
+        coord_local = np.empty((dim, 0), dtype=np.float64)
+        elem_local = np.empty((elem.shape[0], 0), dtype=np.int64)
+
+    t_geometry = perf_counter()
+    asm = assemble_strain_geometry(coord_local, elem_local, elem_type, dim=dim)
+    geometry_time = perf_counter() - t_geometry
+
+    local_global_dofs = _global_dofs_for_nodes(local_nodes, dim)
+    free_mask_global = q_mask.reshape(-1, order="F")
+    free_mask_local = free_mask_global[local_global_dofs] if local_global_dofs.size else np.empty(0, dtype=bool)
+    q_mask_local = q_mask[:, local_nodes] if local_nodes.size else np.empty((dim, 0), dtype=bool)
+
+    t_pattern = perf_counter()
+    local_matrix_pattern = _build_local_square_structural_pattern(
+        elem_local=elem_local,
+        free_mask_local=np.asarray(free_mask_local, dtype=bool),
+        dim=dim,
+    )
+    scatter_map, scatter_missing = _build_local_square_scatter_map(
+        elem_local=elem_local,
+        local_matrix=local_matrix_pattern,
+        free_mask_local=np.asarray(free_mask_local, dtype=bool),
+        dim=dim,
+    )
+    local_adjacency_indptr, local_adjacency_indices = _build_local_adjacency_from_csr(local_matrix_pattern)
+    pattern_time = perf_counter() - t_pattern
+
+    n_q = int(asm.n_q)
+    local_int_indices = (
+        local_elements[:, None] * n_q + np.arange(n_q, dtype=np.int64)[None, :]
+    ).reshape(-1) if local_elements.size else np.empty(0, dtype=np.int64)
+
+    if overlap_local_int_indices is None:
+        overlap_local_positions = np.empty(0, dtype=np.int32)
+    else:
+        overlap_lookup = {
+            int(global_ip): int(pos)
+            for pos, global_ip in enumerate(np.asarray(overlap_local_int_indices, dtype=np.int64).tolist())
+        }
+        overlap_local_positions = np.asarray(
+            [int(overlap_lookup[int(global_ip)]) for global_ip in np.asarray(local_int_indices, dtype=np.int64).tolist()],
+            dtype=np.int32,
+        ) if local_int_indices.size else np.empty(0, dtype=np.int32)
+
+    local_field_dofs = tuple(
+        np.arange(comp, int(local_global_dofs.size), dim, dtype=np.int32)
+        for comp in range(dim)
+    )
+    local_dirichlet_dofs = np.flatnonzero(~np.asarray(free_mask_local, dtype=bool)).astype(np.int32)
+    interface_nodes_global = np.empty(0, dtype=np.int64)
+    if local_elements.size and int(local_elements.size) < int(elem.shape[1]):
+        local_element_mask = np.zeros(int(elem.shape[1]), dtype=bool)
+        local_element_mask[np.asarray(local_elements, dtype=np.int64)] = True
+        shared_with_nonlocal = np.zeros(int(n_nodes), dtype=bool)
+        shared_with_nonlocal[
+            np.asarray(elem[:, ~local_element_mask].reshape(-1, order="F"), dtype=np.int64)
+        ] = True
+        interface_nodes_global = np.asarray(
+            local_nodes[np.asarray(shared_with_nonlocal[local_nodes], dtype=bool)],
+            dtype=np.int64,
+        )
+    constrained_diag_positions = []
+    for row_local in local_dirichlet_dofs.tolist():
+        start = int(local_matrix_pattern.indptr[row_local])
+        end = int(local_matrix_pattern.indptr[row_local + 1])
+        cols = np.asarray(local_matrix_pattern.indices[start:end], dtype=np.int64)
+        matches = np.flatnonzero(cols == int(row_local))
+        if matches.size != 1:
+            raise RuntimeError("Local Dirichlet BDDC row is missing its diagonal structural entry")
+        constrained_diag_positions.append(int(start + matches[0]))
+    local_primal_vertices = np.empty(0, dtype=np.int32)
+    if interface_nodes_global.size:
+        interface_node_lids = np.asarray(node_lids[interface_nodes_global], dtype=np.int64)
+        primal_dofs = _global_dofs_for_nodes(interface_node_lids, dim)
+        if local_dirichlet_dofs.size:
+            keep = ~np.isin(primal_dofs, np.asarray(local_dirichlet_dofs, dtype=np.int64))
+            primal_dofs = np.asarray(primal_dofs[keep], dtype=np.int64)
+        if primal_dofs.size:
+            _ensure_int32_capacity("local_primal_vertices", int(primal_dofs.max(initial=0)))
+            local_primal_vertices = np.unique(primal_dofs.astype(np.int32, copy=False))
+    t_elastic = perf_counter()
+    if local_elements.size:
+        _c0, _phi, _psi, shear, bulk, lame, _gamma = heterogenous_materials(
+            material_identifier[local_elements],
+            np.ones(asm.n_int, dtype=bool),
+            asm.n_q,
+            materials,
+        )
+        elastic_values = _assemble_local_square_elastic_values(
+            asm=asm,
+            scatter_map=scatter_map,
+            out_size=int(local_matrix_pattern.nnz),
+            constrained_diag_positions=np.asarray(constrained_diag_positions, dtype=np.int32),
+            shear=np.asarray(shear, dtype=np.float64),
+            lame=np.asarray(lame, dtype=np.float64),
+            bulk=np.asarray(bulk, dtype=np.float64),
+            use_compiled=True,
+        )
+    else:
+        elastic_values = np.zeros(int(local_matrix_pattern.nnz), dtype=np.float64)
+    elastic_time = perf_counter() - t_elastic
+    dphi1 = np.ascontiguousarray(asm.dphi["dphi1"].T, dtype=np.float64)
+    dphi2 = np.ascontiguousarray(asm.dphi["dphi2"].T, dtype=np.float64)
+    dphi3 = np.ascontiguousarray(asm.dphi.get("dphi3", np.empty((0, 0), dtype=np.float64)).T, dtype=np.float64)
+
+    scatter_bytes = int(np.asarray(scatter_map).nbytes)
+    pattern_bytes = _csr_storage_bytes(local_matrix_pattern)
+    elastic_bytes = int(np.asarray(elastic_values).nbytes)
+    dphi_bytes = int(np.asarray(dphi1).nbytes + np.asarray(dphi2).nbytes + np.asarray(dphi3).nbytes)
+    total_bytes = int(pattern_bytes + scatter_bytes + elastic_bytes + dphi_bytes)
+
+    return BDDCSubdomainPattern(
+        dim=dim,
+        n_strain=int(asm.n_strain),
+        owned_node_range=(node0, node1),
+        owned_coord=np.ascontiguousarray(coord[:, node0:node1], dtype=np.float64),
+        local_nodes=np.ascontiguousarray(local_nodes, dtype=np.int64),
+        local_elements=np.ascontiguousarray(local_elements, dtype=np.int64),
+        local_coord=np.ascontiguousarray(coord_local, dtype=np.float64),
+        local_q_mask=np.ascontiguousarray(q_mask_local, dtype=bool),
+        local_global_dofs=np.ascontiguousarray(local_global_dofs, dtype=np.int64),
+        local_matrix_pattern=local_matrix_pattern,
+        elastic_values=np.asarray(elastic_values, dtype=np.float64),
+        local_assembly_weight=np.ascontiguousarray(asm.weight, dtype=np.float64),
+        dphi1=dphi1,
+        dphi2=dphi2,
+        dphi3=dphi3,
+        local_int_indices=np.ascontiguousarray(local_int_indices, dtype=np.int64),
+        overlap_local_positions=np.ascontiguousarray(overlap_local_positions, dtype=np.int32),
+        scatter_map=np.ascontiguousarray(scatter_map, dtype=np.int32),
+        local_dirichlet_dofs=np.ascontiguousarray(local_dirichlet_dofs, dtype=np.int32),
+        constrained_diag_positions=np.ascontiguousarray(constrained_diag_positions, dtype=np.int32),
+        local_field_dofs=tuple(np.ascontiguousarray(v, dtype=np.int32) for v in local_field_dofs),
+        local_adjacency_indptr=np.ascontiguousarray(local_adjacency_indptr, dtype=np.int32),
+        local_adjacency_indices=np.ascontiguousarray(local_adjacency_indices, dtype=np.int32),
+        local_primal_vertices=np.ascontiguousarray(local_primal_vertices, dtype=np.int32),
+        n_p=int(elem.shape[0]),
+        n_q=n_q,
+        stats={
+            "local_pattern_bytes": float(pattern_bytes),
+            "local_scatter_bytes": float(scatter_bytes),
+            "local_elastic_bytes": float(elastic_bytes),
+            "local_dphi_bytes": float(dphi_bytes),
+            "local_total_bytes": float(total_bytes),
+            "local_interface_nodes_count": float(int(interface_nodes_global.size)),
+            "local_primal_vertices_count": float(int(local_primal_vertices.size)),
+            "explicit_primal_vertices_used": float(bool(local_primal_vertices.size)),
+        },
+        timings={
+            "local_partition_s": float(partition_time),
+            "local_geometry_s": float(geometry_time),
+            "local_elastic_s": float(elastic_time),
+            "local_pattern_s": float(pattern_time),
+            "local_scatter_missing": float(scatter_missing),
+        },
+    )
+
+
+def assemble_bddc_subdomain_tangent_values(
+    pattern: BDDCSubdomainPattern,
+    DS: np.ndarray,
+    *,
+    use_compiled: bool = True,
+) -> np.ndarray:
+    ds_global = np.asarray(DS, dtype=np.float64)
+    expected_rows = int(pattern.n_strain * pattern.n_strain)
+    if ds_global.ndim != 2 or ds_global.shape[0] != expected_rows:
+        raise ValueError(f"DS must have shape ({expected_rows}, n_int)")
+    if ds_global.shape[1] == int(pattern.local_int_indices.size):
+        ds_local = np.ascontiguousarray(ds_global.T, dtype=np.float64)
+    else:
+        ds_local = np.ascontiguousarray(ds_global[:, pattern.local_int_indices].T, dtype=np.float64)
+    if use_compiled and _kernels is not None and int(pattern.dim) == 3 and int(pattern.n_strain) == 6:
+        values = np.asarray(
+            _kernels.assemble_tangent_values_3d(
+                pattern.dphi1,
+                pattern.dphi2,
+                pattern.dphi3,
+                ds_local,
+                pattern.local_assembly_weight,
+                pattern.scatter_map,
+                int(pattern.elastic_values.size),
+            ),
+            dtype=np.float64,
+        )
+    else:
+        values = _assemble_scatter_pattern_values_python(
+            dim=int(pattern.dim),
+            n_strain=int(pattern.n_strain),
+            n_p=int(pattern.n_p),
+            n_q=int(pattern.n_q),
+            dphi1=np.asarray(pattern.dphi1, dtype=np.float64),
+            dphi2=np.asarray(pattern.dphi2, dtype=np.float64),
+            dphi3=np.asarray(pattern.dphi3, dtype=np.float64),
+            assembly_weight=np.asarray(pattern.local_assembly_weight, dtype=np.float64),
+            scatter_map=np.asarray(pattern.scatter_map, dtype=np.int32),
+            ds_local=ds_local,
+            out_size=int(pattern.elastic_values.size),
+            constrained_diag_positions=np.asarray(pattern.constrained_diag_positions, dtype=np.int32),
+        )
+    if int(np.asarray(pattern.constrained_diag_positions).size):
+        values[np.asarray(pattern.constrained_diag_positions, dtype=np.int64)] = 1.0
+    return np.asarray(values, dtype=np.float64)
 
 
 def _assemble_owned_tangent_values_python_legacy(pattern: OwnedTangentPattern, ds_local: np.ndarray) -> np.ndarray:

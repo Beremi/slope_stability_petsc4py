@@ -27,6 +27,7 @@ from slope_stability.fem import (
     quadrature_volume_3d,
     vector_volume,
 )
+from slope_stability.fem.distributed_tangent import prepare_bddc_subdomain_pattern
 from slope_stability.linear import SolverFactory
 from slope_stability.constitutive import ConstitutiveOperator
 from slope_stability.continuation import LL_indirect_continuation, SSR_indirect_continuation
@@ -300,12 +301,39 @@ def run_capture(
     linear_max_iter: int = 100,
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     factor_solver_type: str | None = None,
+    pc_backend: str | None = None,
+    preconditioner_matrix_source: str = "tangent",
+    preconditioner_matrix_policy: str = "current",
+    preconditioner_rebuild_policy: str = "every_newton",
+    preconditioner_rebuild_interval: int = 1,
     mpi_distribute_by_nodes: bool = True,
     pc_gamg_process_eq_limit: int | None = None,
     pc_gamg_threshold: float | None = None,
+    pc_gamg_aggressive_coarsening: int | None = None,
+    pc_gamg_aggressive_square_graph: bool | None = None,
+    pc_gamg_aggressive_mis_k: int | None = None,
     pc_hypre_coarsen_type: str | None = None,
     pc_hypre_interp_type: str | None = None,
     pc_hypre_strong_threshold: float | None = None,
+    pc_hypre_P_max: int | None = None,
+    pc_hypre_agg_nl: int | None = None,
+    pc_hypre_nongalerkin_tol: float | None = None,
+    pc_bddc_symmetric: bool = False,
+    pc_bddc_dirichlet_ksp_type: str | None = None,
+    pc_bddc_dirichlet_pc_type: str | None = None,
+    pc_bddc_neumann_ksp_type: str | None = None,
+    pc_bddc_neumann_pc_type: str | None = None,
+    pc_bddc_coarse_ksp_type: str | None = None,
+    pc_bddc_coarse_pc_type: str | None = None,
+    pc_bddc_dirichlet_approximate: bool | None = None,
+    pc_bddc_neumann_approximate: bool | None = None,
+    pc_bddc_use_deluxe_scaling: bool | None = None,
+    pc_bddc_use_vertices: bool | None = None,
+    pc_bddc_use_edges: bool | None = None,
+    pc_bddc_use_faces: bool | None = None,
+    pc_bddc_use_change_of_basis: bool | None = None,
+    pc_bddc_use_change_on_faces: bool | None = None,
+    pc_bddc_check_level: int | None = None,
     compiled_outer: bool = False,
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
@@ -386,6 +414,7 @@ def run_capture(
     weight = np.zeros(n_int, dtype=np.float64)
     elastic_rows = None
     tangent_pattern = None
+    bddc_pattern = None
 
     if use_lightweight_mpi_path:
         elastic_rows = assemble_owned_elastic_rows_for_comm(
@@ -436,6 +465,16 @@ def run_capture(
         q_mask=q_mask,
     )
 
+    effective_pc_backend = None
+    if pc_backend is not None:
+        effective_pc_backend = str(pc_backend).strip().lower()
+    else:
+        solver_type_upper = str(solver_type).upper()
+        if "HYPRE" in solver_type_upper:
+            effective_pc_backend = "hypre"
+        elif "GAMG" in solver_type_upper:
+            effective_pc_backend = "gamg"
+
     if mpi_distribute_by_nodes:
         row0, row1 = owned_block_range(coord.shape[1], coord.shape[0], PETSc.COMM_WORLD)
         tangent_pattern = prepare_owned_tangent_pattern(
@@ -458,12 +497,29 @@ def run_capture(
             constitutive_mode=constitutive_mode,
             use_compiled_constitutive=True,
         )
+        if effective_pc_backend == "bddc":
+            bddc_pattern = prepare_bddc_subdomain_pattern(
+                coord,
+                elem,
+                q_mask,
+                material_identifier,
+                materials,
+                (row0 // coord.shape[0], row1 // coord.shape[0]),
+                elem_type=elem_type,
+                overlap_local_int_indices=tangent_pattern.local_int_indices,
+            )
+            const_builder.set_bddc_subdomain_pattern(bddc_pattern)
 
     preconditioner_options = {
         "threads": 16,
         "print_level": 0,
         "use_as_preconditioner": True,
         "factor_solver_type": factor_solver_type,
+        "pc_backend": effective_pc_backend,
+        "preconditioner_matrix_source": str(preconditioner_matrix_source),
+        "preconditioner_matrix_policy": preconditioner_matrix_policy,
+        "preconditioner_rebuild_policy": preconditioner_rebuild_policy,
+        "preconditioner_rebuild_interval": int(preconditioner_rebuild_interval),
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
         "use_coordinates": True,
         # P4 continuation can accumulate many recycle vectors; cap them to keep memory bounded.
@@ -473,7 +529,7 @@ def run_capture(
         preconditioner_options["compiled_outer"] = True
     if recycle_preconditioner:
         preconditioner_options["recycle_preconditioner"] = True
-    if "GAMG" in str(solver_type).upper():
+    if effective_pc_backend == "gamg":
         preconditioner_options.update(
             {
                 "mg_levels_ksp_type": "richardson",
@@ -494,13 +550,57 @@ def run_capture(
             preconditioner_options["pc_gamg_process_eq_limit"] = int(pc_gamg_process_eq_limit)
         if pc_gamg_threshold is not None:
             preconditioner_options["pc_gamg_threshold"] = float(pc_gamg_threshold)
-    if "HYPRE" in str(solver_type).upper():
+        if pc_gamg_aggressive_coarsening is not None:
+            preconditioner_options["pc_gamg_aggressive_coarsening"] = int(pc_gamg_aggressive_coarsening)
+        if pc_gamg_aggressive_square_graph is not None:
+            preconditioner_options["pc_gamg_aggressive_square_graph"] = bool(pc_gamg_aggressive_square_graph)
+        if pc_gamg_aggressive_mis_k is not None:
+            preconditioner_options["pc_gamg_aggressive_mis_k"] = int(pc_gamg_aggressive_mis_k)
+    if effective_pc_backend == "hypre":
         if pc_hypre_coarsen_type is not None:
             preconditioner_options["pc_hypre_boomeramg_coarsen_type"] = str(pc_hypre_coarsen_type)
         if pc_hypre_interp_type is not None:
             preconditioner_options["pc_hypre_boomeramg_interp_type"] = str(pc_hypre_interp_type)
         if pc_hypre_strong_threshold is not None:
             preconditioner_options["pc_hypre_boomeramg_strong_threshold"] = float(pc_hypre_strong_threshold)
+        if pc_hypre_P_max is not None:
+            preconditioner_options["pc_hypre_boomeramg_P_max"] = int(pc_hypre_P_max)
+        if pc_hypre_agg_nl is not None:
+            preconditioner_options["pc_hypre_boomeramg_agg_nl"] = int(pc_hypre_agg_nl)
+        if pc_hypre_nongalerkin_tol is not None:
+            preconditioner_options["pc_hypre_boomeramg_nongalerkin_tol"] = float(pc_hypre_nongalerkin_tol)
+    if pc_bddc_symmetric:
+        preconditioner_options["pc_bddc_symmetric"] = True
+    if pc_bddc_dirichlet_ksp_type is not None:
+        preconditioner_options["pc_bddc_dirichlet_ksp_type"] = str(pc_bddc_dirichlet_ksp_type)
+    if pc_bddc_dirichlet_pc_type is not None:
+        preconditioner_options["pc_bddc_dirichlet_pc_type"] = str(pc_bddc_dirichlet_pc_type)
+    if pc_bddc_neumann_ksp_type is not None:
+        preconditioner_options["pc_bddc_neumann_ksp_type"] = str(pc_bddc_neumann_ksp_type)
+    if pc_bddc_neumann_pc_type is not None:
+        preconditioner_options["pc_bddc_neumann_pc_type"] = str(pc_bddc_neumann_pc_type)
+    if pc_bddc_coarse_ksp_type is not None:
+        preconditioner_options["pc_bddc_coarse_ksp_type"] = str(pc_bddc_coarse_ksp_type)
+    if pc_bddc_coarse_pc_type is not None:
+        preconditioner_options["pc_bddc_coarse_pc_type"] = str(pc_bddc_coarse_pc_type)
+    if pc_bddc_dirichlet_approximate is not None:
+        preconditioner_options["pc_bddc_dirichlet_approximate"] = bool(pc_bddc_dirichlet_approximate)
+    if pc_bddc_neumann_approximate is not None:
+        preconditioner_options["pc_bddc_neumann_approximate"] = bool(pc_bddc_neumann_approximate)
+    if pc_bddc_use_deluxe_scaling is not None:
+        preconditioner_options["pc_bddc_use_deluxe_scaling"] = bool(pc_bddc_use_deluxe_scaling)
+    if pc_bddc_use_vertices is not None:
+        preconditioner_options["pc_bddc_use_vertices"] = bool(pc_bddc_use_vertices)
+    if pc_bddc_use_edges is not None:
+        preconditioner_options["pc_bddc_use_edges"] = bool(pc_bddc_use_edges)
+    if pc_bddc_use_faces is not None:
+        preconditioner_options["pc_bddc_use_faces"] = bool(pc_bddc_use_faces)
+    if pc_bddc_use_change_of_basis is not None:
+        preconditioner_options["pc_bddc_use_change_of_basis"] = bool(pc_bddc_use_change_of_basis)
+    if pc_bddc_use_change_on_faces is not None:
+        preconditioner_options["pc_bddc_use_change_on_faces"] = bool(pc_bddc_use_change_on_faces)
+    if pc_bddc_check_level is not None:
+        preconditioner_options["pc_bddc_check_level"] = int(pc_bddc_check_level)
 
     linear_system_solver = SolverFactory.create(
         solver_type,
@@ -533,6 +633,11 @@ def run_capture(
         "tol": float(tol),
         "r_min": float(r_min),
         "factor_solver_type": factor_solver_type,
+        "pc_backend": effective_pc_backend,
+        "preconditioner_matrix_source": str(preconditioner_matrix_source),
+        "preconditioner_matrix_policy": str(preconditioner_matrix_policy),
+        "preconditioner_rebuild_policy": str(preconditioner_rebuild_policy),
+        "preconditioner_rebuild_interval": int(preconditioner_rebuild_interval),
         "elem_type": str(elem_type),
         "davis_type": str(davis_type),
         "material_rows": np.asarray(mat_props, dtype=np.float64).tolist(),
@@ -541,9 +646,31 @@ def run_capture(
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
         "pc_gamg_process_eq_limit": pc_gamg_process_eq_limit,
         "pc_gamg_threshold": pc_gamg_threshold,
+        "pc_gamg_aggressive_coarsening": pc_gamg_aggressive_coarsening,
+        "pc_gamg_aggressive_square_graph": pc_gamg_aggressive_square_graph,
+        "pc_gamg_aggressive_mis_k": pc_gamg_aggressive_mis_k,
         "pc_hypre_coarsen_type": pc_hypre_coarsen_type,
         "pc_hypre_interp_type": pc_hypre_interp_type,
         "pc_hypre_strong_threshold": pc_hypre_strong_threshold,
+        "pc_hypre_P_max": pc_hypre_P_max,
+        "pc_hypre_agg_nl": pc_hypre_agg_nl,
+        "pc_hypre_nongalerkin_tol": pc_hypre_nongalerkin_tol,
+        "pc_bddc_symmetric": bool(pc_bddc_symmetric),
+        "pc_bddc_dirichlet_ksp_type": pc_bddc_dirichlet_ksp_type,
+        "pc_bddc_dirichlet_pc_type": pc_bddc_dirichlet_pc_type,
+        "pc_bddc_neumann_ksp_type": pc_bddc_neumann_ksp_type,
+        "pc_bddc_neumann_pc_type": pc_bddc_neumann_pc_type,
+        "pc_bddc_coarse_ksp_type": pc_bddc_coarse_ksp_type,
+        "pc_bddc_coarse_pc_type": pc_bddc_coarse_pc_type,
+        "pc_bddc_dirichlet_approximate": pc_bddc_dirichlet_approximate,
+        "pc_bddc_neumann_approximate": pc_bddc_neumann_approximate,
+        "pc_bddc_use_deluxe_scaling": pc_bddc_use_deluxe_scaling,
+        "pc_bddc_use_vertices": pc_bddc_use_vertices,
+        "pc_bddc_use_edges": pc_bddc_use_edges,
+        "pc_bddc_use_faces": pc_bddc_use_faces,
+        "pc_bddc_use_change_of_basis": pc_bddc_use_change_of_basis,
+        "pc_bddc_use_change_on_faces": pc_bddc_use_change_on_faces,
+        "pc_bddc_check_level": pc_bddc_check_level,
         "compiled_outer": bool(compiled_outer),
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": constitutive_mode,
@@ -573,7 +700,7 @@ def run_capture(
             q_mask,
             f_V,
             const_builder,
-            linear_system_solver.copy(),
+            linear_system_solver,
             progress_callback=progress_callback,
             store_step_u=bool(store_step_u),
         )
@@ -640,7 +767,7 @@ def run_capture(
             q_mask,
             f_V,
             const_builder,
-            linear_system_solver.copy(),
+            linear_system_solver,
             progress_callback=progress_callback,
         )
     runtime = perf_counter() - t0
@@ -664,6 +791,22 @@ def run_capture(
             key: float(mpi_comm.allreduce(float(val), op=MPI.MAX))
             for key, val in tangent_pattern.timings.items()
         }
+    bddc_pattern_stats_max = None
+    bddc_pattern_stats_sum = None
+    bddc_pattern_timings_max = None
+    if bddc_pattern is not None:
+        bddc_pattern_stats_max = {
+            key: float(mpi_comm.allreduce(float(val), op=MPI.MAX))
+            for key, val in bddc_pattern.stats.items()
+        }
+        bddc_pattern_stats_sum = {
+            key: float(mpi_comm.allreduce(float(val), op=MPI.SUM))
+            for key, val in bddc_pattern.stats.items()
+        }
+        bddc_pattern_timings_max = {
+            key: float(mpi_comm.allreduce(float(val), op=MPI.MAX))
+            for key, val in bddc_pattern.timings.items()
+        }
     linear_summary = {
         "init_linear_iterations": int(stats.get("init_linear_iterations", init_linear["init_linear_iterations"])),
         "init_linear_solve_time": float(stats.get("init_linear_solve_time", init_linear["init_linear_solve_time"])),
@@ -673,6 +816,7 @@ def run_capture(
         "attempt_linear_solve_time_total": float(np.sum(np.asarray(stats.get("attempt_linear_solve_time", []), dtype=np.float64))),
         "attempt_linear_preconditioner_time_total": float(np.sum(np.asarray(stats.get("attempt_linear_preconditioner_time", []), dtype=np.float64))),
         "attempt_linear_orthogonalization_time_total": float(np.sum(np.asarray(stats.get("attempt_linear_orthogonalization_time", []), dtype=np.float64))),
+        **linear_system_solver.get_preconditioner_diagnostics(),
     }
 
     step_u = np.asarray(stats.pop("step_U"), dtype=np.float64) if isinstance(stats.get("step_U", None), list) else np.empty((0, 3, 0), dtype=np.float64)
@@ -707,6 +851,11 @@ def run_capture(
             "stats_sum": tangent_pattern_stats_sum,
             "timings_max": tangent_pattern_timings_max,
         } if tangent_pattern is not None else None,
+        "bddc_subdomain_pattern": {
+            "stats_max": bddc_pattern_stats_max,
+            "stats_sum": bddc_pattern_stats_sum,
+            "timings_max": bddc_pattern_timings_max,
+        } if bddc_pattern is not None else None,
     }
 
     if rank == 0:
@@ -801,12 +950,49 @@ def main() -> None:
     parser.add_argument("--linear_max_iter", type=int, default=100)
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")
     parser.add_argument("--factor_solver_type", type=str, default=None)
+    parser.add_argument("--pc_backend", type=str, default=None, choices=["hypre", "gamg", "bddc"])
+    parser.add_argument(
+        "--preconditioner_matrix_source",
+        type=str,
+        default="tangent",
+        choices=["tangent", "regularized", "elastic"],
+    )
+    parser.add_argument("--preconditioner_matrix_policy", type=str, default="current", choices=["current", "lagged"])
+    parser.add_argument(
+        "--preconditioner_rebuild_policy",
+        type=str,
+        default="every_newton",
+        choices=["every_newton", "every_n_newton", "accepted_step", "accepted_or_rejected_step"],
+    )
+    parser.add_argument("--preconditioner_rebuild_interval", type=int, default=1)
     parser.add_argument("--mpi_distribute_by_nodes", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--pc_gamg_process_eq_limit", type=int, default=None)
     parser.add_argument("--pc_gamg_threshold", type=float, default=None)
+    parser.add_argument("--pc_gamg_aggressive_coarsening", type=int, default=None)
+    parser.add_argument("--pc_gamg_aggressive_square_graph", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_gamg_aggressive_mis_k", type=int, default=None)
     parser.add_argument("--pc_hypre_coarsen_type", type=str, default="HMIS")
     parser.add_argument("--pc_hypre_interp_type", type=str, default="ext+i")
     parser.add_argument("--pc_hypre_strong_threshold", type=float, default=None)
+    parser.add_argument("--pc_hypre_P_max", type=int, default=None)
+    parser.add_argument("--pc_hypre_agg_nl", type=int, default=None)
+    parser.add_argument("--pc_hypre_nongalerkin_tol", type=float, default=None)
+    parser.add_argument("--pc_bddc_symmetric", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--pc_bddc_dirichlet_ksp_type", type=str, default=None)
+    parser.add_argument("--pc_bddc_dirichlet_pc_type", type=str, default=None)
+    parser.add_argument("--pc_bddc_neumann_ksp_type", type=str, default=None)
+    parser.add_argument("--pc_bddc_neumann_pc_type", type=str, default=None)
+    parser.add_argument("--pc_bddc_coarse_ksp_type", type=str, default=None)
+    parser.add_argument("--pc_bddc_coarse_pc_type", type=str, default=None)
+    parser.add_argument("--pc_bddc_dirichlet_approximate", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_neumann_approximate", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_use_deluxe_scaling", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_use_vertices", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_use_edges", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_use_faces", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_use_change_of_basis", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_use_change_on_faces", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--pc_bddc_check_level", type=int, default=None)
     parser.add_argument("--compiled_outer", action="store_true", default=False)
     parser.add_argument("--recycle_preconditioner", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max_deflation_basis_vectors", type=int, default=48)
@@ -849,12 +1035,39 @@ def main() -> None:
         linear_max_iter=args.linear_max_iter,
         solver_type=args.solver_type,
         factor_solver_type=args.factor_solver_type,
+        pc_backend=args.pc_backend,
+        preconditioner_matrix_source=args.preconditioner_matrix_source,
+        preconditioner_matrix_policy=args.preconditioner_matrix_policy,
+        preconditioner_rebuild_policy=args.preconditioner_rebuild_policy,
+        preconditioner_rebuild_interval=args.preconditioner_rebuild_interval,
         mpi_distribute_by_nodes=args.mpi_distribute_by_nodes,
         pc_gamg_process_eq_limit=args.pc_gamg_process_eq_limit,
         pc_gamg_threshold=args.pc_gamg_threshold,
+        pc_gamg_aggressive_coarsening=args.pc_gamg_aggressive_coarsening,
+        pc_gamg_aggressive_square_graph=args.pc_gamg_aggressive_square_graph,
+        pc_gamg_aggressive_mis_k=args.pc_gamg_aggressive_mis_k,
         pc_hypre_coarsen_type=args.pc_hypre_coarsen_type,
         pc_hypre_interp_type=args.pc_hypre_interp_type,
         pc_hypre_strong_threshold=args.pc_hypre_strong_threshold,
+        pc_hypre_P_max=args.pc_hypre_P_max,
+        pc_hypre_agg_nl=args.pc_hypre_agg_nl,
+        pc_hypre_nongalerkin_tol=args.pc_hypre_nongalerkin_tol,
+        pc_bddc_symmetric=args.pc_bddc_symmetric,
+        pc_bddc_dirichlet_ksp_type=args.pc_bddc_dirichlet_ksp_type,
+        pc_bddc_dirichlet_pc_type=args.pc_bddc_dirichlet_pc_type,
+        pc_bddc_neumann_ksp_type=args.pc_bddc_neumann_ksp_type,
+        pc_bddc_neumann_pc_type=args.pc_bddc_neumann_pc_type,
+        pc_bddc_coarse_ksp_type=args.pc_bddc_coarse_ksp_type,
+        pc_bddc_coarse_pc_type=args.pc_bddc_coarse_pc_type,
+        pc_bddc_dirichlet_approximate=args.pc_bddc_dirichlet_approximate,
+        pc_bddc_neumann_approximate=args.pc_bddc_neumann_approximate,
+        pc_bddc_use_deluxe_scaling=args.pc_bddc_use_deluxe_scaling,
+        pc_bddc_use_vertices=args.pc_bddc_use_vertices,
+        pc_bddc_use_edges=args.pc_bddc_use_edges,
+        pc_bddc_use_faces=args.pc_bddc_use_faces,
+        pc_bddc_use_change_of_basis=args.pc_bddc_use_change_of_basis,
+        pc_bddc_use_change_on_faces=args.pc_bddc_use_change_on_faces,
+        pc_bddc_check_level=args.pc_bddc_check_level,
         compiled_outer=args.compiled_outer,
         recycle_preconditioner=args.recycle_preconditioner,
         constitutive_mode=args.constitutive_mode,

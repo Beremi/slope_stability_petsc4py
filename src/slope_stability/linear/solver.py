@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Callable
 
@@ -18,6 +19,7 @@ except Exception:  # pragma: no cover - optional when PETSc is unavailable
 
 from ..core.config import LinearSolverConfig
 from ..utils import (
+    get_petsc_matrix_metadata,
     global_array_to_petsc_vec,
     owned_block_range,
     petsc_vec_to_global_array,
@@ -34,6 +36,36 @@ from .preconditioners import attach_near_nullspace, build_preconditioner, make_n
 
 
 PreconditionerFactory = Callable[[object], Callable[[np.ndarray], np.ndarray]]
+
+
+@dataclass
+class PreconditionerDiagnostics:
+    pc_backend: str
+    preconditioner_matrix_source: str
+    preconditioner_matrix_policy: str
+    preconditioner_rebuild_policy: str
+    preconditioner_rebuild_interval: int
+    preconditioner_rebuild_count: int = 0
+    preconditioner_reuse_count: int = 0
+    preconditioner_age_max: int = 0
+    preconditioner_setup_time_total: float = 0.0
+    preconditioner_apply_time_total: float = 0.0
+    preconditioner_last_rebuild_reason: str = "initial"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "pc_backend": str(self.pc_backend),
+            "preconditioner_matrix_source": str(self.preconditioner_matrix_source),
+            "preconditioner_matrix_policy": str(self.preconditioner_matrix_policy),
+            "preconditioner_rebuild_policy": str(self.preconditioner_rebuild_policy),
+            "preconditioner_rebuild_interval": int(self.preconditioner_rebuild_interval),
+            "preconditioner_rebuild_count": int(self.preconditioner_rebuild_count),
+            "preconditioner_reuse_count": int(self.preconditioner_reuse_count),
+            "preconditioner_age_max": int(self.preconditioner_age_max),
+            "preconditioner_setup_time_total": float(self.preconditioner_setup_time_total),
+            "preconditioner_apply_time_total": float(self.preconditioner_apply_time_total),
+            "preconditioner_last_rebuild_reason": str(self.preconditioner_last_rebuild_reason),
+        }
 
 
 def _mat_scale_add(alpha: float, A, beta: float, B):
@@ -139,7 +171,7 @@ class DirectSolver:
         self._A_petsc = None
         self.factor_solver_type = factor_solver_type
 
-    def setup_preconditioner(self, A):
+    def setup_preconditioner(self, A, *, preconditioning_matrix=None, **_kwargs):
         t0 = perf_counter()
 
         if PETSc is None:
@@ -205,6 +237,33 @@ class DirectSolver:
     def prefers_full_system_operator(self) -> bool:
         return False
 
+    def preconditioner_requires_explicit_matrix(self) -> bool:
+        return False
+
+    def notify_continuation_attempt(self, *, success: bool) -> None:
+        return
+
+    def get_preconditioner_diagnostics(self) -> dict[str, object]:
+        return {
+            "pc_backend": "lu",
+            "preconditioner_matrix_source": "tangent",
+            "preconditioner_matrix_policy": "current",
+            "preconditioner_rebuild_policy": "every_newton",
+            "preconditioner_rebuild_interval": 1,
+            "preconditioner_rebuild_count": 0,
+            "preconditioner_reuse_count": 0,
+            "preconditioner_age_max": 0,
+            "preconditioner_setup_time_total": 0.0,
+            "preconditioner_apply_time_total": 0.0,
+            "preconditioner_last_rebuild_reason": "direct",
+        }
+
+    def get_deflation_basis_snapshot(self):
+        return None
+
+    def restore_deflation_basis(self, _snapshot) -> None:
+        return
+
     def release_iteration_resources(self) -> None:
         if self._ksp is not None:
             self._ksp.destroy()
@@ -222,7 +281,7 @@ class ScipyDirectSolver:
         self.iteration_collector = IterationCollector()
         self.instance_id = self.iteration_collector.register_instance()
 
-    def setup_preconditioner(self, A):
+    def setup_preconditioner(self, A, *, preconditioning_matrix=None, **_kwargs):
         self.iteration_collector.store_preconditioner_time(self.instance_id, 0.0)
 
     def A_orthogonalize(self, A):
@@ -253,6 +312,33 @@ class ScipyDirectSolver:
 
     def prefers_full_system_operator(self) -> bool:
         return False
+
+    def preconditioner_requires_explicit_matrix(self) -> bool:
+        return False
+
+    def notify_continuation_attempt(self, *, success: bool) -> None:
+        return
+
+    def get_preconditioner_diagnostics(self) -> dict[str, object]:
+        return {
+            "pc_backend": "scipy_direct",
+            "preconditioner_matrix_source": "tangent",
+            "preconditioner_matrix_policy": "current",
+            "preconditioner_rebuild_policy": "every_newton",
+            "preconditioner_rebuild_interval": 1,
+            "preconditioner_rebuild_count": 0,
+            "preconditioner_reuse_count": 0,
+            "preconditioner_age_max": 0,
+            "preconditioner_setup_time_total": 0.0,
+            "preconditioner_apply_time_total": 0.0,
+            "preconditioner_last_rebuild_reason": "direct",
+        }
+
+    def get_deflation_basis_snapshot(self):
+        return None
+
+    def restore_deflation_basis(self, _snapshot) -> None:
+        return
 
     def release_iteration_resources(self) -> None:
         return
@@ -286,7 +372,7 @@ class DeflatedFGMRESSolver:
         self._last_solve_info: dict[str, object] = {}
         self._last_orthogonalization_info: dict[str, object] = {}
 
-    def setup_preconditioner(self, A):
+    def setup_preconditioner(self, A, *, preconditioning_matrix=None, **_kwargs):
         t0 = perf_counter()
         self.preconditioner = self.setup_preconditioner_core(A)
         self.iteration_collector.store_preconditioner_time(self.instance_id, perf_counter() - t0)
@@ -390,6 +476,36 @@ class DeflatedFGMRESSolver:
     def prefers_full_system_operator(self) -> bool:
         return False
 
+    def preconditioner_requires_explicit_matrix(self) -> bool:
+        return False
+
+    def notify_continuation_attempt(self, *, success: bool) -> None:
+        return
+
+    def get_preconditioner_diagnostics(self) -> dict[str, object]:
+        return {
+            "pc_backend": "python",
+            "preconditioner_matrix_source": "tangent",
+            "preconditioner_matrix_policy": "current",
+            "preconditioner_rebuild_policy": "every_newton",
+            "preconditioner_rebuild_interval": 1,
+            "preconditioner_rebuild_count": 0,
+            "preconditioner_reuse_count": 0,
+            "preconditioner_age_max": 0,
+            "preconditioner_setup_time_total": 0.0,
+            "preconditioner_apply_time_total": 0.0,
+            "preconditioner_last_rebuild_reason": "python",
+        }
+
+    def get_deflation_basis_snapshot(self):
+        return np.array(self.deflation_basis, dtype=np.float64, copy=True)
+
+    def restore_deflation_basis(self, snapshot) -> None:
+        if snapshot is None:
+            self.deflation_basis = np.empty((0, 0), dtype=np.float64)
+        else:
+            self.deflation_basis = np.array(snapshot, dtype=np.float64, copy=True)
+
     def release_iteration_resources(self) -> None:
         return
 
@@ -420,10 +536,12 @@ class PetscKSPFGMRESSolver:
         self._full_system_preconditioner = bool(self.preconditioner_options.get("full_system_preconditioner", True))
         self.deflation_basis: np.ndarray = np.empty((0, 0), dtype=np.float64)
         self._A_petsc = None
+        self._P_petsc = None
         self._ksp = None
         self._near_nullspace = None
         self._near_nullspace_vecs = []
         self._owns_A_petsc = False
+        self._owns_P_petsc = False
         self._using_full_system = False
         self._active_free_indices = np.array([], dtype=np.int64)
         self._ownership_range = None
@@ -434,19 +552,186 @@ class PetscKSPFGMRESSolver:
         self._diagnostics_enabled = False
         self._last_solve_info: dict[str, object] = {}
         self._last_orthogonalization_info: dict[str, object] = {}
+        self._pc_backend = self._normalize_pc_backend()
+        self._preconditioner_matrix_source = self._normalize_preconditioner_matrix_source()
+        self._preconditioner_matrix_policy = self._normalize_preconditioner_matrix_policy()
+        self._preconditioner_rebuild_policy = self._normalize_preconditioner_rebuild_policy()
+        self._preconditioner_rebuild_interval = self._normalize_preconditioner_rebuild_interval()
+        self._preconditioner_rebuild_requested = True
+        self._preconditioner_age = 0
+        self._preconditioner_newton_calls_since_rebuild = 0
+        self._preconditioner_diagnostics = PreconditionerDiagnostics(
+            pc_backend=self._pc_backend,
+            preconditioner_matrix_source=self._preconditioner_matrix_source,
+            preconditioner_matrix_policy=self._preconditioner_matrix_policy,
+            preconditioner_rebuild_policy=self._preconditioner_rebuild_policy,
+            preconditioner_rebuild_interval=self._preconditioner_rebuild_interval,
+        )
 
         self.iteration_collector = IterationCollector()
         self.instance_id = self.iteration_collector.register_instance()
+
+    def _normalize_pc_backend(self) -> str:
+        raw = self.preconditioner_options.get("pc_backend")
+        if raw is not None:
+            backend = str(raw).strip().lower()
+            if backend in {"hypre", "gamg", "bddc", "jacobi", "none"}:
+                return backend
+        if self.pc_type == "HYPRE":
+            return "hypre"
+        if self.pc_type == "GAMG":
+            return "gamg"
+        if self.pc_type == "JACOBI":
+            return "jacobi"
+        return "none"
+
+    def _normalize_preconditioner_matrix_policy(self) -> str:
+        policy = str(self.preconditioner_options.get("preconditioner_matrix_policy", "current")).strip().lower()
+        if policy not in {"current", "lagged"}:
+            raise ValueError(f"Unsupported preconditioner_matrix_policy {policy!r}")
+        if self._normalize_pc_backend() == "bddc" and policy == "lagged":
+            return policy
+        return policy
+
+    def _normalize_preconditioner_matrix_source(self) -> str:
+        source = str(self.preconditioner_options.get("preconditioner_matrix_source", "tangent")).strip().lower()
+        if source not in {"tangent", "regularized", "elastic"}:
+            raise ValueError(f"Unsupported preconditioner_matrix_source {source!r}")
+        return source
+
+    def _normalize_preconditioner_rebuild_policy(self) -> str:
+        policy = str(self.preconditioner_options.get("preconditioner_rebuild_policy", "every_newton")).strip().lower()
+        if policy not in {"every_newton", "every_n_newton", "accepted_step", "accepted_or_rejected_step"}:
+            raise ValueError(f"Unsupported preconditioner_rebuild_policy {policy!r}")
+        return policy
+
+    def _normalize_preconditioner_rebuild_interval(self) -> int:
+        try:
+            interval = int(self.preconditioner_options.get("preconditioner_rebuild_interval", 1))
+        except Exception:
+            interval = 1
+        return max(1, interval)
+
+    def _record_preconditioner_setup_time(self, elapsed: float) -> None:
+        self.iteration_collector.store_preconditioner_time(self.instance_id, elapsed)
+        self._preconditioner_diagnostics.preconditioner_setup_time_total += float(elapsed)
+
+    def _record_preconditioner_apply_time(self, elapsed: float) -> None:
+        self._preconditioner_diagnostics.preconditioner_apply_time_total += float(elapsed)
+
+    def _destroy_owned_petsc_matrix(self, A, owns: bool) -> None:
+        if A is not None and owns:
+            release_petsc_aij_matrix(A)
+            A.destroy()
+
+    def _matrix_signature(self, A) -> tuple[tuple[int, int], int, int, str] | None:
+        if PETSc is None or A is None:
+            return None
+        if not isinstance(A, PETSc.Mat):
+            return None
+        return (
+            tuple(int(v) for v in A.getSize()),
+            int(A.getComm().getSize()),
+            int(A.getBlockSize() or 1),
+            str(A.getType()),
+        )
+
+    def _matrix_compatible(self, A, B) -> bool:
+        sig_a = self._matrix_signature(A)
+        sig_b = self._matrix_signature(B)
+        return sig_a is not None and sig_a == sig_b
+
+    def _mark_preconditioner_rebuilt(self, *, reason: str) -> None:
+        self._preconditioner_diagnostics.preconditioner_rebuild_count += 1
+        self._preconditioner_diagnostics.preconditioner_last_rebuild_reason = str(reason)
+        self._preconditioner_diagnostics.preconditioner_age_max = max(
+            int(self._preconditioner_diagnostics.preconditioner_age_max),
+            int(self._preconditioner_age),
+        )
+        self._preconditioner_age = 0
+        self._preconditioner_newton_calls_since_rebuild = 0
+        self._preconditioner_rebuild_requested = False
+
+    def _mark_preconditioner_reused(self) -> None:
+        self._preconditioner_diagnostics.preconditioner_reuse_count += 1
+        self._preconditioner_age += 1
+        self._preconditioner_newton_calls_since_rebuild += 1
+        self._preconditioner_diagnostics.preconditioner_age_max = max(
+            int(self._preconditioner_diagnostics.preconditioner_age_max),
+            int(self._preconditioner_age),
+        )
+
+    def _preconditioner_source_is_static(self) -> bool:
+        return bool(self.preconditioner_requires_explicit_matrix() and self._preconditioner_matrix_source == "elastic")
+
+    def _should_rebuild_preconditioner(self) -> tuple[bool, str]:
+        if self._preconditioner_source_is_static():
+            if self._P_petsc is None:
+                return True, "initial"
+            policy = self._preconditioner_rebuild_policy
+            if policy == "every_n_newton":
+                if self._preconditioner_newton_calls_since_rebuild + 1 >= self._preconditioner_rebuild_interval:
+                    return True, "every_n_newton"
+                return False, "elastic_static"
+            if self._preconditioner_rebuild_requested:
+                return True, "attempt_trigger"
+            return False, "elastic_static"
+        if self._preconditioner_matrix_policy == "current":
+            return True, "current_policy"
+        if self._P_petsc is None:
+            return True, "initial"
+        policy = self._preconditioner_rebuild_policy
+        if policy == "every_newton":
+            return True, "every_newton"
+        if policy == "every_n_newton":
+            if self._preconditioner_newton_calls_since_rebuild + 1 >= self._preconditioner_rebuild_interval:
+                return True, "every_n_newton"
+            return False, "lagged_reuse"
+        if self._preconditioner_rebuild_requested:
+            return True, "attempt_trigger"
+        return False, "lagged_reuse"
+
+    def preconditioner_requires_explicit_matrix(self) -> bool:
+        return self._pc_backend == "bddc"
+
+    def needs_preconditioning_matrix_refresh(self) -> bool:
+        return False
+
+    def notify_continuation_attempt(self, *, success: bool) -> None:
+        if self._preconditioner_rebuild_policy == "accepted_step":
+            if success:
+                self._preconditioner_rebuild_requested = True
+            return
+        if self._preconditioner_rebuild_policy == "accepted_or_rejected_step":
+            self._preconditioner_rebuild_requested = True
+
+    def get_preconditioner_diagnostics(self) -> dict[str, object]:
+        diagnostics = self._preconditioner_diagnostics.as_dict()
+        diagnostics["preconditioner_age_current"] = int(self._preconditioner_age)
+        return diagnostics
+
+    def get_preconditioner_matrix_source(self) -> str:
+        return str(self._preconditioner_matrix_source)
+
+    def get_deflation_basis_snapshot(self):
+        return np.array(self.deflation_basis, dtype=np.float64, copy=True)
+
+    def restore_deflation_basis(self, snapshot) -> None:
+        if snapshot is None:
+            self.deflation_basis = np.empty((0, 0), dtype=np.float64)
+        else:
+            self.deflation_basis = np.array(snapshot, dtype=np.float64, copy=True)
 
     def _reset_petsc_objects(self) -> None:
         if self._ksp is not None:
             self._ksp.destroy()
             self._ksp = None
-        if self._A_petsc is not None and self._owns_A_petsc:
-            release_petsc_aij_matrix(self._A_petsc)
-            self._A_petsc.destroy()
+        self._destroy_owned_petsc_matrix(self._P_petsc, self._owns_P_petsc and self._P_petsc is not self._A_petsc)
+        self._destroy_owned_petsc_matrix(self._A_petsc, self._owns_A_petsc)
         self._A_petsc = None
+        self._P_petsc = None
         self._owns_A_petsc = False
+        self._owns_P_petsc = False
         self._near_nullspace = None
         self._near_nullspace_vecs = []
         self._ownership_range = None
@@ -521,13 +806,29 @@ class PetscKSPFGMRESSolver:
         defaults: dict[str, object] = {}
         if self.pc_type == "HYPRE" and self._using_full_system:
             defaults.update(self._default_hypre_options())
+        skip_keys = {
+            "threads",
+            "print_level",
+            "use_as_preconditioner",
+            "factor_solver_type",
+            "full_system_preconditioner",
+            "null_space",
+            "use_coordinates",
+            "pc_backend",
+            "preconditioner_matrix_policy",
+            "preconditioner_rebuild_policy",
+            "preconditioner_rebuild_interval",
+            "recycle_preconditioner",
+            "compiled_outer",
+            "max_deflation_basis_vectors",
+        }
 
         for key, value in defaults.items():
             if key not in self.preconditioner_options:
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
 
         for key, value in self.preconditioner_options.items():
-            if key in {"threads", "print_level", "use_as_preconditioner", "factor_solver_type", "full_system_preconditioner", "null_space", "use_coordinates"}:
+            if key in skip_keys:
                 continue
             if key.startswith(("pc_", "mg_", "ksp_", "mat_")):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
@@ -614,7 +915,14 @@ class PetscKSPFGMRESSolver:
         self._ksp.setMonitor(_monitor)
         return reported_history, true_history
 
-    def setup_preconditioner(self, A, *, full_matrix=None, free_indices: np.ndarray | None = None):
+    def setup_preconditioner(
+        self,
+        A,
+        *,
+        full_matrix=None,
+        free_indices: np.ndarray | None = None,
+        preconditioning_matrix=None,
+    ):
         t0 = perf_counter()
         if PETSc is None:
             raise RuntimeError("PETSc is required for KSPFGMRES solver types.")
@@ -791,6 +1099,7 @@ class PetscKSPFGMRESSolver:
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         clone._diagnostics_enabled = self._diagnostics_enabled
+        clone._preconditioner_diagnostics = self._preconditioner_diagnostics
         return clone
 
     def prefers_full_system_operator(self) -> bool:
@@ -909,7 +1218,22 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
 
         for key, value in self.preconditioner_options.items():
-            if key in {"threads", "print_level", "use_as_preconditioner", "factor_solver_type", "full_system_preconditioner", "null_space", "use_coordinates"}:
+            if key in {
+                "threads",
+                "print_level",
+                "use_as_preconditioner",
+                "factor_solver_type",
+                "full_system_preconditioner",
+                "null_space",
+                "use_coordinates",
+                "pc_backend",
+                "preconditioner_matrix_policy",
+                "preconditioner_rebuild_policy",
+                "preconditioner_rebuild_interval",
+                "recycle_preconditioner",
+                "compiled_outer",
+                "max_deflation_basis_vectors",
+            }:
                 continue
             if key.startswith("pc_deflation_"):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
@@ -941,7 +1265,14 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
         inner_pc.setFromOptions()
         inner_pc.setUp()
 
-    def setup_preconditioner(self, A, *, full_matrix=None, free_indices: np.ndarray | None = None):
+    def setup_preconditioner(
+        self,
+        A,
+        *,
+        full_matrix=None,
+        free_indices: np.ndarray | None = None,
+        preconditioning_matrix=None,
+    ):
         t0 = perf_counter()
         if PETSc is None:
             raise RuntimeError("PETSc is required for native deflation KSP solver types.")
@@ -1290,20 +1621,58 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
 
     def _configure_inner_pc(self) -> None:
         inner_pc = self._inner_ksp.getPC()
-        if self.pc_type == "GAMG":
+        if hasattr(inner_pc, "setOptionsPrefix"):
+            inner_pc.setOptionsPrefix(f"{self._options_prefix}inner_")
+        matrix_ref = self._P_petsc if self._P_petsc is not None else self._A_petsc
+        if self._pc_backend == "gamg":
             inner_pc.setType(PETSc.PC.Type.GAMG)
-            if self._using_full_system and self.coord is not None and self.preconditioner_options.get("use_coordinates", True):
-                if int(self._A_petsc.getComm().getSize()) > 1:
+            if (
+                self._using_full_system
+                and self.coord is not None
+                and self.preconditioner_options.get("use_coordinates", True)
+                and matrix_ref is not None
+            ):
+                if int(matrix_ref.getComm().getSize()) > 1:
                     dim = int(self.q_mask.shape[0])
                     r0, r1 = self._ownership_range
                     node0, node1 = r0 // dim, r1 // dim
                     inner_pc.setCoordinates(self.coord[:, node0:node1].T.copy())
                 else:
                     inner_pc.setCoordinates(self.coord.T.copy())
-        elif self.pc_type == "HYPRE":
+        elif self._pc_backend == "hypre":
             inner_pc.setType(PETSc.PC.Type.HYPRE)
             inner_pc.setHYPREType(str(self.preconditioner_options.get("pc_hypre_type", "boomeramg")))
-        elif self.pc_type == "JACOBI":
+        elif self._pc_backend == "bddc":
+            inner_pc.setType(PETSc.PC.Type.BDDC)
+            metadata = get_petsc_matrix_metadata(matrix_ref)
+            coordinates = metadata.get("bddc_local_coordinates")
+            if coordinates is not None and self.preconditioner_options.get("use_coordinates", True):
+                inner_pc.setCoordinates(np.asarray(coordinates, dtype=np.float64))
+            field_is = metadata.get("bddc_field_is_local")
+            if field_is:
+                if not all(isinstance(v, PETSc.IS) for v in field_is):
+                    field_is = tuple(
+                        PETSc.IS().createGeneral(np.asarray(v, dtype=PETSc.IntType), comm=PETSc.COMM_SELF)
+                        for v in field_is
+                    )
+                inner_pc.setBDDCDofsSplittingLocal(field_is)
+            dirichlet = metadata.get("bddc_dirichlet_local")
+            if dirichlet is not None:
+                if not isinstance(dirichlet, PETSc.IS):
+                    dirichlet = PETSc.IS().createGeneral(np.asarray(dirichlet, dtype=PETSc.IntType), comm=PETSc.COMM_SELF)
+                inner_pc.setBDDCDirichletBoundariesLocal(dirichlet)
+            adjacency = metadata.get("bddc_local_adjacency")
+            if adjacency is not None:
+                inner_pc.setBDDCLocalAdjacency(adjacency)
+            primal_vertices = metadata.get("bddc_primal_vertices_local")
+            if primal_vertices is not None:
+                if not isinstance(primal_vertices, PETSc.IS):
+                    primal_vertices = PETSc.IS().createGeneral(
+                        np.asarray(primal_vertices, dtype=PETSc.IntType),
+                        comm=PETSc.COMM_SELF,
+                    )
+                inner_pc.setBDDCPrimalVerticesLocalIS(primal_vertices)
+        elif self._pc_backend == "jacobi":
             inner_pc.setType(PETSc.PC.Type.JACOBI)
         else:
             inner_pc.setType(PETSc.PC.Type.NONE)
@@ -1320,7 +1689,23 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         opts = PETSc.Options()
         prefix = f"{self._options_prefix}inner_"
         for key, value in self.preconditioner_options.items():
-            if key in {"threads", "print_level", "use_as_preconditioner", "factor_solver_type", "full_system_preconditioner", "null_space", "use_coordinates", "deflation_reorth_passes"}:
+            if key in {
+                "threads",
+                "print_level",
+                "use_as_preconditioner",
+                "factor_solver_type",
+                "full_system_preconditioner",
+                "null_space",
+                "use_coordinates",
+                "deflation_reorth_passes",
+                "pc_backend",
+                "preconditioner_matrix_policy",
+                "preconditioner_rebuild_policy",
+                "preconditioner_rebuild_interval",
+                "recycle_preconditioner",
+                "compiled_outer",
+                "max_deflation_basis_vectors",
+            }:
                 continue
             if key.startswith(("pc_", "mg_", "mat_")):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
@@ -1333,7 +1718,14 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         b_local = np.asarray(b.getArray(readonly=True), dtype=np.float64)
         x_arr[...] = self._coarse_initial_guess_local(b_local)
 
-    def setup_preconditioner(self, A, *, full_matrix=None, free_indices: np.ndarray | None = None):
+    def setup_preconditioner(
+        self,
+        A,
+        *,
+        full_matrix=None,
+        free_indices: np.ndarray | None = None,
+        preconditioning_matrix=None,
+    ):
         t0 = perf_counter()
         if PETSc is None:
             raise RuntimeError("PETSc is required for MATLAB-like KSPFGMRES solver types.")
@@ -1561,6 +1953,13 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
     def _reuse_preconditioner_enabled(self) -> bool:
         return bool(self.preconditioner_options.get("recycle_preconditioner", False))
 
+    def _preserve_preconditioner_state_between_solves(self) -> bool:
+        return bool(
+            self._reuse_preconditioner_enabled()
+            or self._preconditioner_matrix_policy == "lagged"
+            or self._preconditioner_source_is_static()
+        )
+
     def _clear_transient_vectors(self) -> None:
         self._matvec_in = None
         self._matvec_out = None
@@ -1572,7 +1971,7 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         super()._reset_petsc_objects()
 
     def release_iteration_resources(self) -> None:
-        if self._reuse_preconditioner_enabled():
+        if self._preserve_preconditioner_state_between_solves():
             self._clear_transient_vectors()
             self._last_solve_info = {}
             self._last_orthogonalization_info = {}
@@ -1583,7 +1982,7 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         null_space = self.preconditioner_options.get("null_space")
         if null_space is not None:
             return null_space
-        if self.pc_type not in {"GAMG", "HYPRE"} or self.coord is None or not self.q_mask.size:
+        if self._pc_backend not in {"gamg", "hypre"} or self.coord is None or not self.q_mask.size:
             return None
         return make_near_nullspace_elasticity(
             self.coord,
@@ -1601,26 +2000,14 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         if hasattr(pc, "setReusePreconditioner"):
             pc.setReusePreconditioner(True)
 
-    def _can_reuse_inner_preconditioner(self, A_petsc) -> bool:
-        if not self._reuse_preconditioner_enabled():
-            return False
-        if self._inner_ksp is None or self._A_petsc is None:
+    def _can_reuse_inner_ksp(self, A_petsc, P_petsc) -> bool:
+        if self._inner_ksp is None:
             return False
         if self._inner_ksp.getType() != PETSc.KSP.Type.PREONLY:
             return False
-        if tuple(A_petsc.getSize()) != tuple(self._A_petsc.getSize()):
-            return False
-        if int(A_petsc.getComm().getSize()) != int(self._A_petsc.getComm().getSize()):
-            return False
-        if int(A_petsc.getBlockSize() or 1) != int(self._A_petsc.getBlockSize() or 1):
-            return False
-        return True
+        return self._matrix_compatible(A_petsc, self._A_petsc) and self._matrix_compatible(P_petsc, self._P_petsc)
 
-    def setup_preconditioner(self, A, *, full_matrix=None, free_indices: np.ndarray | None = None):
-        t0 = perf_counter()
-        if PETSc is None:
-            raise RuntimeError("PETSc is required for explicit MATLAB-style DFGMRES solver types.")
-
+    def _prepare_operator_matrix(self, A, *, full_matrix=None, free_indices: np.ndarray | None = None):
         operator_matrix = self._prepare_operator(A, full_matrix=full_matrix, free_indices=free_indices)
         comm = self._matrix_comm()
         block_size = None
@@ -1629,72 +2016,129 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
             block_size = int(self.q_mask.shape[0])
         elif self.preconditioner_options.get("block_size") is not None:
             block_size = int(self.preconditioner_options["block_size"])
-        if int(comm.getSize()) > 1 and block_size is not None and not (PETSc is not None and isinstance(operator_matrix, PETSc.Mat)):
+        if int(comm.getSize()) > 1 and block_size is not None and not (
+            PETSc is not None and isinstance(operator_matrix, PETSc.Mat)
+        ):
             ownership_range = owned_block_range(operator_matrix.shape[0] // block_size, block_size, comm)
-        new_A_petsc = to_petsc_aij_matrix(
+        A_petsc = to_petsc_aij_matrix(
             operator_matrix,
             comm=operator_matrix.getComm() if hasattr(operator_matrix, "getComm") else comm,
             block_size=block_size,
             ownership_range=ownership_range,
         )
-        new_A_owned = not (PETSc is not None and isinstance(operator_matrix, PETSc.Mat))
-        ownership_range = new_A_petsc.getOwnershipRange()
-        mpi_comm = new_A_petsc.getComm().tompi4py()
-
+        owns = not (PETSc is not None and isinstance(operator_matrix, PETSc.Mat))
         if self._using_full_system and self.q_mask.size:
-            new_A_petsc.setBlockSize(int(self.q_mask.shape[0]))
-
+            A_petsc.setBlockSize(int(self.q_mask.shape[0]))
         null_space = self._default_null_space()
-
-        if self.pc_type in {"GAMG", "HYPRE"}:
-            new_A_petsc, near_nullspace, near_nullspace_vecs = attach_near_nullspace(
-                new_A_petsc,
-                null_space,
-            )
+        if self._pc_backend in {"gamg", "hypre"}:
+            A_petsc, near_nullspace, near_nullspace_vecs = attach_near_nullspace(A_petsc, null_space)
         else:
             near_nullspace = None
             near_nullspace_vecs = []
+        return A_petsc, owns, A_petsc.getOwnershipRange(), A_petsc.getComm().tompi4py(), near_nullspace, near_nullspace_vecs
 
-        if self._can_reuse_inner_preconditioner(new_A_petsc):
-            old_A_petsc = self._A_petsc
-            old_A_owned = self._owns_A_petsc
-            self._clear_transient_vectors()
-            self._A_petsc = new_A_petsc
-            self._owns_A_petsc = new_A_owned
-            self._ownership_range = ownership_range
-            self._mpi_comm = mpi_comm
-            self._near_nullspace = near_nullspace
-            self._near_nullspace_vecs = near_nullspace_vecs
-            self._configure_reuse_flags()
-            self._inner_ksp.setOperators(self._A_petsc)
-            self._inner_ksp.setUp()
-            if old_A_petsc is not None and old_A_petsc is not self._A_petsc and old_A_owned:
-                release_petsc_aij_matrix(old_A_petsc)
-                old_A_petsc.destroy()
-            self._projector_dirty = True
-            self.iteration_collector.store_preconditioner_time(self.instance_id, perf_counter() - t0)
-            return
+    def _prepare_preconditioning_matrix(self, source_matrix):
+        if source_matrix is None:
+            raise ValueError("Explicit preconditioning matrix is required for this backend")
+        if PETSc is not None and isinstance(source_matrix, PETSc.Mat):
+            return source_matrix, False
+        comm = self._matrix_comm()
+        block_size = int(self.q_mask.shape[0]) if self._using_full_system and self.q_mask.size else None
+        P_petsc = to_petsc_aij_matrix(source_matrix, comm=comm, block_size=block_size)
+        return P_petsc, True
 
-        self._reset_petsc_objects()
+    def needs_preconditioning_matrix_refresh(self) -> bool:
+        if not self.preconditioner_requires_explicit_matrix():
+            return False
+        rebuild, _reason = self._should_rebuild_preconditioner()
+        return rebuild
+
+    def setup_preconditioner(
+        self,
+        A,
+        *,
+        full_matrix=None,
+        free_indices: np.ndarray | None = None,
+        preconditioning_matrix=None,
+    ):
+        t0 = perf_counter()
+        if PETSc is None:
+            raise RuntimeError("PETSc is required for explicit MATLAB-style DFGMRES solver types.")
+        new_A_petsc, new_A_owned, ownership_range, mpi_comm, near_nullspace, near_nullspace_vecs = self._prepare_operator_matrix(
+            A,
+            full_matrix=full_matrix,
+            free_indices=free_indices,
+        )
+
+        rebuild_preconditioner, rebuild_reason = self._should_rebuild_preconditioner()
+        new_P_petsc = self._P_petsc
+        new_P_owned = self._owns_P_petsc
+        if self.preconditioner_requires_explicit_matrix():
+            if rebuild_preconditioner:
+                new_P_petsc, new_P_owned = self._prepare_preconditioning_matrix(preconditioning_matrix)
+            elif new_P_petsc is None:
+                raise ValueError("BDDC backend requested lagged reuse without an initialized preconditioning matrix")
+        else:
+            if rebuild_preconditioner:
+                if preconditioning_matrix is not None:
+                    new_P_petsc, new_P_owned = self._prepare_preconditioning_matrix(preconditioning_matrix)
+                elif self._preconditioner_matrix_policy == "current":
+                    new_P_petsc = new_A_petsc
+                    new_P_owned = False
+                else:
+                    new_P_petsc = new_A_petsc.copy()
+                    new_P_owned = True
+            elif new_P_petsc is None:
+                new_P_petsc = new_A_petsc
+                new_P_owned = False
+                rebuild_preconditioner = True
+                rebuild_reason = "initial"
+
+        if self._using_full_system and self.q_mask.size and new_P_petsc is not None:
+            try:
+                new_P_petsc.setBlockSize(int(self.q_mask.shape[0]))
+            except Exception:
+                pass
+
+        reuse_inner = self._can_reuse_inner_ksp(new_A_petsc, new_P_petsc)
+        old_A_petsc = self._A_petsc
+        old_A_owned = self._owns_A_petsc
+        old_P_petsc = self._P_petsc
+        old_P_owned = self._owns_P_petsc
+
+        if not reuse_inner:
+            self._reset_petsc_objects()
+            self._inner_ksp = PETSc.KSP().create(comm=new_A_petsc.getComm())
+            self._inner_ksp.setOptionsPrefix(f"{self._options_prefix}inner_")
+            self._inner_ksp.setType(PETSc.KSP.Type.PREONLY)
+
+        self._clear_transient_vectors()
         self._A_petsc = new_A_petsc
         self._owns_A_petsc = new_A_owned
+        self._P_petsc = new_P_petsc
+        self._owns_P_petsc = new_P_owned
         self._ownership_range = ownership_range
         self._mpi_comm = mpi_comm
         self._near_nullspace = near_nullspace
         self._near_nullspace_vecs = near_nullspace_vecs
-
-        self._inner_ksp = PETSc.KSP().create(comm=self._A_petsc.getComm())
-        self._inner_ksp.setOptionsPrefix(f"{self._options_prefix}inner_")
-        self._inner_ksp.setOperators(self._A_petsc)
-        self._inner_ksp.setType(PETSc.KSP.Type.PREONLY)
         self._configure_inner_pc_only_options()
+        self._inner_ksp.setOperators(self._A_petsc, self._P_petsc)
         self._configure_inner_pc()
         self._inner_ksp.setFromOptions()
         self._configure_reuse_flags()
         self._inner_ksp.setUp()
 
+        if old_A_petsc is not None and old_A_petsc is not self._A_petsc:
+            self._destroy_owned_petsc_matrix(old_A_petsc, old_A_owned)
+        if old_P_petsc is not None and old_P_petsc is not self._P_petsc and old_P_petsc is not self._A_petsc:
+            self._destroy_owned_petsc_matrix(old_P_petsc, old_P_owned)
+
         self._projector_dirty = True
-        self.iteration_collector.store_preconditioner_time(self.instance_id, perf_counter() - t0)
+        if rebuild_preconditioner:
+            self._mark_preconditioner_rebuilt(reason=rebuild_reason)
+        else:
+            self._mark_preconditioner_reused()
+        self._record_preconditioner_setup_time(perf_counter() - t0)
 
     def _apply_inner_preconditioner(self, x: np.ndarray) -> np.ndarray:
         if self._prec_in is None or self._prec_out is None:
@@ -1707,7 +2151,9 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
             x_arr = x_arr[r0:r1]
         rhs_arr[...] = x_arr
         self._prec_out.set(0.0)
+        t0 = perf_counter()
         self._inner_ksp.getPC().apply(self._prec_in, self._prec_out)
+        self._record_preconditioner_apply_time(perf_counter() - t0)
         return petsc_vec_to_global_array(self._prec_out)
 
     def _apply_inner_preconditioner_local(self, x_local: np.ndarray) -> np.ndarray:
@@ -1717,7 +2163,9 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         rhs_arr = self._prec_in.getArray(readonly=False)
         rhs_arr[...] = np.asarray(x_local, dtype=np.float64)
         self._prec_out.set(0.0)
+        t0 = perf_counter()
         self._inner_ksp.getPC().apply(self._prec_in, self._prec_out)
+        self._record_preconditioner_apply_time(perf_counter() - t0)
         return np.asarray(self._prec_out.getArray(readonly=True), dtype=np.float64).copy()
 
     def _petsc_matvec(self, x: np.ndarray) -> np.ndarray:
@@ -1871,6 +2319,7 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         clone._diagnostics_enabled = self._diagnostics_enabled
+        clone._preconditioner_diagnostics = self._preconditioner_diagnostics
         return clone
 
 
@@ -2021,6 +2470,11 @@ class SolverFactory:
             "threads": config.threads,
             "print_level": config.print_level,
             "use_as_preconditioner": config.use_as_preconditioner,
+            "pc_backend": config.pc_backend,
+            "preconditioner_matrix_source": config.preconditioner_matrix_source,
+            "preconditioner_matrix_policy": config.preconditioner_matrix_policy,
+            "preconditioner_rebuild_policy": config.preconditioner_rebuild_policy,
+            "preconditioner_rebuild_interval": config.preconditioner_rebuild_interval,
         }
         if config.factor_solver_type is not None:
             preconditioner_options["factor_solver_type"] = config.factor_solver_type
@@ -2028,12 +2482,56 @@ class SolverFactory:
             preconditioner_options["pc_gamg_process_eq_limit"] = config.pc_gamg_process_eq_limit
         if config.pc_gamg_threshold is not None:
             preconditioner_options["pc_gamg_threshold"] = config.pc_gamg_threshold
+        if config.pc_gamg_aggressive_coarsening is not None:
+            preconditioner_options["pc_gamg_aggressive_coarsening"] = config.pc_gamg_aggressive_coarsening
+        if config.pc_gamg_aggressive_square_graph is not None:
+            preconditioner_options["pc_gamg_aggressive_square_graph"] = config.pc_gamg_aggressive_square_graph
+        if config.pc_gamg_aggressive_mis_k is not None:
+            preconditioner_options["pc_gamg_aggressive_mis_k"] = config.pc_gamg_aggressive_mis_k
         if config.pc_hypre_coarsen_type is not None:
             preconditioner_options["pc_hypre_boomeramg_coarsen_type"] = config.pc_hypre_coarsen_type
         if config.pc_hypre_interp_type is not None:
             preconditioner_options["pc_hypre_boomeramg_interp_type"] = config.pc_hypre_interp_type
         if config.pc_hypre_strong_threshold is not None:
             preconditioner_options["pc_hypre_boomeramg_strong_threshold"] = config.pc_hypre_strong_threshold
+        if config.pc_hypre_P_max is not None:
+            preconditioner_options["pc_hypre_boomeramg_P_max"] = config.pc_hypre_P_max
+        if config.pc_hypre_agg_nl is not None:
+            preconditioner_options["pc_hypre_boomeramg_agg_nl"] = config.pc_hypre_agg_nl
+        if config.pc_hypre_nongalerkin_tol is not None:
+            preconditioner_options["pc_hypre_boomeramg_nongalerkin_tol"] = config.pc_hypre_nongalerkin_tol
+        if config.pc_bddc_symmetric:
+            preconditioner_options["pc_bddc_symmetric"] = True
+        if config.pc_bddc_dirichlet_ksp_type is not None:
+            preconditioner_options["pc_bddc_dirichlet_ksp_type"] = config.pc_bddc_dirichlet_ksp_type
+        if config.pc_bddc_dirichlet_pc_type is not None:
+            preconditioner_options["pc_bddc_dirichlet_pc_type"] = config.pc_bddc_dirichlet_pc_type
+        if config.pc_bddc_neumann_ksp_type is not None:
+            preconditioner_options["pc_bddc_neumann_ksp_type"] = config.pc_bddc_neumann_ksp_type
+        if config.pc_bddc_neumann_pc_type is not None:
+            preconditioner_options["pc_bddc_neumann_pc_type"] = config.pc_bddc_neumann_pc_type
+        if config.pc_bddc_coarse_ksp_type is not None:
+            preconditioner_options["pc_bddc_coarse_ksp_type"] = config.pc_bddc_coarse_ksp_type
+        if config.pc_bddc_coarse_pc_type is not None:
+            preconditioner_options["pc_bddc_coarse_pc_type"] = config.pc_bddc_coarse_pc_type
+        if config.pc_bddc_dirichlet_approximate is not None:
+            preconditioner_options["pc_bddc_dirichlet_approximate"] = config.pc_bddc_dirichlet_approximate
+        if config.pc_bddc_neumann_approximate is not None:
+            preconditioner_options["pc_bddc_neumann_approximate"] = config.pc_bddc_neumann_approximate
+        if config.pc_bddc_use_deluxe_scaling is not None:
+            preconditioner_options["pc_bddc_use_deluxe_scaling"] = config.pc_bddc_use_deluxe_scaling
+        if config.pc_bddc_use_vertices is not None:
+            preconditioner_options["pc_bddc_use_vertices"] = config.pc_bddc_use_vertices
+        if config.pc_bddc_use_edges is not None:
+            preconditioner_options["pc_bddc_use_edges"] = config.pc_bddc_use_edges
+        if config.pc_bddc_use_faces is not None:
+            preconditioner_options["pc_bddc_use_faces"] = config.pc_bddc_use_faces
+        if config.pc_bddc_use_change_of_basis is not None:
+            preconditioner_options["pc_bddc_use_change_of_basis"] = config.pc_bddc_use_change_of_basis
+        if config.pc_bddc_use_change_on_faces is not None:
+            preconditioner_options["pc_bddc_use_change_on_faces"] = config.pc_bddc_use_change_on_faces
+        if config.pc_bddc_check_level is not None:
+            preconditioner_options["pc_bddc_check_level"] = config.pc_bddc_check_level
         if config.compiled_outer:
             preconditioner_options["compiled_outer"] = True
         if config.recycle_preconditioner:

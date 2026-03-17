@@ -11,20 +11,26 @@ from scipy.sparse import block_diag, csc_matrix, csr_matrix, coo_matrix
 
 from .reduction import reduction
 from ..fem.distributed_tangent import (
+    BDDCSubdomainPattern,
     DEFAULT_TANGENT_KERNEL,
     OwnedTangentPattern,
+    assemble_bddc_subdomain_tangent_values,
     assemble_overlap_strain,
     assemble_owned_force_from_local_stress,
     assemble_owned_tangent_values,
 )
 from ..utils import (
     IterationHistory,
+    get_petsc_is_local_mat,
+    get_petsc_matrix_metadata,
     local_csr_to_petsc_aij_matrix,
+    local_csr_to_petsc_matis_matrix,
     q_to_free_indices,
     to_numpy_vector,
     update_petsc_aij_matrix_csr,
     release_petsc_aij_matrix,
 )
+from ..linear.preconditioners import make_near_nullspace_elasticity
 
 try:  # pragma: no cover - PETSc is optional in some tests
     from petsc4py import PETSc
@@ -1227,6 +1233,7 @@ class ConstitutiveOperator:
         self.time_local_force_assembly = []
         self.time_local_force_gather = []
         self.owned_tangent_pattern: OwnedTangentPattern | None = None
+        self.bddc_subdomain_pattern: BDDCSubdomainPattern | None = None
         self.use_compiled_owned_tangent = True
         self.owned_tangent_kernel = DEFAULT_TANGENT_KERNEL
         self.use_compiled_owned_constitutive = True
@@ -1241,6 +1248,18 @@ class ConstitutiveOperator:
         self._owned_regularized_indptr = None
         self._owned_regularized_indices = None
         self._owned_regularized_values = None
+        self._bddc_tangent_mat = None
+        self._bddc_tangent_indptr = None
+        self._bddc_tangent_indices = None
+        self._bddc_tangent_values = None
+        self._bddc_elastic_mat = None
+        self._bddc_elastic_indptr = None
+        self._bddc_elastic_indices = None
+        self._bddc_elastic_values = None
+        self._bddc_regularized_mat = None
+        self._bddc_regularized_indptr = None
+        self._bddc_regularized_indices = None
+        self._bddc_regularized_values = None
         self._owned_overlap_c_bar = None
         self._owned_overlap_sin_phi = None
         self._owned_unique_c_bar = None
@@ -1273,6 +1292,10 @@ class ConstitutiveOperator:
         self.owned_tangent_kernel = str(tangent_kernel).lower()
         self.use_compiled_owned_constitutive = bool(use_compiled_constitutive)
         self.owned_constitutive_mode = str(constitutive_mode).lower()
+        self.release_petsc_caches()
+
+    def set_bddc_subdomain_pattern(self, pattern: BDDCSubdomainPattern | None) -> None:
+        self.bddc_subdomain_pattern = pattern
         self.release_petsc_caches()
 
     def _local_comm(self):
@@ -1617,6 +1640,195 @@ class ConstitutiveOperator:
             )
         return self._owned_regularized_mat
 
+    def _bddc_local_DS(self):
+        pattern = self.bddc_subdomain_pattern
+        if pattern is None:
+            raise ValueError("BDDC subdomain pattern not configured")
+        if self._owned_local_DS is not None:
+            if int(pattern.overlap_local_positions.size) != int(pattern.local_int_indices.size):
+                raise RuntimeError("BDDC overlap-local integration-point map is incomplete")
+            return np.asarray(self._owned_local_DS[:, pattern.overlap_local_positions], dtype=np.float64)
+        if self.DS is None:
+            raise ValueError("Tangent DS not computed")
+        return np.asarray(self.DS[:, pattern.local_int_indices], dtype=np.float64)
+
+    def _bddc_matrix_metadata(self, pattern: BDDCSubdomainPattern) -> dict[str, object]:
+        owned_coord = np.asarray(pattern.owned_coord, dtype=np.float64)
+        metadata: dict[str, object] = {
+            "bddc_dirichlet_local": np.asarray(pattern.local_dirichlet_dofs, dtype=np.int32),
+            "bddc_local_adjacency": (
+                np.asarray(pattern.local_adjacency_indptr, dtype=PETSc.IntType),
+                np.asarray(pattern.local_adjacency_indices, dtype=PETSc.IntType),
+            ),
+            "bddc_local_coordinates": np.repeat(np.asarray(owned_coord.T, dtype=np.float64), int(pattern.dim), axis=0),
+        }
+        if pattern.local_field_dofs:
+            metadata["bddc_field_is_local"] = tuple(
+                PETSc.IS().createGeneral(np.asarray(field, dtype=PETSc.IntType), comm=PETSc.COMM_SELF)
+                for field in pattern.local_field_dofs
+            )
+        if pattern.local_primal_vertices.size:
+            metadata["bddc_primal_vertices_local"] = PETSc.IS().createGeneral(
+                np.asarray(pattern.local_primal_vertices, dtype=PETSc.IntType),
+                comm=PETSc.COMM_SELF,
+            )
+        basis = make_near_nullspace_elasticity(
+            np.asarray(pattern.local_coord, dtype=np.float64),
+            q_mask=np.asarray(pattern.local_q_mask, dtype=bool),
+            center_coordinates=True,
+            return_full=True,
+        )
+        if basis.size:
+            metadata["bddc_local_nullspace_basis"] = np.asarray(basis, dtype=np.float64)
+            metadata["bddc_local_near_nullspace_basis"] = np.asarray(basis, dtype=np.float64)
+        return metadata
+
+    def _build_bddc_tangent_matrix(self):
+        if self.bddc_subdomain_pattern is None:
+            raise ValueError("BDDC subdomain pattern not configured")
+        if PETSc is None:
+            raise RuntimeError("PETSc is required for the BDDC MATIS path")
+
+        pattern = self.bddc_subdomain_pattern
+        t0 = perf_counter()
+        tang = assemble_bddc_subdomain_tangent_values(
+            pattern,
+            self._bddc_local_DS(),
+            use_compiled=self.use_compiled_owned_tangent,
+        )
+        tang = np.asarray(tang, dtype=np.float64)
+        if self._bddc_tangent_values is None or self._bddc_tangent_values.shape != tang.shape:
+            self._bddc_tangent_values = np.empty_like(tang)
+        values = self._bddc_tangent_values
+        np.copyto(values, tang)
+        self.time_build_tangent_local.append(perf_counter() - t0)
+
+        if self._bddc_tangent_indptr is None:
+            self._bddc_tangent_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
+        if self._bddc_tangent_indices is None:
+            self._bddc_tangent_indices = np.array(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType, copy=True)
+        metadata = self._bddc_matrix_metadata(pattern)
+
+        if self._bddc_tangent_mat is None:
+            from scipy.sparse import csr_matrix
+
+            local_matrix = csr_matrix(
+                (np.array(values, dtype=np.float64, copy=True), self._bddc_tangent_indices, self._bddc_tangent_indptr),
+                shape=pattern.local_matrix_pattern.shape,
+            )
+            local_vector_size = int(self.dim * (int(pattern.owned_node_range[1]) - int(pattern.owned_node_range[0])))
+            self._bddc_tangent_mat = local_csr_to_petsc_matis_matrix(
+                local_matrix,
+                global_size=int(self.q_mask.size),
+                local_to_global=np.asarray(pattern.local_global_dofs, dtype=np.int64),
+                comm=PETSc.COMM_WORLD,
+                block_size=self.dim,
+                local_vector_size=local_vector_size,
+                metadata=metadata,
+            )
+        else:
+            local_mat = get_petsc_is_local_mat(self._bddc_tangent_mat)
+            if local_mat is None:
+                raise RuntimeError("Missing cached local MATIS matrix for BDDC tangent update")
+            update_petsc_aij_matrix_csr(
+                local_mat,
+                indptr=self._bddc_tangent_indptr,
+                indices=self._bddc_tangent_indices,
+                data=values,
+            )
+            self._bddc_tangent_mat.assemble()
+        return self._bddc_tangent_mat
+
+    def _build_bddc_elastic_matrix(self):
+        if self.bddc_subdomain_pattern is None:
+            raise ValueError("BDDC subdomain pattern not configured")
+        if PETSc is None:
+            raise RuntimeError("PETSc is required for the BDDC MATIS path")
+
+        pattern = self.bddc_subdomain_pattern
+        if self._bddc_elastic_values is None or self._bddc_elastic_values.shape != np.asarray(pattern.elastic_values).shape:
+            self._bddc_elastic_values = np.array(pattern.elastic_values, dtype=np.float64, copy=True)
+        if self._bddc_elastic_indptr is None:
+            self._bddc_elastic_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
+        if self._bddc_elastic_indices is None:
+            self._bddc_elastic_indices = np.array(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType, copy=True)
+
+        if self._bddc_elastic_mat is None:
+            from scipy.sparse import csr_matrix
+
+            local_matrix = csr_matrix(
+                (np.array(self._bddc_elastic_values, dtype=np.float64, copy=True), self._bddc_elastic_indices, self._bddc_elastic_indptr),
+                shape=pattern.local_matrix_pattern.shape,
+            )
+            local_vector_size = int(self.dim * (int(pattern.owned_node_range[1]) - int(pattern.owned_node_range[0])))
+            self._bddc_elastic_mat = local_csr_to_petsc_matis_matrix(
+                local_matrix,
+                global_size=int(self.q_mask.size),
+                local_to_global=np.asarray(pattern.local_global_dofs, dtype=np.int64),
+                comm=PETSc.COMM_WORLD,
+                block_size=self.dim,
+                local_vector_size=local_vector_size,
+                metadata=self._bddc_matrix_metadata(pattern),
+            )
+        return self._bddc_elastic_mat
+
+    def _build_bddc_regularized_matrix(self, r: float):
+        if self.bddc_subdomain_pattern is None:
+            raise ValueError("BDDC subdomain pattern not configured")
+        if PETSc is None:
+            raise RuntimeError("PETSc is required for the BDDC MATIS path")
+
+        pattern = self.bddc_subdomain_pattern
+        t0 = perf_counter()
+        tang = assemble_bddc_subdomain_tangent_values(
+            pattern,
+            self._bddc_local_DS(),
+            use_compiled=self.use_compiled_owned_tangent,
+        )
+        tang = np.asarray(tang, dtype=np.float64)
+        if self._bddc_regularized_values is None or self._bddc_regularized_values.shape != tang.shape:
+            self._bddc_regularized_values = np.empty_like(tang)
+        values = self._bddc_regularized_values
+        np.copyto(values, tang)
+        values *= 1.0 - float(r)
+        values += float(r) * np.asarray(pattern.elastic_values, dtype=np.float64)
+        self.time_build_tangent_local.append(perf_counter() - t0)
+
+        if self._bddc_regularized_indptr is None:
+            self._bddc_regularized_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
+        if self._bddc_regularized_indices is None:
+            self._bddc_regularized_indices = np.array(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType, copy=True)
+
+        if self._bddc_regularized_mat is None:
+            from scipy.sparse import csr_matrix
+
+            local_matrix = csr_matrix(
+                (np.array(values, dtype=np.float64, copy=True), self._bddc_regularized_indices, self._bddc_regularized_indptr),
+                shape=pattern.local_matrix_pattern.shape,
+            )
+            local_vector_size = int(self.dim * (int(pattern.owned_node_range[1]) - int(pattern.owned_node_range[0])))
+            self._bddc_regularized_mat = local_csr_to_petsc_matis_matrix(
+                local_matrix,
+                global_size=int(self.q_mask.size),
+                local_to_global=np.asarray(pattern.local_global_dofs, dtype=np.int64),
+                comm=PETSc.COMM_WORLD,
+                block_size=self.dim,
+                local_vector_size=local_vector_size,
+                metadata=self._bddc_matrix_metadata(pattern),
+            )
+        else:
+            local_mat = get_petsc_is_local_mat(self._bddc_regularized_mat)
+            if local_mat is None:
+                raise RuntimeError("Missing cached local MATIS matrix for BDDC regularized update")
+            update_petsc_aij_matrix_csr(
+                local_mat,
+                indptr=self._bddc_regularized_indptr,
+                indices=self._bddc_regularized_indices,
+                data=values,
+            )
+            self._bddc_regularized_mat.assemble()
+        return self._bddc_regularized_mat
+
     def _strain(self, U):
         if self.B is None:
             raise RuntimeError("Global strain operator B is not available for this constitutive path")
@@ -1857,6 +2069,21 @@ class ConstitutiveOperator:
             raise RuntimeError("Regularized in-place matrix path requires owned_tangent_pattern")
         return self._build_owned_regularized_matrix(r)
 
+    def build_bddc_tangent_matrix(self):
+        if self.bddc_subdomain_pattern is None:
+            raise RuntimeError("BDDC subdomain pattern not configured")
+        return self._build_bddc_tangent_matrix()
+
+    def build_bddc_regularized_matrix(self, r: float):
+        if self.bddc_subdomain_pattern is None:
+            raise RuntimeError("BDDC subdomain pattern not configured")
+        return self._build_bddc_regularized_matrix(r)
+
+    def build_bddc_elastic_matrix(self):
+        if self.bddc_subdomain_pattern is None:
+            raise RuntimeError("BDDC subdomain pattern not configured")
+        return self._build_bddc_elastic_matrix()
+
     def build_F_K_regularized_all(self, lam: float, U, r: float):
         self.reduction(lam)
         self.constitutive_problem_stress_tangent(U)
@@ -1933,3 +2160,24 @@ class ConstitutiveOperator:
         self._owned_regularized_indptr = None
         self._owned_regularized_indices = None
         self._owned_regularized_values = None
+        if PETSc is not None and self._bddc_tangent_mat is not None:
+            release_petsc_aij_matrix(self._bddc_tangent_mat)
+            self._bddc_tangent_mat.destroy()
+        self._bddc_tangent_mat = None
+        self._bddc_tangent_indptr = None
+        self._bddc_tangent_indices = None
+        self._bddc_tangent_values = None
+        if PETSc is not None and self._bddc_elastic_mat is not None:
+            release_petsc_aij_matrix(self._bddc_elastic_mat)
+            self._bddc_elastic_mat.destroy()
+        self._bddc_elastic_mat = None
+        self._bddc_elastic_indptr = None
+        self._bddc_elastic_indices = None
+        self._bddc_elastic_values = None
+        if PETSc is not None and self._bddc_regularized_mat is not None:
+            release_petsc_aij_matrix(self._bddc_regularized_mat)
+            self._bddc_regularized_mat.destroy()
+        self._bddc_regularized_mat = None
+        self._bddc_regularized_indptr = None
+        self._bddc_regularized_indices = None
+        self._bddc_regularized_values = None

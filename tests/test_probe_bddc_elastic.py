@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+from petsc4py import PETSc
+from scipy.sparse import csr_matrix
+
+from slope_stability.utils import (
+    local_csr_to_petsc_aij_matrix,
+    local_csr_to_petsc_matis_matrix,
+    release_petsc_aij_matrix,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_probe_module():
+    probe_path = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "probe_bddc_elastic.py"
+    spec = importlib.util.spec_from_file_location("probe_bddc_elastic", probe_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _local_block_matrix() -> csr_matrix:
+    return csr_matrix(
+        np.array(
+            [
+                [4.0, 1.0, 0.0, 0.0],
+                [1.0, 3.0, 0.0, 0.0],
+                [0.0, 0.0, 5.0, 1.0],
+                [0.0, 0.0, 1.0, 2.0],
+            ],
+            dtype=np.float64,
+        )
+    )
+
+
+def test_native_bddc_probe_helpers_solve_small_problem() -> None:
+    module = _load_probe_module()
+    A_local = _local_block_matrix()
+    A = local_csr_to_petsc_aij_matrix(
+        A_local,
+        global_shape=A_local.shape,
+        comm=PETSc.COMM_WORLD,
+        block_size=2,
+    )
+    P = local_csr_to_petsc_matis_matrix(
+        A_local,
+        global_size=4,
+        local_to_global=np.array([0, 1, 2, 3], dtype=np.int64),
+        comm=PETSc.COMM_WORLD,
+        block_size=2,
+        metadata={
+            "bddc_field_is_local": tuple(
+                PETSc.IS().createGeneral(np.asarray([comp, comp + 2], dtype=PETSc.IntType), comm=PETSc.COMM_SELF)
+                for comp in range(2)
+            ),
+            "bddc_dirichlet_local": np.array([], dtype=np.int32),
+            "bddc_local_adjacency": (
+                np.asarray(A_local.indptr, dtype=PETSc.IntType),
+                np.asarray(A_local.indices, dtype=PETSc.IntType),
+            ),
+            "bddc_local_coordinates": np.repeat(np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64), 2, axis=0),
+        },
+    )
+    args = SimpleNamespace(
+        pc_backend="bddc",
+        native_ksp_type="cg",
+        linear_tolerance=1e-10,
+        linear_max_iter=50,
+        pc_bddc_symmetric=False,
+        pc_bddc_dirichlet_ksp_type="preonly",
+        pc_bddc_dirichlet_pc_type="lu",
+        pc_bddc_neumann_ksp_type="preonly",
+        pc_bddc_neumann_pc_type="lu",
+        pc_bddc_coarse_ksp_type="preonly",
+        pc_bddc_coarse_pc_type="lu",
+        pc_bddc_dirichlet_approximate=None,
+        pc_bddc_neumann_approximate=None,
+        pc_bddc_use_deluxe_scaling=False,
+        pc_bddc_use_vertices=True,
+        pc_bddc_use_edges=False,
+        pc_bddc_use_faces=False,
+        pc_bddc_use_change_of_basis=False,
+        pc_bddc_use_change_on_faces=False,
+        pc_bddc_check_level=None,
+        pc_hypre_coarsen_type=None,
+        pc_hypre_interp_type=None,
+        use_coordinates=True,
+    )
+
+    A.setOption(PETSc.Mat.Option.SYMMETRIC, True)
+    A.setOption(PETSc.Mat.Option.SPD, True)
+    ksp, setup_elapsed = module._build_native_petsc_ksp(args, operator_matrix=A, preconditioning_matrix=P)
+    x, solve_elapsed, iterations, reason = module._native_petsc_ksp_solve_once(
+        ksp,
+        A,
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64),
+    )
+
+    assert setup_elapsed >= 0.0
+    assert solve_elapsed >= 0.0
+    assert iterations >= 1
+    assert reason > 0
+    assert x.shape == (4,)
+    assert np.all(np.isfinite(x))
+
+    ksp.destroy()
+    release_petsc_aij_matrix(P)
+    P.destroy()
+    release_petsc_aij_matrix(A)
+    A.destroy()

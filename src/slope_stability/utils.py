@@ -12,6 +12,8 @@ except Exception:  # pragma: no cover
     PETSc = None
 
 _PETSC_MAT_CSR_REFS: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_PETSC_MAT_METADATA: dict[int, dict[str, object]] = {}
+_PETSC_MAT_IS_REFS: dict[int, tuple[object, object]] = {}
 
 
 @dataclass
@@ -232,11 +234,154 @@ def update_petsc_aij_matrix_csr(
     return A
 
 
+def set_petsc_matrix_metadata(A, **metadata) -> None:
+    """Attach Python-side metadata to a PETSc matrix handle."""
+
+    if PETSc is not None and isinstance(A, PETSc.Mat):
+        store = _PETSC_MAT_METADATA.setdefault(int(A.handle), {})
+        store.update(metadata)
+
+
+def get_petsc_matrix_metadata(A) -> dict[str, object]:
+    """Return Python-side metadata previously attached to a PETSc matrix."""
+
+    if PETSc is None or not isinstance(A, PETSc.Mat):
+        return {}
+    return dict(_PETSC_MAT_METADATA.get(int(A.handle), {}))
+
+
+def get_petsc_is_local_mat(A):
+    """Return the locally stored SeqAIJ matrix for a MATIS matrix if registered."""
+
+    if PETSc is None or not isinstance(A, PETSc.Mat):
+        return None
+    refs = _PETSC_MAT_IS_REFS.get(int(A.handle))
+    if refs is None:
+        return None
+    return refs[0]
+
+
+def local_csr_to_petsc_seq_aij_matrix(A_local):
+    """Create a sequential AIJ PETSc matrix from local CSR data."""
+
+    import scipy.sparse as sp
+
+    _require_petsc()
+    csr = A_local.tocsr() if sp.issparse(A_local) else sp.csr_matrix(np.asarray(A_local, dtype=np.float64))
+    indptr = np.array(csr.indptr, dtype=PETSc.IntType, copy=True)
+    indices = np.array(csr.indices, dtype=PETSc.IntType, copy=True)
+    data = np.array(csr.data, dtype=np.float64, copy=True)
+    mat = PETSc.Mat().createAIJ(size=csr.shape, csr=(indptr, indices, data), comm=PETSc.COMM_SELF)
+    mat.assemble()
+    _PETSC_MAT_CSR_REFS[int(mat.handle)] = (indptr, indices, data)
+    return mat
+
+
+def _build_seq_nullspace(basis: np.ndarray | None):
+    if PETSc is None or basis is None:
+        return None, []
+    arr = np.asarray(basis, dtype=np.float64)
+    if arr.size == 0:
+        return None, []
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    vecs = [
+        PETSc.Vec().createWithArray(np.array(arr[:, j], dtype=np.float64, copy=True), size=arr.shape[0], comm=PETSc.COMM_SELF)
+        for j in range(arr.shape[1])
+    ]
+    nsp = PETSc.NullSpace().create(constant=False, vectors=vecs, comm=PETSc.COMM_SELF)
+    return nsp, vecs
+
+
+def local_csr_to_petsc_matis_matrix(
+    A_local,
+    *,
+    global_size: int,
+    local_to_global: np.ndarray,
+    comm,
+    block_size: int | None = None,
+    local_vector_size: int | None = None,
+    metadata: dict[str, object] | None = None,
+):
+    """Create a PETSc MATIS matrix from a local square CSR matrix."""
+
+    _require_petsc()
+    stored_metadata = dict(metadata or {})
+    local_mat = local_csr_to_petsc_seq_aij_matrix(A_local)
+    if block_size is not None:
+        local_mat.setBlockSize(int(block_size))
+    local_nullspace, local_nullspace_vecs = _build_seq_nullspace(stored_metadata.get("bddc_local_nullspace_basis"))
+    if local_nullspace is not None:
+        local_mat.setNullSpace(local_nullspace)
+        stored_metadata["bddc_local_nullspace"] = local_nullspace
+        stored_metadata["bddc_local_nullspace_vecs"] = local_nullspace_vecs
+    local_near_nullspace, local_near_nullspace_vecs = _build_seq_nullspace(
+        stored_metadata.get("bddc_local_near_nullspace_basis")
+    )
+    if local_near_nullspace is not None:
+        local_mat.setNearNullSpace(local_near_nullspace)
+        stored_metadata["bddc_local_near_nullspace"] = local_near_nullspace
+        stored_metadata["bddc_local_near_nullspace_vecs"] = local_near_nullspace_vecs
+    local_to_global_arr = np.asarray(local_to_global, dtype=PETSc.IntType)
+    lgmap = PETSc.LGMap().create(local_to_global_arr, comm=comm)
+    n_local = int(local_to_global_arr.size)
+    vec_local = int(n_local if local_vector_size is None else local_vector_size)
+    mat = PETSc.Mat().createIS(
+        size=((vec_local, int(global_size)), (vec_local, int(global_size))),
+        bsize=block_size,
+        lgmapr=lgmap,
+        lgmapc=lgmap,
+        comm=comm,
+    )
+    mat.setISAllowRepeated(True)
+    mat.setISLocalMat(local_mat)
+    if block_size is not None:
+        mat.setBlockSize(int(block_size))
+    mat.assemble()
+    _PETSC_MAT_IS_REFS[int(mat.handle)] = (local_mat, lgmap)
+    stored_metadata.setdefault("local_to_global", np.asarray(local_to_global_arr, dtype=np.int64))
+    stored_metadata.setdefault("matis_local_size", int(n_local))
+    stored_metadata.setdefault("matis_vector_local_size", int(vec_local))
+    stored_metadata.setdefault("matis_global_size", int(global_size))
+    _PETSC_MAT_METADATA[int(mat.handle)] = stored_metadata
+    return mat
+
+
 def release_petsc_aij_matrix(A) -> None:
     """Release cached CSR buffers associated with a PETSc matrix."""
 
     if PETSc is not None and isinstance(A, PETSc.Mat):
         _PETSC_MAT_CSR_REFS.pop(int(A.handle), None)
+        metadata = _PETSC_MAT_METADATA.pop(int(A.handle), None)
+        if metadata:
+            for value in metadata.values():
+                if isinstance(value, (list, tuple)):
+                    for item in value:
+                        if hasattr(item, "destroy"):
+                            try:
+                                item.destroy()
+                            except Exception:
+                                pass
+                elif hasattr(value, "destroy"):
+                    try:
+                        value.destroy()
+                    except Exception:
+                        pass
+        is_refs = _PETSC_MAT_IS_REFS.pop(int(A.handle), None)
+        if is_refs is not None:
+            local_mat, lgmap = is_refs
+            try:
+                release_petsc_aij_matrix(local_mat)
+            except Exception:
+                pass
+            try:
+                local_mat.destroy()
+            except Exception:
+                pass
+            try:
+                lgmap.destroy()
+            except Exception:
+                pass
 
 
 def matvec_to_numpy(A, x: np.ndarray) -> np.ndarray:

@@ -41,9 +41,21 @@ def _combine_matrices(alpha: float, A, beta: float, B):
     return alpha * A + beta * B
 
 
-def _setup_linear_system(linear_system_solver, A_free, *, A_full=None, free_idx: np.ndarray | None = None) -> None:
+def _setup_linear_system(
+    linear_system_solver,
+    A_free,
+    *,
+    A_full=None,
+    free_idx: np.ndarray | None = None,
+    preconditioning_matrix=None,
+) -> None:
     try:
-        linear_system_solver.setup_preconditioner(A_free, full_matrix=A_full, free_indices=free_idx)
+        linear_system_solver.setup_preconditioner(
+            A_free,
+            full_matrix=A_full,
+            free_indices=free_idx,
+            preconditioning_matrix=preconditioning_matrix,
+        )
     except TypeError:
         linear_system_solver.setup_preconditioner(A_free)
 
@@ -89,6 +101,51 @@ def _release_iteration_resources(linear_system_solver) -> None:
     release = getattr(linear_system_solver, "release_iteration_resources", None)
     if callable(release):
         release()
+
+
+def _needs_preconditioning_matrix_refresh(linear_system_solver) -> bool:
+    fn = getattr(linear_system_solver, "needs_preconditioning_matrix_refresh", None)
+    if callable(fn):
+        return bool(fn())
+    return False
+
+
+def _requires_explicit_preconditioning_matrix(linear_system_solver) -> bool:
+    fn = getattr(linear_system_solver, "preconditioner_requires_explicit_matrix", None)
+    if callable(fn):
+        return bool(fn())
+    return False
+
+
+def _preconditioning_matrix_source(linear_system_solver) -> str:
+    fn = getattr(linear_system_solver, "get_preconditioner_matrix_source", None)
+    if callable(fn):
+        try:
+            return str(fn()).strip().lower()
+        except Exception:
+            return "tangent"
+    return "tangent"
+
+
+def _explicit_preconditioning_matrix(constitutive_matrix_builder, linear_system_solver, *, regularization_r: float | None, K_elast=None):
+    source = _preconditioning_matrix_source(linear_system_solver)
+    if source == "elastic":
+        fn = getattr(constitutive_matrix_builder, "build_bddc_elastic_matrix", None)
+        if callable(fn):
+            return fn()
+        if K_elast is not None:
+            return K_elast
+        raise RuntimeError("Elastic preconditioning matrix requested, but no elastic matrix is available")
+    if regularization_r is not None:
+        fn = getattr(constitutive_matrix_builder, "build_bddc_regularized_matrix", None)
+        if callable(fn):
+            return fn(float(regularization_r))
+    if source == "regularized":
+        raise RuntimeError("Regularized preconditioning matrix requested, but no regularized builder is available")
+    fn = getattr(constitutive_matrix_builder, "build_bddc_tangent_matrix", None)
+    if callable(fn):
+        return fn()
+    raise RuntimeError("Linear solver requested an explicit preconditioning matrix, but the constitutive builder cannot provide one")
 
 
 def _destroy_petsc_mat(A) -> None:
@@ -269,10 +326,25 @@ def newton(
                 K_r = cached_regularized
             else:
                 K_r = _combine_matrices(r, K_elast, 1.0 - r, K_tangent)
+        preconditioning_matrix = None
+        if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
+            if _needs_preconditioning_matrix_refresh(linear_system_solver):
+                preconditioning_matrix = _explicit_preconditioning_matrix(
+                    constitutive_matrix_builder,
+                    linear_system_solver,
+                    regularization_r=r,
+                    K_elast=K_elast,
+                )
         K_free = None
         try:
             if use_full_operator:
-                _setup_linear_system(linear_system_solver, K_r, A_full=K_r, free_idx=free_idx)
+                _setup_linear_system(
+                    linear_system_solver,
+                    K_r,
+                    A_full=K_r,
+                    free_idx=free_idx,
+                    preconditioning_matrix=preconditioning_matrix,
+                )
                 linear_system_solver.A_orthogonalize(K_r)
                 if use_local_build:
                     dU_free = _solve_linear_system_local(
@@ -452,6 +524,15 @@ def newton_ind_ssr(
                 K_r = cached_regularized
             else:
                 K_r = _combine_matrices(r, K_elast, 1.0 - r, K_tangent)
+        preconditioning_matrix = None
+        if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
+            if _needs_preconditioning_matrix_refresh(linear_system_solver):
+                preconditioning_matrix = _explicit_preconditioning_matrix(
+                    constitutive_matrix_builder,
+                    linear_system_solver,
+                    regularization_r=r,
+                    K_elast=K_elast,
+                )
         K_free = None
 
         # G = dF/dlambda approximated numerically.
@@ -473,7 +554,13 @@ def newton_ind_ssr(
 
         try:
             if use_full_operator:
-                _setup_linear_system(linear_system_solver, K_r, A_full=K_r, free_idx=free_idx)
+                _setup_linear_system(
+                    linear_system_solver,
+                    K_r,
+                    A_full=K_r,
+                    free_idx=free_idx,
+                    preconditioning_matrix=preconditioning_matrix,
+                )
                 linear_system_solver.A_orthogonalize(K_r)
                 if use_local_build:
                     f_local = _local_owned_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
@@ -699,11 +786,26 @@ def newton_ind_ll(
                 K_r = cached_regularized
             else:
                 K_r = _combine_matrices(r, K_elast, 1.0 - r, K_tangent)
+        preconditioning_matrix = None
+        if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
+            if _needs_preconditioning_matrix_refresh(linear_system_solver):
+                preconditioning_matrix = _explicit_preconditioning_matrix(
+                    constitutive_matrix_builder,
+                    linear_system_solver,
+                    regularization_r=r,
+                    K_elast=K_elast,
+                )
         K_free = None
 
         try:
             if use_full_operator:
-                _setup_linear_system(linear_system_solver, K_r, A_full=K_r, free_idx=free_idx)
+                _setup_linear_system(
+                    linear_system_solver,
+                    K_r,
+                    A_full=K_r,
+                    free_idx=free_idx,
+                    preconditioning_matrix=preconditioning_matrix,
+                )
                 linear_system_solver.A_orthogonalize(K_r)
                 if use_local_build:
                     f_local = _local_owned_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
