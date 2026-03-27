@@ -17,11 +17,11 @@ The full-solver comparison below therefore has two layers:
 
 Two existing reports in the repo provide the old-runtime context:
 
-- [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_scaling_step2.md)
+- [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_scaling_step2.md)
   - `P4`, `step_max = 2`
   - `8` ranks runtime: `273.377 s`
   - `8` ranks `build_tangent_local`: `26.940 s`
-- [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p2_vs_p4_rank8_final_guarded80_v2.md)
+- [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p2_vs_p4_rank8_final_guarded80_v2.md)
   - `P4`, `8` ranks, final-state run
   - runtime: `5908.031 s`
   - `build_tangent_local`: `377.725 s`
@@ -37,7 +37,7 @@ That matters: even a large tangent-kernel speedup cannot produce the same large 
 
 - Mesh: `meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh`
 - Element order: `P4`
-- Benchmark harness: [bench_tangent_kernels.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/bench_tangent_kernels.py)
+- Benchmark harness: [bench_tangent_kernels.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/bench_tangent_kernels.py)
 - Mode: `virtual-rank`
 - Node ordering used for this validation: `xyz`
   - `block_metis` was not available because `pymetis` is not installed here.
@@ -132,6 +132,6 @@ The kernel change is worth keeping: it removes dense local `ke`, removes atomic 
 
 For the next optimization cycle, the highest-value validation is a real PETSc rerun of:
 
-- `benchmarks/3d_hetero_ssr_default/scale_p4.py --kernels legacy rows`
+- `benchmarks/3d_hetero_ssr_default/archive/scale_p4.py --kernels legacy rows`
 
 in an environment with `petsc4py`, so the projected `build_tangent_local` reduction can be confirmed against true rank-`1/2/4/8` continuation timing.

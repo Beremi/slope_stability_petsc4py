@@ -89,7 +89,7 @@ This confirms the new default `rows` path is no longer carrying the dense legacy
   - sparse `overlap_B`
   - dense `dphi1/dphi2/dphi3`
 - `_assemble_3d` in [assembly.py](/home/beremi/repos/slope_stability-1/src/slope_stability/fem/assembly.py) is still temporary-heavy for P4 overlap assembly.
-- `unique_exchange` is now correct, but the actual PETSc scaling run in [report_p4_constitutive_actual.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_constitutive_actual.md) showed it is not yet faster than `overlap` on `2/4/8` ranks.
+- `unique_exchange` is now correct, but the actual PETSc scaling run in [report_p4_constitutive_actual.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_constitutive_actual.md) showed it is not yet faster than `overlap` on `2/4/8` ranks.
 
 ## Practical Effect
 

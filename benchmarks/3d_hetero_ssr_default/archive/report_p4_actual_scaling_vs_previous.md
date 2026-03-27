@@ -9,9 +9,9 @@
 
 ## Source Artifacts
 
-- Old baseline report: [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_scaling_step2.md)
-- Phase-1 kernel report: [report_p4_kernel_actual.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_kernel_actual.md)
-- Phase-2 constitutive report: [report_p4_constitutive_actual.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_constitutive_actual.md)
+- Old baseline report: [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_scaling_step2.md)
+- Phase-1 kernel report: [report_p4_kernel_actual.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_kernel_actual.md)
+- Phase-2 constitutive report: [report_p4_constitutive_actual.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_constitutive_actual.md)
 - Phase-1 summaries:
   - [kernel_legacy/summary.json](/home/beremi/repos/slope_stability-1/artifacts/p4_scaling_kernel_actual/kernel_legacy/summary.json)
   - [kernel_rows/summary.json](/home/beremi/repos/slope_stability-1/artifacts/p4_scaling_kernel_actual/kernel_rows/summary.json)
@@ -62,7 +62,7 @@
 
 ## Comparison to the Previous P4 Step-2 Baseline
 
-The old report in [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_scaling_step2.md) is the historical baseline. Relative to that report:
+The old report in [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_scaling_step2.md) is the historical baseline. Relative to that report:
 
 | Ranks | Old runtime [s] | Current legacy runtime [s] | Delta vs old | Current rows runtime [s] | Delta vs old |
 | ---: | ---: | ---: | ---: | ---: | ---: |

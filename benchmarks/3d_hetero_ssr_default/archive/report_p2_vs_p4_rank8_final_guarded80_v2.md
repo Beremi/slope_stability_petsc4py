@@ -58,11 +58,11 @@
 
 ## Plots
 
-![Continuation curves](../../artifacts/p2_p4_compare_rank8_final_guarded80_v2/plots/continuation_curves.png)
+![Continuation curves](../../../artifacts/p2_p4_compare_rank8_final_guarded80_v2/plots/continuation_curves.png)
 
-![Iteration comparison](../../artifacts/p2_p4_compare_rank8_final_guarded80_v2/plots/iterations.png)
+![Iteration comparison](../../../artifacts/p2_p4_compare_rank8_final_guarded80_v2/plots/iterations.png)
 
-![Timing breakdown](../../artifacts/p2_p4_compare_rank8_final_guarded80_v2/plots/timing_breakdown.png)
+![Timing breakdown](../../../artifacts/p2_p4_compare_rank8_final_guarded80_v2/plots/timing_breakdown.png)
 
 ## Notes
 

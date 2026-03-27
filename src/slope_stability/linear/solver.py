@@ -18,10 +18,13 @@ except Exception:  # pragma: no cover - optional when PETSc is unavailable
     PETSc = None
 
 from ..core.config import LinearSolverConfig
+from ..fem.distributed_elastic import assemble_owned_elastic_rows_for_comm
 from ..utils import (
     bddc_pc_coordinates_from_metadata,
     get_petsc_matrix_metadata,
     global_array_to_petsc_vec,
+    local_csr_to_petsc_aij_matrix,
+    owned_coo_to_petsc_aij_matrix,
     owned_block_range,
     petsc_vec_to_global_array,
     q_to_free_indices,
@@ -49,7 +52,9 @@ class PreconditionerDiagnostics:
     preconditioner_rebuild_count: int = 0
     preconditioner_reuse_count: int = 0
     preconditioner_age_max: int = 0
+    preconditioner_setup_time_last: float = 0.0
     preconditioner_setup_time_total: float = 0.0
+    preconditioner_apply_time_last: float = 0.0
     preconditioner_apply_time_total: float = 0.0
     preconditioner_last_rebuild_reason: str = "initial"
 
@@ -63,9 +68,714 @@ class PreconditionerDiagnostics:
             "preconditioner_rebuild_count": int(self.preconditioner_rebuild_count),
             "preconditioner_reuse_count": int(self.preconditioner_reuse_count),
             "preconditioner_age_max": int(self.preconditioner_age_max),
+            "preconditioner_setup_time_last": float(self.preconditioner_setup_time_last),
             "preconditioner_setup_time_total": float(self.preconditioner_setup_time_total),
+            "preconditioner_apply_time_last": float(self.preconditioner_apply_time_last),
             "preconditioner_apply_time_total": float(self.preconditioner_apply_time_total),
             "preconditioner_last_rebuild_reason": str(self.preconditioner_last_rebuild_reason),
+        }
+
+
+@dataclass
+class _PMGPetscHierarchyState:
+    hierarchy: object
+    prolongations: tuple
+    restrictions: tuple
+    level_orders: tuple[int, ...]
+    level_global_sizes: tuple[int, ...]
+    level_owned_ranges: tuple[tuple[int, int], ...]
+
+    def destroy(self) -> None:
+        for mat in (*self.prolongations, *self.restrictions):
+            if mat is None:
+                continue
+            release_petsc_aij_matrix(mat)
+            mat.destroy()
+
+
+class _ManualPMGShellPC:
+    """Manual three-level V-cycle with Hypre coarse solve."""
+
+    _UNSAFE_HYPRE_VECTOR_KEYS = {
+        "pc_hypre_boomeramg_numfunctions",
+        "pc_hypre_boomeramg_nodal_coarsen",
+        "pc_hypre_boomeramg_nodal_coarsen_diag",
+        "pc_hypre_boomeramg_vec_interp_variant",
+        "pc_hypre_boomeramg_vec_interp_qmax",
+        "pc_hypre_boomeramg_vec_interp_smooth",
+    }
+
+    def _vector_hypre_options_requested(self) -> bool:
+        if bool(self.solver.preconditioner_options.get("coarse_hypre_full_system", False)):
+            return True
+        if bool(self.solver.preconditioner_options.get("allow_unsafe_hypre_vector_options", False)):
+            return True
+        return any(key in self.solver.preconditioner_options for key in self._UNSAFE_HYPRE_VECTOR_KEYS)
+
+    def _use_full_system_hypre_coarse(self) -> bool:
+        coarse_pc_type = str(
+            self.solver.preconditioner_options.get("mg_coarse_pc_type", PETSc.PC.Type.HYPRE)
+        ).strip()
+        return coarse_pc_type.lower() == str(PETSc.PC.Type.HYPRE).lower() and self._vector_hypre_options_requested()
+
+    def _allow_unsafe_hypre_vector_options(self) -> bool:
+        return self._use_full_system_hypre_coarse()
+
+    def _use_direct_elastic_coarse_operator(self, hierarchy) -> bool:
+        source = str(
+            self.solver.preconditioner_options.get("manualmg_coarse_operator_source", "auto")
+        ).strip().lower()
+        if source in {"galerkin", "galerkin_free", "galerkin_full_lift"}:
+            return False
+        if source in {"elastic", "direct", "direct_elastic", "direct_elastic_full_system"}:
+            return True
+        if source != "auto":
+            return False
+        levels = getattr(hierarchy, "levels", ())
+        if len(levels) < 2:
+            return False
+        if not tuple(getattr(hierarchy, "materials", ())):
+            return False
+        coarse_level = levels[0]
+        next_level = levels[1]
+        return (
+            self._coarse_use_full_system
+            and int(getattr(coarse_level, "order", -1)) == 1
+            and int(getattr(next_level, "order", -1)) == 1
+        )
+
+    @staticmethod
+    def _is_mixed_p1_tail_to_p2_hierarchy(hierarchy) -> bool:
+        levels = tuple(getattr(hierarchy, "levels", ()))
+        if len(levels) < 3:
+            return False
+        orders = tuple(int(getattr(level, "order", -1)) for level in levels)
+        return orders[-1] == 2 and all(order == 1 for order in orders[:-1])
+
+    def _default_smoother_options(self, hierarchy, *, comm_size: int) -> tuple[str, str, int]:
+        if comm_size > 1 and self._is_mixed_p1_tail_to_p2_hierarchy(hierarchy):
+            return (str(PETSc.KSP.Type.CHEBYSHEV), str(PETSc.PC.Type.JACOBI), 3)
+        return (
+            str(PETSc.KSP.Type.RICHARDSON),
+            str(PETSc.PC.Type.SOR),
+            3,
+        )
+
+    def __init__(self, solver) -> None:
+        self.solver = solver
+        self.state: _PMGPetscHierarchyState | None = None
+        self.hierarchy = None
+        self.A_levels_free: list[object] = []
+        self.A_fine = None
+        self.A_mid = None
+        self.A_coarse = None
+        self.A_coarse_free = None
+        self.smoothers: list[object | None] = []
+        self.smoother_fine = None
+        self.smoother_mid = None
+        self.coarse_ksp = None
+        self._coarse_nsp = None
+        self._coarse_nsp_vecs: list[object] = []
+        self._coarse_use_full_system = False
+        self._coarse_operator_source = "galerkin_free"
+        self._level_work: list[dict[str, object]] = []
+        self._fine_work: dict[str, object] = {}
+        self._mid_work: dict[str, object] = {}
+        self._coarse_work: dict[str, object] = {}
+        self._stats_total: dict[str, float | int | str] = {
+            "manualmg_apply_count": 0,
+            "manualmg_fine_pre_smoother_time_total_s": 0.0,
+            "manualmg_fine_post_smoother_time_total_s": 0.0,
+            "manualmg_mid_pre_smoother_time_total_s": 0.0,
+            "manualmg_mid_post_smoother_time_total_s": 0.0,
+            "manualmg_restrict_fine_to_mid_time_total_s": 0.0,
+            "manualmg_restrict_mid_to_coarse_time_total_s": 0.0,
+            "manualmg_prolong_coarse_to_mid_time_total_s": 0.0,
+            "manualmg_prolong_mid_to_fine_time_total_s": 0.0,
+            "manualmg_fine_residual_time_total_s": 0.0,
+            "manualmg_mid_residual_time_total_s": 0.0,
+            "manualmg_vector_sum_time_total_s": 0.0,
+            "manualmg_coarse_hypre_time_total_s": 0.0,
+            "manualmg_fine_smoother_iterations_total": 0,
+            "manualmg_mid_smoother_iterations_total": 0,
+            "manualmg_coarse_ksp_iterations_total": 0,
+            "manualmg_coarse_solve_count": 0,
+        }
+        self._stats_last: dict[str, float | int | str] = {}
+
+    @staticmethod
+    def _copy_vec(dst, src) -> None:
+        dst_arr = dst.getArray(readonly=False)
+        dst_arr[...] = np.asarray(src.getArray(readonly=True), dtype=np.float64)
+
+    @staticmethod
+    def _difference_vec(out, lhs, rhs) -> None:
+        out_arr = out.getArray(readonly=False)
+        lhs_arr = np.asarray(lhs.getArray(readonly=True), dtype=np.float64)
+        rhs_arr = np.asarray(rhs.getArray(readonly=True), dtype=np.float64)
+        out_arr[...] = lhs_arr - rhs_arr
+
+    @staticmethod
+    def _sum_vec(out, left, right) -> None:
+        out_arr = out.getArray(readonly=False)
+        left_arr = np.asarray(left.getArray(readonly=True), dtype=np.float64)
+        right_arr = np.asarray(right.getArray(readonly=True), dtype=np.float64)
+        out_arr[...] = left_arr + right_arr
+
+    def _destroy_dynamic(self) -> None:
+        for ksp in (*self.smoothers, self.coarse_ksp):
+            if ksp is not None:
+                ksp.destroy()
+        self.smoothers = []
+        self.smoother_fine = None
+        self.smoother_mid = None
+        self.coarse_ksp = None
+        seen_handles: set[int] = set()
+        owned_level_mats = tuple(self.A_levels_free[:-1]) if self.A_levels_free else ()
+        for mat in (*owned_level_mats, self.A_coarse):
+            if mat is not None:
+                handle = int(mat.handle)
+                if handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+                release_petsc_aij_matrix(mat)
+                mat.destroy()
+        self.A_levels_free = []
+        self.A_fine = None
+        self.A_mid = None
+        self.A_coarse = None
+        self.A_coarse_free = None
+        self._coarse_nsp = None
+        self._coarse_nsp_vecs = []
+        self._coarse_use_full_system = False
+        self._coarse_operator_source = "galerkin_free"
+        self._level_work = []
+        self._fine_work = {}
+        self._mid_work = {}
+        self._coarse_work = {}
+
+    def destroy(self, pc=None) -> None:
+        self._destroy_dynamic()
+        self.state = None
+        self.hierarchy = None
+        self.A_fine = None
+        self._stats_total = {
+            "manualmg_apply_count": 0,
+            "manualmg_fine_pre_smoother_time_total_s": 0.0,
+            "manualmg_fine_post_smoother_time_total_s": 0.0,
+            "manualmg_mid_pre_smoother_time_total_s": 0.0,
+            "manualmg_mid_post_smoother_time_total_s": 0.0,
+            "manualmg_restrict_fine_to_mid_time_total_s": 0.0,
+            "manualmg_restrict_mid_to_coarse_time_total_s": 0.0,
+            "manualmg_prolong_coarse_to_mid_time_total_s": 0.0,
+            "manualmg_prolong_mid_to_fine_time_total_s": 0.0,
+            "manualmg_fine_residual_time_total_s": 0.0,
+            "manualmg_mid_residual_time_total_s": 0.0,
+            "manualmg_vector_sum_time_total_s": 0.0,
+            "manualmg_coarse_hypre_time_total_s": 0.0,
+            "manualmg_fine_smoother_iterations_total": 0,
+            "manualmg_mid_smoother_iterations_total": 0,
+            "manualmg_coarse_ksp_iterations_total": 0,
+            "manualmg_coarse_solve_count": 0,
+        }
+        self._stats_last = {}
+
+    def _alloc_work_vectors(self) -> None:
+        self._level_work = []
+        self._fine_work = {}
+        self._mid_work = {}
+        self._coarse_work = {}
+        for level_idx, A_level in enumerate(self.A_levels_free):
+            work = {
+                "rhs": A_level.createVecRight(),
+                "e": A_level.createVecRight(),
+            }
+            if level_idx > 0:
+                work.update(
+                    {
+                        "residual": A_level.createVecRight(),
+                        "Ae": A_level.createVecRight(),
+                        "corr": A_level.createVecRight(),
+                    }
+                )
+            self._level_work.append(work)
+        if self.A_levels_free:
+            self._coarse_work = {
+                "rhs_coarse_free": self._level_work[0]["rhs"],
+                "ecoarse_free": self._level_work[0]["e"],
+            }
+            self.A_coarse_free = self.A_levels_free[0]
+        if self.A_fine is not None:
+            self._fine_work = self._level_work[-1]
+        if len(self._level_work) >= 3:
+            self._mid_work = self._level_work[-2]
+        if self.A_coarse is not None:
+            self._coarse_work.update(
+                {
+                    "rhs_coarse": self.A_coarse.createVecRight(),
+                    "ecoarse": self.A_coarse.createVecRight(),
+                }
+            )
+
+    def _build_full_system_coarse_matrix(self, A_free, level):
+        import scipy.sparse as sp
+
+        lo, hi = tuple(int(v) for v in A_free.getOwnershipRange())
+        if (lo, hi) != tuple(int(v) for v in level.owned_free_range):
+            raise ValueError(
+                f"manualmg coarse free ownership mismatch: matrix {(lo, hi)} vs level {level.owned_free_range}"
+            )
+        rows, cols, vals = A_free.getValuesCSR()
+        local_free = sp.csr_matrix((vals, cols, rows), shape=(hi - lo, A_free.getSize()[1]))
+        local_coo = local_free.tocoo()
+
+        total0, total1 = tuple(int(v) for v in level.owned_total_range)
+        total_size = int(level.total_size)
+        local_n_rows = int(total1 - total0)
+        free_to_total = np.asarray(level.freedofs, dtype=np.int64)
+
+        mapped_local_rows = free_to_total[lo:hi][np.asarray(local_coo.row, dtype=np.int64)] - total0
+        mapped_global_cols = free_to_total[np.asarray(local_coo.col, dtype=np.int64)]
+        local_full = sp.coo_matrix(
+            (
+                np.asarray(local_coo.data, dtype=np.float64),
+                (np.asarray(mapped_local_rows, dtype=np.int64), np.asarray(mapped_global_cols, dtype=np.int64)),
+            ),
+            shape=(local_n_rows, total_size),
+        ).tocsr()
+
+        free_mask = np.asarray(level.q_mask, dtype=bool).reshape(-1, order="F")
+        constrained_local = np.flatnonzero(~free_mask[total0:total1]).astype(np.int64)
+        if constrained_local.size:
+            identity_rows = sp.coo_matrix(
+                (
+                    np.ones(constrained_local.size, dtype=np.float64),
+                    (constrained_local, constrained_local + total0),
+                ),
+                shape=(local_n_rows, total_size),
+            ).tocsr()
+            local_full = local_full + identity_rows
+
+        A_full = local_csr_to_petsc_aij_matrix(
+            local_full,
+            global_shape=(total_size, total_size),
+            comm=A_free.getComm(),
+            block_size=int(level.dim),
+            local_col_size=int(total1 - total0),
+        )
+        return A_full
+
+    def _build_direct_elastic_coarse_matrix(self, *, comm, hierarchy):
+        coarse_level = hierarchy.coarse_level if hasattr(hierarchy, "coarse_level") else hierarchy.level_p1
+        materials = tuple(getattr(hierarchy, "materials", ()))
+        if not materials:
+            raise ValueError("manualmg direct elastic coarse operator requires hierarchy materials.")
+        owned_rows = assemble_owned_elastic_rows_for_comm(
+            coarse_level.coord,
+            coarse_level.elem,
+            coarse_level.q_mask,
+            coarse_level.material_identifier,
+            list(materials),
+            comm,
+            elem_type=str(coarse_level.elem_type),
+        )
+        if tuple(int(v) for v in owned_rows.owned_row_range) != tuple(int(v) for v in coarse_level.owned_total_range):
+            raise ValueError(
+                "manualmg direct elastic coarse ownership mismatch: "
+                f"{tuple(int(v) for v in owned_rows.owned_row_range)} vs {tuple(int(v) for v in coarse_level.owned_total_range)}"
+            )
+        return local_csr_to_petsc_aij_matrix(
+            owned_rows.local_matrix,
+            global_shape=(int(coarse_level.total_size), int(coarse_level.total_size)),
+            comm=comm,
+            block_size=int(coarse_level.dim),
+            local_col_size=int(coarse_level.owned_total_range[1] - coarse_level.owned_total_range[0]),
+        )
+
+    def _copy_coarse_free_to_full(self, dst_full, src_free, level) -> None:
+        total0, _ = tuple(int(v) for v in level.owned_total_range)
+        lo, hi = tuple(int(v) for v in level.owned_free_range)
+        dst_arr = dst_full.getArray(readonly=False)
+        dst_arr[...] = 0.0
+        if hi <= lo:
+            return
+        src_arr = np.asarray(src_free.getArray(readonly=True), dtype=np.float64)
+        owned_total = np.asarray(level.freedofs[lo:hi], dtype=np.int64) - total0
+        dst_arr[owned_total] = src_arr
+
+    def _copy_coarse_full_to_free(self, dst_free, src_full, level) -> None:
+        total0, _ = tuple(int(v) for v in level.owned_total_range)
+        lo, hi = tuple(int(v) for v in level.owned_free_range)
+        dst_arr = dst_free.getArray(readonly=False)
+        if hi <= lo:
+            dst_arr[...] = 0.0
+            return
+        src_arr = np.asarray(src_full.getArray(readonly=True), dtype=np.float64)
+        owned_total = np.asarray(level.freedofs[lo:hi], dtype=np.int64) - total0
+        dst_arr[...] = src_arr[owned_total]
+
+    def _build_smoother(self, A, *, prefix: str, hierarchy):
+        default_ksp_type, default_pc_type, default_max_it = self._default_smoother_options(
+            hierarchy,
+            comm_size=int(A.getComm().getSize()),
+        )
+        ksp = PETSc.KSP().create(comm=A.getComm())
+        ksp.setOptionsPrefix(prefix)
+        ksp.setOperators(A)
+        ksp.setType(str(self.solver.preconditioner_options.get("mg_levels_ksp_type", default_ksp_type)))
+        ksp.setInitialGuessNonzero(True)
+        ksp.setTolerances(
+            rtol=0.0,
+            atol=0.0,
+            max_it=int(self.solver.preconditioner_options.get("mg_levels_ksp_max_it", default_max_it)),
+        )
+        pc = ksp.getPC()
+        pc.setType(str(self.solver.preconditioner_options.get("mg_levels_pc_type", default_pc_type)))
+        ksp.setFromOptions()
+        ksp.setUp()
+        return ksp
+
+    def _configure_coarse_hypre_options(self, *, prefix: str) -> None:
+        opts = PETSc.Options()
+        allow_unsafe = self._allow_unsafe_hypre_vector_options()
+        defaults = {
+            "pc_hypre_boomeramg_max_iter": 1,
+            "pc_hypre_boomeramg_tol": 0.0,
+            "pc_hypre_boomeramg_coarsen_type": "HMIS",
+            "pc_hypre_boomeramg_interp_type": "ext+i",
+            "pc_hypre_boomeramg_P_max": 4,
+            "pc_hypre_boomeramg_strong_threshold": 0.5,
+            "pc_hypre_boomeramg_grid_sweeps_all": 1,
+            "pc_hypre_boomeramg_cycle_type": "V",
+            "pc_hypre_boomeramg_agg_nl": 0,
+        }
+        for key, value in self.solver._default_hypre_options().items():
+            if key in self._UNSAFE_HYPRE_VECTOR_KEYS and not allow_unsafe:
+                continue
+            defaults.setdefault(key, value)
+        for key, value in defaults.items():
+            if key not in self.solver.preconditioner_options:
+                self.solver._set_petsc_option(opts, f"{prefix}{key}", value)
+        for key, value in self.solver.preconditioner_options.items():
+            if not key.startswith("pc_hypre_"):
+                continue
+            if key in self._UNSAFE_HYPRE_VECTOR_KEYS and not allow_unsafe:
+                continue
+            self.solver._set_petsc_option(opts, f"{prefix}{key}", value)
+
+    def _build_coarse_ksp(self, A, *, prefix: str):
+        ksp = PETSc.KSP().create(comm=A.getComm())
+        ksp.setOptionsPrefix(prefix)
+        ksp.setOperators(A)
+        coarse_ksp_type = str(self.solver.preconditioner_options.get("mg_coarse_ksp_type", PETSc.KSP.Type.PREONLY))
+        coarse_pc_type = str(
+            self.solver.preconditioner_options.get("mg_coarse_pc_type", PETSc.PC.Type.HYPRE)
+        ).strip()
+        ksp.setType(coarse_ksp_type)
+        ksp.setInitialGuessNonzero(True)
+        coarse_rtol = float(self.solver.preconditioner_options.get("mg_coarse_rtol", 1.0e-10))
+        coarse_atol = float(self.solver.preconditioner_options.get("mg_coarse_atol", 0.0))
+        coarse_max_it = int(self.solver.preconditioner_options.get("mg_coarse_max_it", 200))
+        if (
+            coarse_ksp_type.strip().lower() == str(PETSc.KSP.Type.RICHARDSON).lower()
+            and coarse_pc_type.lower() == str(PETSc.PC.Type.HYPRE).lower()
+        ):
+            # PETSc's Richardson path for BoomerAMG reports the actual inner Hypre cycle count.
+            coarse_rtol = float(
+                self.solver.preconditioner_options.get(
+                    "pc_hypre_boomeramg_tol",
+                    self.solver.preconditioner_options.get("mg_coarse_rtol", 0.0),
+                )
+            )
+            coarse_max_it = int(self.solver.preconditioner_options.get("mg_coarse_max_it", 1))
+        ksp.setTolerances(rtol=coarse_rtol, atol=coarse_atol, max_it=coarse_max_it)
+        pc = ksp.getPC()
+        pc.setType(coarse_pc_type)
+        if coarse_pc_type.lower() == str(PETSc.PC.Type.HYPRE).lower():
+            pc.setHYPREType(str(self.solver.preconditioner_options.get("mg_coarse_pc_hypre_type", "boomeramg")))
+            self._configure_coarse_hypre_options(prefix=prefix)
+        ksp.setFromOptions()
+        ksp.setUp()
+        return ksp
+
+    def configure(self, *, matrix_ref, state: _PMGPetscHierarchyState, hierarchy) -> None:
+        self._destroy_dynamic()
+        self.state = state
+        self.hierarchy = hierarchy
+        levels = tuple(getattr(hierarchy, "levels", ()))
+        if len(levels) < 2:
+            raise ValueError("manualmg backend requires at least two levels.")
+        self.A_levels_free = [None] * len(levels)
+        self.A_levels_free[-1] = matrix_ref
+        for level_idx in range(len(levels) - 2, -1, -1):
+            galerkin = self.A_levels_free[level_idx + 1].PtAP(state.prolongations[level_idx])
+            galerkin.assemble()
+            self.A_levels_free[level_idx] = galerkin
+        self.A_fine = self.A_levels_free[-1]
+        self.A_mid = self.A_levels_free[-2] if len(self.A_levels_free) >= 2 else None
+        self.A_coarse_free = self.A_levels_free[0]
+        coarse_level = hierarchy.coarse_level if hasattr(hierarchy, "coarse_level") else levels[0]
+        self._coarse_use_full_system = self._use_full_system_hypre_coarse()
+        if self._coarse_use_full_system and self._use_direct_elastic_coarse_operator(hierarchy):
+            self.A_coarse = self._build_direct_elastic_coarse_matrix(comm=matrix_ref.getComm(), hierarchy=hierarchy)
+            self._coarse_operator_source = "direct_elastic_full_system"
+        elif self._coarse_use_full_system:
+            self.A_coarse = self._build_full_system_coarse_matrix(self.A_coarse_free, coarse_level)
+            self._coarse_operator_source = "galerkin_full_lift"
+        else:
+            self.A_coarse = self.A_coarse_free
+            self._coarse_operator_source = "galerkin_free"
+        coarse_basis = make_near_nullspace_elasticity(
+            coarse_level.coord,
+            q_mask=coarse_level.q_mask,
+            center_coordinates=True,
+            return_full=bool(self._coarse_use_full_system),
+        )
+        self.A_coarse, self._coarse_nsp, self._coarse_nsp_vecs = attach_near_nullspace(self.A_coarse, coarse_basis)
+        self.smoothers = [None] * len(levels)
+        for level_idx in range(1, len(levels)):
+            if level_idx == len(levels) - 1:
+                prefix = f"{self.solver._options_prefix}manualmg_fine_"
+            elif len(levels) == 3 and level_idx == 1:
+                prefix = f"{self.solver._options_prefix}manualmg_mid_"
+            else:
+                prefix = f"{self.solver._options_prefix}manualmg_level{level_idx}_"
+            self.smoothers[level_idx] = self._build_smoother(
+                self.A_levels_free[level_idx],
+                prefix=prefix,
+                hierarchy=hierarchy,
+            )
+        self.smoother_fine = self.smoothers[-1]
+        self.smoother_mid = self.smoothers[-2] if len(self.smoothers) >= 3 else None
+        self.coarse_ksp = self._build_coarse_ksp(self.A_coarse, prefix=f"{self.solver._options_prefix}manualmg_coarse_")
+        self._alloc_work_vectors()
+
+    def diagnostics(self, *, phase: str | None = None, apply_elapsed_s: float | None = None) -> dict[str, object]:
+        if self.state is None or self.coarse_ksp is None:
+            return {}
+        level_count = len(self.state.level_orders)
+        payload: dict[str, object] = {
+            "manualmg_levels": int(level_count),
+            "manualmg_level_orders": [int(v) for v in self.state.level_orders],
+            "manualmg_level_global_sizes": [int(v) for v in self.state.level_global_sizes],
+            "manualmg_level_owned_ranges": [[int(lo), int(hi)] for lo, hi in self.state.level_owned_ranges],
+            "manualmg_transfer_shapes": [
+                [int(v) for v in mat.getSize()] for mat in self.state.prolongations
+            ],
+            "manualmg_restriction_shapes": [
+                [int(v) for v in mat.getSize()] for mat in self.state.restrictions
+            ],
+            "manualmg_coarse_ksp_type": str(self.coarse_ksp.getType()),
+            "manualmg_coarse_pc_type": str(self.coarse_ksp.getPC().getType()),
+            "manualmg_coarse_iterations": int(self.coarse_ksp.getIterationNumber()),
+            "manualmg_coarse_converged_reason": int(self.coarse_ksp.getConvergedReason()),
+            "manualmg_coarse_ksp_rtol": float(self.coarse_ksp.getTolerances()[0]),
+            "manualmg_coarse_ksp_max_it": int(self.coarse_ksp.getTolerances()[3]),
+            "manualmg_coarse_full_system": bool(self._coarse_use_full_system),
+            "manualmg_coarse_operator_source": str(self._coarse_operator_source),
+            "manualmg_coarse_solve_global_size": int(self.A_coarse.getSize()[0]),
+            "manualmg_coarse_block_size": int(self.A_coarse.getBlockSize() or 1),
+        }
+        if self.A_coarse_free is not None and self.A_coarse_free is not self.A_coarse:
+            payload["manualmg_coarse_free_global_size"] = int(self.A_coarse_free.getSize()[0])
+        payload.update({str(k): v for k, v in self._stats_total.items()})
+        if self._stats_last:
+            payload.update({str(k): v for k, v in self._stats_last.items()})
+        if str(self.coarse_ksp.getPC().getType()).lower() == str(PETSc.PC.Type.HYPRE).lower():
+            payload["manualmg_coarse_hypre_type"] = str(self.coarse_ksp.getPC().getHYPREType())
+            coarse_prefix = f"{self.solver._options_prefix}manualmg_coarse_"
+            opts = PETSc.Options()
+            for key in (
+                "pc_hypre_boomeramg_max_iter",
+                "pc_hypre_boomeramg_tol",
+                "pc_hypre_boomeramg_numfunctions",
+                "pc_hypre_boomeramg_nodal_coarsen",
+                "pc_hypre_boomeramg_nodal_coarsen_diag",
+                "pc_hypre_boomeramg_vec_interp_variant",
+                "pc_hypre_boomeramg_vec_interp_qmax",
+                "pc_hypre_boomeramg_vec_interp_smooth",
+                "pc_hypre_boomeramg_coarsen_type",
+                "pc_hypre_boomeramg_interp_type",
+                "pc_hypre_boomeramg_P_max",
+                "pc_hypre_boomeramg_strong_threshold",
+                "pc_hypre_boomeramg_grid_sweeps_all",
+                "pc_hypre_boomeramg_cycle_type",
+                "pc_hypre_boomeramg_agg_nl",
+                "pc_hypre_boomeramg_relax_type_all",
+            ):
+                try:
+                    value = opts.getString(f"{coarse_prefix}{key}")
+                except KeyError:
+                    value = None
+                if value is not None:
+                    payload[f"manualmg_coarse_{key}"] = value
+            if str(self.coarse_ksp.getType()).strip().lower() == str(PETSc.KSP.Type.RICHARDSON).lower():
+                payload["manualmg_coarse_iteration_count_mode"] = "hypre_inner_v_cycles_via_pcapplyrichardson"
+            else:
+                payload["manualmg_coarse_iteration_count_mode"] = "coarse_ksp_iterations_only"
+        for level_idx in range(1, level_count):
+            smoother = self.smoothers[level_idx]
+            if smoother is None:
+                continue
+            payload[f"manualmg_level_{level_idx}_ksp_type"] = str(smoother.getType())
+            payload[f"manualmg_level_{level_idx}_pc_type"] = str(smoother.getPC().getType())
+            payload[f"manualmg_level_{level_idx}_iterations"] = int(smoother.getIterationNumber())
+            payload[f"manualmg_level_{level_idx}_converged_reason"] = int(smoother.getConvergedReason())
+        if self.smoother_mid is not None:
+            payload["manualmg_mid_ksp_type"] = str(self.smoother_mid.getType())
+            payload["manualmg_mid_pc_type"] = str(self.smoother_mid.getPC().getType())
+            payload["manualmg_mid_iterations"] = int(self.smoother_mid.getIterationNumber())
+        if self.smoother_fine is not None:
+            payload["manualmg_fine_ksp_type"] = str(self.smoother_fine.getType())
+            payload["manualmg_fine_pc_type"] = str(self.smoother_fine.getPC().getType())
+            payload["manualmg_fine_iterations"] = int(self.smoother_fine.getIterationNumber())
+        if phase is not None:
+            payload["manualmg_last_phase"] = str(phase)
+        if apply_elapsed_s is not None:
+            payload["manualmg_last_pc_apply_time_s"] = float(apply_elapsed_s)
+        return payload
+
+    def apply(self, pc, x, y) -> None:
+        if self.state is None or self.smoother_fine is None or self.coarse_ksp is None:
+            raise RuntimeError("manualmg backend has not been configured")
+        level_count = len(self.A_levels_free)
+        fine_idx = level_count - 1
+        restrictions = self.state.restrictions
+        prolongations = self.state.prolongations
+        if level_count < 2:
+            raise RuntimeError("manualmg backend requires at least two levels")
+
+        fine_pre_s = 0.0
+        fine_post_s = 0.0
+        mid_pre_s = 0.0
+        mid_post_s = 0.0
+        fine_resid_s = 0.0
+        mid_resid_s = 0.0
+        restrict_f2m_s = 0.0
+        restrict_m2c_s = 0.0
+        prolong_c2m_s = 0.0
+        prolong_m2f_s = 0.0
+        vec_sum_s = 0.0
+
+        for work in self._level_work:
+            work["e"].set(0.0)
+        self._copy_vec(self._level_work[fine_idx]["rhs"], x)
+
+        for level_idx in range(fine_idx, 0, -1):
+            work = self._level_work[level_idx]
+            rhs = work["rhs"]
+            e = work["e"]
+            residual = work["residual"]
+            A_e = work["Ae"]
+            smoother = self.smoothers[level_idx]
+            t = perf_counter()
+            smoother.solve(rhs, e)
+            pre_s = perf_counter() - t
+            if level_idx == fine_idx:
+                fine_pre_s += pre_s
+            else:
+                mid_pre_s += pre_s
+
+            t = perf_counter()
+            self.A_levels_free[level_idx].mult(e, A_e)
+            self._difference_vec(residual, rhs, A_e)
+            resid_s = perf_counter() - t
+            if level_idx == fine_idx:
+                fine_resid_s += resid_s
+            else:
+                mid_resid_s += resid_s
+
+            t = perf_counter()
+            restrictions[level_idx - 1].mult(residual, self._level_work[level_idx - 1]["rhs"])
+            restrict_s = perf_counter() - t
+            if level_idx == fine_idx:
+                restrict_f2m_s += restrict_s
+            else:
+                restrict_m2c_s += restrict_s
+
+        rhs_coarse_free = self._coarse_work["rhs_coarse_free"]
+        ecoarse_free = self._coarse_work["ecoarse_free"]
+        rhs_coarse = self._coarse_work.get("rhs_coarse", rhs_coarse_free)
+        ecoarse = self._coarse_work.get("ecoarse", ecoarse_free)
+        if self._coarse_use_full_system:
+            self._copy_coarse_free_to_full(rhs_coarse, rhs_coarse_free, self.hierarchy.coarse_level)
+        else:
+            self._copy_vec(rhs_coarse, rhs_coarse_free)
+        ecoarse.set(0.0)
+        t = perf_counter()
+        self.coarse_ksp.solve(rhs_coarse, ecoarse)
+        coarse_s = perf_counter() - t
+        if self._coarse_use_full_system:
+            self._copy_coarse_full_to_free(ecoarse_free, ecoarse, self.hierarchy.coarse_level)
+        else:
+            self._copy_vec(ecoarse_free, ecoarse)
+
+        for level_idx in range(1, level_count):
+            work = self._level_work[level_idx]
+            corr = work["corr"]
+            t = perf_counter()
+            prolongations[level_idx - 1].mult(self._level_work[level_idx - 1]["e"], corr)
+            prolong_s = perf_counter() - t
+            if level_idx == fine_idx:
+                prolong_m2f_s += prolong_s
+            else:
+                prolong_c2m_s += prolong_s
+            work["e"].axpy(1.0, corr)
+            t = perf_counter()
+            self.smoothers[level_idx].solve(work["rhs"], work["e"])
+            post_s = perf_counter() - t
+            if level_idx == fine_idx:
+                fine_post_s += post_s
+            else:
+                mid_post_s += post_s
+
+        t = perf_counter()
+        self._copy_vec(y, self._level_work[fine_idx]["e"])
+        vec_sum_s = perf_counter() - t
+
+        self._stats_total["manualmg_apply_count"] = int(self._stats_total["manualmg_apply_count"]) + 1
+        self._stats_total["manualmg_fine_pre_smoother_time_total_s"] = float(self._stats_total["manualmg_fine_pre_smoother_time_total_s"]) + float(fine_pre_s)
+        self._stats_total["manualmg_fine_post_smoother_time_total_s"] = float(self._stats_total["manualmg_fine_post_smoother_time_total_s"]) + float(fine_post_s)
+        self._stats_total["manualmg_mid_pre_smoother_time_total_s"] = float(self._stats_total["manualmg_mid_pre_smoother_time_total_s"]) + float(mid_pre_s)
+        self._stats_total["manualmg_mid_post_smoother_time_total_s"] = float(self._stats_total["manualmg_mid_post_smoother_time_total_s"]) + float(mid_post_s)
+        self._stats_total["manualmg_restrict_fine_to_mid_time_total_s"] = float(self._stats_total["manualmg_restrict_fine_to_mid_time_total_s"]) + float(restrict_f2m_s)
+        self._stats_total["manualmg_restrict_mid_to_coarse_time_total_s"] = float(self._stats_total["manualmg_restrict_mid_to_coarse_time_total_s"]) + float(restrict_m2c_s)
+        self._stats_total["manualmg_prolong_coarse_to_mid_time_total_s"] = float(self._stats_total["manualmg_prolong_coarse_to_mid_time_total_s"]) + float(prolong_c2m_s)
+        self._stats_total["manualmg_prolong_mid_to_fine_time_total_s"] = float(self._stats_total["manualmg_prolong_mid_to_fine_time_total_s"]) + float(prolong_m2f_s)
+        self._stats_total["manualmg_fine_residual_time_total_s"] = float(self._stats_total["manualmg_fine_residual_time_total_s"]) + float(fine_resid_s)
+        self._stats_total["manualmg_mid_residual_time_total_s"] = float(self._stats_total["manualmg_mid_residual_time_total_s"]) + float(mid_resid_s)
+        self._stats_total["manualmg_vector_sum_time_total_s"] = float(self._stats_total["manualmg_vector_sum_time_total_s"]) + float(vec_sum_s)
+        self._stats_total["manualmg_coarse_hypre_time_total_s"] = float(self._stats_total["manualmg_coarse_hypre_time_total_s"]) + float(coarse_s)
+        self._stats_total["manualmg_fine_smoother_iterations_total"] = int(
+            self._stats_total["manualmg_fine_smoother_iterations_total"]
+        ) + 2 * int(self.smoothers[fine_idx].getIterationNumber())
+        intermediate_iterations = 0
+        for level_idx in range(1, fine_idx):
+            intermediate_iterations += 2 * int(self.smoothers[level_idx].getIterationNumber())
+        self._stats_total["manualmg_mid_smoother_iterations_total"] = int(
+            self._stats_total["manualmg_mid_smoother_iterations_total"]
+        ) + intermediate_iterations
+        coarse_iters = int(self.coarse_ksp.getIterationNumber())
+        self._stats_total["manualmg_coarse_ksp_iterations_total"] = int(self._stats_total["manualmg_coarse_ksp_iterations_total"]) + coarse_iters
+        if str(self.coarse_ksp.getType()).strip().lower() == str(PETSc.KSP.Type.RICHARDSON).lower():
+            self._stats_total["manualmg_coarse_hypre_inner_iterations_total"] = int(
+                self._stats_total.get("manualmg_coarse_hypre_inner_iterations_total", 0)
+            ) + coarse_iters
+        self._stats_total["manualmg_coarse_solve_count"] = int(self._stats_total["manualmg_coarse_solve_count"]) + 1
+        self._stats_last = {
+            "manualmg_last_fine_pre_smoother_time_s": float(fine_pre_s),
+            "manualmg_last_fine_post_smoother_time_s": float(fine_post_s),
+            "manualmg_last_mid_pre_smoother_time_s": float(mid_pre_s),
+            "manualmg_last_mid_post_smoother_time_s": float(mid_post_s),
+            "manualmg_last_restrict_fine_to_mid_time_s": float(restrict_f2m_s),
+            "manualmg_last_restrict_mid_to_coarse_time_s": float(restrict_m2c_s),
+            "manualmg_last_prolong_coarse_to_mid_time_s": float(prolong_c2m_s),
+            "manualmg_last_prolong_mid_to_fine_time_s": float(prolong_m2f_s),
+            "manualmg_last_fine_residual_time_s": float(fine_resid_s),
+            "manualmg_last_mid_residual_time_s": float(mid_resid_s),
+            "manualmg_last_vector_sum_time_s": float(vec_sum_s),
+            "manualmg_last_coarse_hypre_time_s": float(coarse_s),
+            "manualmg_last_coarse_iterations": coarse_iters,
         }
 
 
@@ -170,6 +880,7 @@ class DirectSolver:
         self.instance_id = self.iteration_collector.register_instance()
         self._ksp = None
         self._A_petsc = None
+        self._owns_A_petsc = False
         self.factor_solver_type = factor_solver_type
 
     def setup_preconditioner(self, A, *, preconditioning_matrix=None, **_kwargs):
@@ -185,9 +896,12 @@ class DirectSolver:
             self._ksp.destroy()
             self._ksp = None
         if self._A_petsc is not None:
-            release_petsc_aij_matrix(self._A_petsc)
-            self._A_petsc.destroy()
+            if self._owns_A_petsc:
+                release_petsc_aij_matrix(self._A_petsc)
+                self._A_petsc.destroy()
             self._A_petsc = None
+            self._owns_A_petsc = False
+        self._owns_A_petsc = not (PETSc is not None and isinstance(A, PETSc.Mat))
         self._A_petsc = to_petsc_aij_matrix(A, comm=A.getComm() if hasattr(A, "getComm") else PETSc.COMM_SELF)
         self._ksp = PETSc.KSP().create(comm=self._A_petsc.getComm())
         self._ksp.setOperators(self._A_petsc)
@@ -270,9 +984,11 @@ class DirectSolver:
             self._ksp.destroy()
             self._ksp = None
         if self._A_petsc is not None:
-            release_petsc_aij_matrix(self._A_petsc)
-            self._A_petsc.destroy()
+            if self._owns_A_petsc:
+                release_petsc_aij_matrix(self._A_petsc)
+                self._A_petsc.destroy()
             self._A_petsc = None
+            self._owns_A_petsc = False
 
 
 class ScipyDirectSolver:
@@ -534,7 +1250,6 @@ class PetscKSPFGMRESSolver:
         self.q_mask = np.array([], dtype=bool) if q_mask is None else np.asarray(q_mask, dtype=bool)
         self.coord = None if coord is None else np.asarray(coord, dtype=np.float64)
         self.preconditioner_options = dict(preconditioner_options or {})
-        self._full_system_preconditioner = bool(self.preconditioner_options.get("full_system_preconditioner", True))
         self.deflation_basis: np.ndarray = np.empty((0, 0), dtype=np.float64)
         self._A_petsc = None
         self._P_petsc = None
@@ -546,6 +1261,7 @@ class PetscKSPFGMRESSolver:
         self._using_full_system = False
         self._active_free_indices = np.array([], dtype=np.int64)
         self._ownership_range = None
+        self._pmg_state: _PMGPetscHierarchyState | None = None
         self._default_free_indices = (
             np.array([], dtype=np.int64) if self.q_mask.size == 0 else q_to_free_indices(self.q_mask)
         )
@@ -553,11 +1269,25 @@ class PetscKSPFGMRESSolver:
         self._diagnostics_enabled = False
         self._last_solve_info: dict[str, object] = {}
         self._last_orthogonalization_info: dict[str, object] = {}
+        self._pmg_last_setup_info: dict[str, object] = {}
+        self._pmg_last_apply_info: dict[str, object] = {}
+        self._pmg_microbenchmark_info: dict[str, object] = {}
+        self._manualmg_context: _ManualPMGShellPC | None = None
+        self._manualmg_last_setup_info: dict[str, object] = {}
+        self._manualmg_last_apply_info: dict[str, object] = {}
         self._pc_backend = self._normalize_pc_backend()
+        if self._pc_backend in {"pmg", "pmg_shell"}:
+            self.preconditioner_options.setdefault("full_system_preconditioner", False)
+        if self._pc_backend == "pmg":
+            self.preconditioner_options.setdefault("pc_mg_galerkin", "both")
+        self._full_system_preconditioner = bool(
+            self.preconditioner_options.get("full_system_preconditioner", self._pc_backend not in {"pmg", "pmg_shell"})
+        )
         self._preconditioner_matrix_source = self._normalize_preconditioner_matrix_source()
         self._preconditioner_matrix_policy = self._normalize_preconditioner_matrix_policy()
         self._preconditioner_rebuild_policy = self._normalize_preconditioner_rebuild_policy()
         self._preconditioner_rebuild_interval = self._normalize_preconditioner_rebuild_interval()
+        self._validate_pmg_configuration()
         self._preconditioner_rebuild_requested = True
         self._preconditioner_age = 0
         self._preconditioner_newton_calls_since_rebuild = 0
@@ -576,7 +1306,7 @@ class PetscKSPFGMRESSolver:
         raw = self.preconditioner_options.get("pc_backend")
         if raw is not None:
             backend = str(raw).strip().lower()
-            if backend in {"hypre", "gamg", "bddc", "jacobi", "none"}:
+            if backend in {"hypre", "gamg", "bddc", "pmg", "pmg_shell", "jacobi", "none"}:
                 return backend
         if self.pc_type == "HYPRE":
             return "hypre"
@@ -613,17 +1343,79 @@ class PetscKSPFGMRESSolver:
             interval = 1
         return max(1, interval)
 
+    def _validate_pmg_configuration(self) -> None:
+        if self._pc_backend not in {"pmg", "pmg_shell"}:
+            return
+        if self.q_mask.size and int(self.q_mask.shape[0]) != 3:
+            raise ValueError(f"{self._pc_backend} backend currently supports only 3D problems.")
+        if self._preconditioner_matrix_source != "tangent":
+            raise ValueError(f"{self._pc_backend} backend currently supports only preconditioner_matrix_source='tangent'.")
+        if self._preconditioner_matrix_policy != "current":
+            raise ValueError(f"{self._pc_backend} backend currently supports only preconditioner_matrix_policy='current'.")
+        if self._preconditioner_rebuild_policy != "every_newton":
+            raise ValueError(f"{self._pc_backend} backend currently supports only preconditioner_rebuild_policy='every_newton'.")
+        if self._full_system_preconditioner:
+            raise ValueError(f"{self._pc_backend} backend requires full_system_preconditioner=false.")
+        levels = self._pmg_levels()
+        orders = [int(getattr(level, "order", -1)) for level in levels]
+        if any(int(getattr(level, "dim", 0)) != 3 for level in levels):
+            raise ValueError("pmg hierarchy levels must be 3D.")
+        if any(order < 1 for order in orders):
+            raise ValueError(f"pmg hierarchy contains an invalid order sequence {orders!r}.")
+        if any(orders[idx] > orders[idx + 1] for idx in range(len(orders) - 1)):
+            raise ValueError(f"pmg hierarchy orders must be nondecreasing, got {orders!r}.")
+        if orders[0] != 1 or orders[-1] not in {2, 4}:
+            raise ValueError(
+                f"{self._pc_backend} backend currently supports only 3D hierarchies with coarse P1 and fine P2/P4, got {orders!r}."
+            )
+
     def _record_preconditioner_setup_time(self, elapsed: float) -> None:
         self.iteration_collector.store_preconditioner_time(self.instance_id, elapsed)
+        self._preconditioner_diagnostics.preconditioner_setup_time_last = float(elapsed)
         self._preconditioner_diagnostics.preconditioner_setup_time_total += float(elapsed)
+        if self._pc_backend == "pmg" and self._pmg_state is not None:
+            self._pmg_last_setup_info = {
+                "pmg_setup_time_s": float(elapsed),
+                **self._pmg_collect_pc_diagnostics(phase="setup"),
+            }
+        if self._pc_backend == "pmg_shell" and self._manualmg_context is not None:
+            self._manualmg_last_setup_info = {
+                "manualmg_setup_time_s": float(elapsed),
+                **self._manualmg_context.diagnostics(phase="setup"),
+            }
 
     def _record_preconditioner_apply_time(self, elapsed: float) -> None:
+        self._preconditioner_diagnostics.preconditioner_apply_time_last = float(elapsed)
         self._preconditioner_diagnostics.preconditioner_apply_time_total += float(elapsed)
+        if self._pc_backend == "pmg" and self._pmg_state is not None:
+            self._pmg_last_apply_info = self._pmg_collect_pc_diagnostics(
+                apply_elapsed_s=float(elapsed),
+                phase="solve",
+            )
+        if self._pc_backend == "pmg_shell" and self._manualmg_context is not None:
+            self._manualmg_last_apply_info = self._manualmg_context.diagnostics(
+                apply_elapsed_s=float(elapsed),
+                phase="solve",
+            )
 
     def _destroy_owned_petsc_matrix(self, A, owns: bool) -> None:
         if A is not None and owns:
             release_petsc_aij_matrix(A)
             A.destroy()
+
+    def _materialize_petsc_matrix(self, matrix, *, comm, block_size=None, ownership_range=None):
+        if PETSc is not None and isinstance(matrix, PETSc.Mat):
+            if self._pc_backend in {"pmg", "pmg_shell"}:
+                mat = matrix.copy()
+                return mat, True
+            return matrix, False
+        mat = to_petsc_aij_matrix(
+            matrix,
+            comm=matrix.getComm() if hasattr(matrix, "getComm") else comm,
+            block_size=block_size,
+            ownership_range=ownership_range,
+        )
+        return mat, True
 
     def _matrix_signature(self, A) -> tuple[tuple[int, int], int, int, str] | None:
         if PETSc is None or A is None:
@@ -693,7 +1485,7 @@ class PetscKSPFGMRESSolver:
         return False, "lagged_reuse"
 
     def preconditioner_requires_explicit_matrix(self) -> bool:
-        return self._pc_backend == "bddc"
+        return self._pc_backend in {"bddc"}
 
     def needs_preconditioning_matrix_refresh(self) -> bool:
         return False
@@ -706,9 +1498,21 @@ class PetscKSPFGMRESSolver:
         if self._preconditioner_rebuild_policy == "accepted_or_rejected_step":
             self._preconditioner_rebuild_requested = True
 
+    def supports_dynamic_deflation_basis(self) -> bool:
+        return self._pc_backend != "pmg"
+
+    def supports_a_orthogonalization(self) -> bool:
+        return self._pc_backend != "pmg"
+
     def get_preconditioner_diagnostics(self) -> dict[str, object]:
         diagnostics = self._preconditioner_diagnostics.as_dict()
         diagnostics["preconditioner_age_current"] = int(self._preconditioner_age)
+        if self._pc_backend == "pmg":
+            diagnostics.update(self._pmg_diagnostics_snapshot())
+        if self._pc_backend == "pmg_shell" and self._manualmg_context is not None:
+            diagnostics.update(self._manualmg_context.diagnostics())
+            diagnostics.update({str(k): v for k, v in self._manualmg_last_setup_info.items()})
+            diagnostics.update({str(k): v for k, v in self._manualmg_last_apply_info.items()})
         return diagnostics
 
     def get_preconditioner_matrix_source(self) -> str:
@@ -727,6 +1531,12 @@ class PetscKSPFGMRESSolver:
         if self._ksp is not None:
             self._ksp.destroy()
             self._ksp = None
+        if self._manualmg_context is not None:
+            self._manualmg_context.destroy()
+            self._manualmg_context = None
+        if self._pmg_state is not None:
+            self._pmg_state.destroy()
+            self._pmg_state = None
         self._destroy_owned_petsc_matrix(self._P_petsc, self._owns_P_petsc and self._P_petsc is not self._A_petsc)
         self._destroy_owned_petsc_matrix(self._A_petsc, self._owns_A_petsc)
         self._A_petsc = None
@@ -738,6 +1548,39 @@ class PetscKSPFGMRESSolver:
         self._ownership_range = None
         self._last_solve_info = {}
         self._last_orthogonalization_info = {}
+        self._pmg_last_setup_info = {}
+        self._pmg_last_apply_info = {}
+        self._pmg_microbenchmark_info = {}
+        self._manualmg_last_setup_info = {}
+        self._manualmg_last_apply_info = {}
+
+    def _reset_runtime_petsc_objects_keep_pmg_state(self) -> None:
+        if self._ksp is not None:
+            self._ksp.destroy()
+            self._ksp = None
+        inner_ksp = getattr(self, "_inner_ksp", None)
+        if inner_ksp is not None:
+            inner_ksp.destroy()
+            self._inner_ksp = None
+        if self._manualmg_context is not None:
+            self._manualmg_context.destroy()
+            self._manualmg_context = None
+        self._destroy_owned_petsc_matrix(self._P_petsc, self._owns_P_petsc and self._P_petsc is not self._A_petsc)
+        self._destroy_owned_petsc_matrix(self._A_petsc, self._owns_A_petsc)
+        self._A_petsc = None
+        self._P_petsc = None
+        self._owns_A_petsc = False
+        self._owns_P_petsc = False
+        self._near_nullspace = None
+        self._near_nullspace_vecs = []
+        self._ownership_range = None
+        self._last_solve_info = {}
+        self._last_orthogonalization_info = {}
+        self._pmg_last_setup_info = {}
+        self._pmg_last_apply_info = {}
+        self._pmg_microbenchmark_info = {}
+        self._manualmg_last_setup_info = {}
+        self._manualmg_last_apply_info = {}
 
     def _active_free(self, free_indices: np.ndarray | None = None) -> np.ndarray:
         if free_indices is not None:
@@ -812,6 +1655,8 @@ class PetscKSPFGMRESSolver:
             "print_level",
             "use_as_preconditioner",
             "factor_solver_type",
+            "allow_unsafe_hypre_vector_options",
+            "coarse_hypre_full_system",
             "full_system_preconditioner",
             "null_space",
             "use_coordinates",
@@ -822,6 +1667,7 @@ class PetscKSPFGMRESSolver:
             "recycle_preconditioner",
             "compiled_outer",
             "max_deflation_basis_vectors",
+            "pmg_hierarchy",
         }
 
         for key, value in defaults.items():
@@ -833,6 +1679,328 @@ class PetscKSPFGMRESSolver:
                 continue
             if key.startswith(("pc_", "mg_", "ksp_", "mat_")):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
+
+    def _pmg_hierarchy_spec(self):
+        hierarchy = self.preconditioner_options.get("pmg_hierarchy")
+        if hierarchy is None:
+            raise ValueError(f"{self._pc_backend} backend requires a 'pmg_hierarchy' entry in preconditioner_options")
+        return hierarchy
+
+    def _pmg_prolongations(self):
+        hierarchy = self._pmg_hierarchy_spec()
+        prolongations = getattr(hierarchy, "prolongations", None)
+        if prolongations is None:
+            prolongations = (
+                getattr(hierarchy, "prolongation_p21", None),
+                getattr(hierarchy, "prolongation_p42", None),
+            )
+        prolongations = tuple(prolongations)
+        if len(prolongations) < 1 or any(transfer is None for transfer in prolongations):
+            raise ValueError("pmg hierarchy must provide at least one adjacent-level prolongation.")
+        return tuple(prolongations)
+
+    def _pmg_pc(self):
+        if self._pc_backend != "pmg":
+            return None
+        if getattr(self, "_inner_ksp", None) is not None:
+            return self._inner_ksp.getPC()
+        if self._ksp is not None:
+            return self._ksp.getPC()
+        return None
+
+    def _pmg_redundant_number(self, *, comm_size: int) -> int:
+        raw = self.preconditioner_options.get("mg_coarse_pc_redundant_number")
+        if raw is None:
+            return int(comm_size)
+        try:
+            value = int(raw)
+        except Exception:
+            value = int(comm_size)
+        return max(1, min(int(comm_size), value))
+
+    def _pmg_coarse_subcomm_size(self, coarse_ksp) -> int:
+        comm_size = int(coarse_ksp.getComm().getSize())
+        coarse_pc_type = str(coarse_ksp.getPC().getType()).lower()
+        if coarse_pc_type == str(PETSc.PC.Type.REDUNDANT).lower():
+            nsub = self._pmg_redundant_number(comm_size=comm_size)
+            return max(1, comm_size // max(1, nsub))
+        if coarse_pc_type == str(PETSc.PC.Type.TELESCOPE).lower():
+            raw = self.preconditioner_options.get("mg_coarse_pc_telescope_reduction_factor")
+            try:
+                factor = int(raw)
+            except Exception:
+                factor = int(comm_size)
+            factor = max(1, min(int(comm_size), factor))
+            return max(1, comm_size // factor)
+        return int(comm_size)
+
+    def _pmg_levels(self):
+        hierarchy = self._pmg_hierarchy_spec()
+        levels = getattr(hierarchy, "levels", None)
+        if levels is None:
+            levels = (
+                getattr(hierarchy, "level_p1", None),
+                getattr(hierarchy, "level_p2", None),
+                getattr(hierarchy, "level_p4", None),
+            )
+        levels = tuple(levels)
+        if len(levels) < 2 or any(level is None for level in levels):
+            raise ValueError("pmg hierarchy must provide at least two levels.")
+        return tuple(levels)
+
+    def _validate_pmg_layout(self, *, matrix_ref, state: _PMGPetscHierarchyState) -> None:
+        levels = self._pmg_levels()
+        fine_level = levels[-1]
+        if tuple(int(v) for v in matrix_ref.getSize()) != (int(fine_level.free_size), int(fine_level.free_size)):
+            raise ValueError(
+                "pmg fine operator size does not match the fine free-space hierarchy: "
+                f"{tuple(int(v) for v in matrix_ref.getSize())} vs {(int(fine_level.free_size), int(fine_level.free_size))}"
+            )
+        if tuple(int(v) for v in matrix_ref.getOwnershipRange()) != tuple(int(v) for v in fine_level.owned_row_range):
+            raise ValueError(
+                "pmg fine operator ownership does not match the fine free-space hierarchy: "
+                f"{tuple(int(v) for v in matrix_ref.getOwnershipRange())} vs {tuple(int(v) for v in fine_level.owned_row_range)}"
+            )
+
+        for transfer_idx, mat in enumerate(state.prolongations):
+            source_level = levels[transfer_idx]
+            target_level = levels[transfer_idx + 1]
+            name = f"P{int(target_level.order)}{int(source_level.order)}"
+            if tuple(int(v) for v in mat.getSize()) != (int(target_level.free_size), int(source_level.free_size)):
+                raise ValueError(
+                    f"pmg {name} size mismatch: "
+                    f"{tuple(int(v) for v in mat.getSize())} vs {(int(target_level.free_size), int(source_level.free_size))}"
+                )
+            if tuple(int(v) for v in mat.getOwnershipRange()) != tuple(int(v) for v in target_level.owned_row_range):
+                raise ValueError(
+                    f"pmg {name} row ownership mismatch: "
+                    f"{tuple(int(v) for v in mat.getOwnershipRange())} vs {tuple(int(v) for v in target_level.owned_row_range)}"
+                )
+            local_rows, local_cols = (int(v) for v in mat.getLocalSize())
+            expected_rows = int(target_level.hi - target_level.lo)
+            expected_cols = int(source_level.hi - source_level.lo)
+            if local_rows != expected_rows:
+                raise ValueError(
+                    f"pmg {name} local row count mismatch: {local_rows} vs expected {expected_rows}"
+                )
+                if local_cols != expected_cols:
+                    raise ValueError(
+                        f"pmg {name} local column count mismatch: {local_cols} vs expected {expected_cols}"
+                    )
+        for transfer_idx, mat in enumerate(state.restrictions):
+            source_level = levels[transfer_idx + 1]
+            target_level = levels[transfer_idx]
+            name = f"R{int(target_level.order)}{int(source_level.order)}"
+            if tuple(int(v) for v in mat.getSize()) != (int(target_level.free_size), int(source_level.free_size)):
+                raise ValueError(
+                    f"pmg {name} size mismatch: "
+                    f"{tuple(int(v) for v in mat.getSize())} vs {(int(target_level.free_size), int(source_level.free_size))}"
+                )
+            if tuple(int(v) for v in mat.getOwnershipRange()) != tuple(int(v) for v in target_level.owned_row_range):
+                raise ValueError(
+                    f"pmg {name} row ownership mismatch: "
+                    f"{tuple(int(v) for v in mat.getOwnershipRange())} vs {tuple(int(v) for v in target_level.owned_row_range)}"
+                )
+            local_rows, local_cols = (int(v) for v in mat.getLocalSize())
+            expected_rows = int(target_level.hi - target_level.lo)
+            expected_cols = int(source_level.hi - source_level.lo)
+            if local_rows != expected_rows:
+                raise ValueError(
+                    f"pmg {name} local row count mismatch: {local_rows} vs expected {expected_rows}"
+                )
+            if local_cols != expected_cols:
+                raise ValueError(
+                    f"pmg {name} local column count mismatch: {local_cols} vs expected {expected_cols}"
+                )
+
+    def _pmg_collect_pc_diagnostics(self, *, apply_elapsed_s: float | None = None, phase: str | None = None) -> dict[str, object]:
+        if self._pc_backend != "pmg" or self._pmg_state is None:
+            return {}
+        pc = self._pmg_pc()
+        if pc is None:
+            return {}
+        coarse = pc.getMGCoarseSolve()
+        payload: dict[str, object] = {
+            "pmg_levels": int(pc.getMGLevels()),
+            "pmg_level_orders": [int(v) for v in self._pmg_state.level_orders],
+            "pmg_level_global_sizes": [int(v) for v in self._pmg_state.level_global_sizes],
+            "pmg_level_owned_ranges": [[int(lo), int(hi)] for lo, hi in self._pmg_state.level_owned_ranges],
+            "pmg_transfer_shapes": [[int(v) for v in mat.getSize()] for mat in self._pmg_state.prolongations],
+            "pmg_transfer_owned_ranges": [[int(v) for v in mat.getOwnershipRange()] for mat in self._pmg_state.prolongations],
+            "pmg_restriction_shapes": [[int(v) for v in mat.getSize()] for mat in self._pmg_state.restrictions],
+            "pmg_restriction_owned_ranges": [[int(v) for v in mat.getOwnershipRange()] for mat in self._pmg_state.restrictions],
+            "pmg_coarse_ksp_type": str(coarse.getType()),
+            "pmg_coarse_pc_type": str(coarse.getPC().getType()),
+            "pmg_coarse_iterations": int(coarse.getIterationNumber()),
+            "pmg_coarse_converged_reason": int(coarse.getConvergedReason()),
+            "pmg_coarse_subcomm_size": int(self._pmg_coarse_subcomm_size(coarse)),
+        }
+        for level_idx in range(1, len(self._pmg_state.level_orders)):
+            smoother = pc.getMGSmoother(level_idx)
+            payload[f"pmg_level_{level_idx}_ksp_type"] = str(smoother.getType())
+            payload[f"pmg_level_{level_idx}_pc_type"] = str(smoother.getPC().getType())
+            payload[f"pmg_level_{level_idx}_iterations"] = int(smoother.getIterationNumber())
+            payload[f"pmg_level_{level_idx}_converged_reason"] = int(smoother.getConvergedReason())
+            payload[f"pmg_level_{level_idx}_owned_range"] = [int(v) for v in self._pmg_state.level_owned_ranges[level_idx]]
+        if apply_elapsed_s is not None:
+            payload["pmg_last_pc_apply_time_s"] = float(apply_elapsed_s)
+        if phase is not None:
+            payload["pmg_last_phase"] = str(phase)
+        return payload
+
+    def _pmg_diagnostics_snapshot(self) -> dict[str, object]:
+        diagnostics: dict[str, object] = {}
+        if self._pmg_state is not None:
+            diagnostics.update(self._pmg_collect_pc_diagnostics())
+        if self._pmg_last_setup_info:
+            diagnostics.update({str(k): v for k, v in self._pmg_last_setup_info.items()})
+        if self._pmg_last_apply_info:
+            diagnostics.update({str(k): v for k, v in self._pmg_last_apply_info.items()})
+        if self._pmg_microbenchmark_info:
+            diagnostics["pmg_microbenchmark"] = dict(self._pmg_microbenchmark_info)
+        return diagnostics
+
+    def _configure_manualmg_pc(self, pc, *, matrix_ref) -> None:
+        if matrix_ref is None:
+            raise ValueError("pmg_shell backend requires a fine-level preconditioning matrix")
+        state = self._ensure_pmg_state()
+        self._validate_pmg_layout(matrix_ref=matrix_ref, state=state)
+        if self._manualmg_context is None:
+            self._manualmg_context = _ManualPMGShellPC(self)
+        self._manualmg_context.configure(matrix_ref=matrix_ref, state=state, hierarchy=self._pmg_hierarchy_spec())
+        pc.setType(PETSc.PC.Type.PYTHON)
+        pc.setPythonContext(self._manualmg_context)
+        self._manualmg_last_setup_info = {
+            "manualmg_setup_time_s": float(self._preconditioner_diagnostics.preconditioner_setup_time_last),
+            **self._manualmg_context.diagnostics(phase="setup"),
+        }
+
+    def run_pmg_microbenchmark(self, rhs: np.ndarray | None = None) -> dict[str, object]:
+        if self._pc_backend != "pmg":
+            return {}
+        if self._A_petsc is None:
+            raise RuntimeError("pmg microbenchmark requires setup_preconditioner() first.")
+        pc = self._pmg_pc()
+        if pc is None:
+            raise RuntimeError("pmg microbenchmark requires a configured PETSc MG preconditioner.")
+
+        x = self._A_petsc.createVecRight()
+        y = self._A_petsc.createVecRight()
+        if rhs is None:
+            x.set(1.0)
+        else:
+            rhs_arr = np.asarray(rhs, dtype=np.float64).reshape(-1)
+            x_arr = x.getArray(readonly=False)
+            if rhs_arr.size == x_arr.size:
+                x_arr[...] = rhs_arr
+            elif self._ownership_range is not None and rhs_arr.size >= int(self._ownership_range[1]):
+                r0, r1 = self._ownership_range
+                x_arr[...] = rhs_arr[r0:r1]
+            else:
+                raise ValueError(
+                    f"pmg microbenchmark rhs has size {rhs_arr.size}, expected local {x_arr.size} or global >= {self._ownership_range[1] if self._ownership_range is not None else x_arr.size}"
+                )
+        y.set(0.0)
+        t0 = perf_counter()
+        pc.apply(x, y)
+        elapsed = perf_counter() - t0
+        y_local = np.asarray(y.getArray(readonly=True), dtype=np.float64)
+        result = {
+            "status": "completed",
+            "phase": "microbenchmark",
+            "rhs_norm_local": float(np.linalg.norm(np.asarray(x.getArray(readonly=True), dtype=np.float64))),
+            "solution_norm_local": float(np.linalg.norm(y_local)),
+            "pc_apply_elapsed_s": float(elapsed),
+            **self._pmg_collect_pc_diagnostics(apply_elapsed_s=elapsed, phase="microbenchmark"),
+        }
+        self._pmg_microbenchmark_info = dict(result)
+        return result
+
+    def _can_reuse_pmg_ksp(self, A_petsc) -> bool:
+        if self._pc_backend != "pmg":
+            return False
+        if self._ksp is None:
+            return False
+        if self._ksp.getType() != PETSc.KSP.Type.FGMRES:
+            return False
+        return self._matrix_compatible(A_petsc, self._A_petsc)
+
+    def _ensure_pmg_state(self) -> _PMGPetscHierarchyState:
+        if self._pmg_state is not None:
+            return self._pmg_state
+
+        hierarchy = self._pmg_hierarchy_spec()
+        levels = self._pmg_levels()
+        transfers = self._pmg_prolongations()
+        comm = self._matrix_comm()
+        petsc_prolongations = []
+        for transfer_idx, transfer in enumerate(transfers):
+            source_level = levels[transfer_idx]
+            petsc_prolongations.append(
+                owned_coo_to_petsc_aij_matrix(
+                    transfer.coo_rows,
+                    transfer.coo_cols,
+                    transfer.coo_data,
+                    global_shape=transfer.global_shape,
+                    owned_row_range=transfer.owned_row_range,
+                    comm=comm,
+                    local_col_size=int(source_level.owned_row_range[1] - source_level.owned_row_range[0]),
+                )
+            )
+        restrictions = []
+        for prolongation in petsc_prolongations:
+            restriction = prolongation.copy()
+            restriction = restriction.transpose()
+            restrictions.append(restriction)
+        self._pmg_state = _PMGPetscHierarchyState(
+            hierarchy=hierarchy,
+            prolongations=tuple(petsc_prolongations),
+            restrictions=tuple(restrictions),
+            level_orders=tuple(int(level.order) for level in levels),
+            level_global_sizes=tuple(int(level.free_size) for level in levels),
+            level_owned_ranges=tuple(tuple(int(v) for v in level.owned_row_range) for level in levels),
+        )
+        return self._pmg_state
+
+    def _configure_pmg_pc(self, pc, *, matrix_ref) -> None:
+        if matrix_ref is None:
+            raise ValueError("pmg backend requires a fine-level preconditioning matrix")
+        state = self._ensure_pmg_state()
+        self._validate_pmg_layout(matrix_ref=matrix_ref, state=state)
+        pc.setType(PETSc.PC.Type.MG)
+        pc.setMGLevels(len(state.level_orders))
+        pc.setMGType(PETSc.PC.MGType.MULTIPLICATIVE)
+        pc.setMGCycleType(PETSc.PC.MGCycleType.V)
+        for level_idx in range(1, len(state.level_orders)):
+            pc.setMGInterpolation(level_idx, state.prolongations[level_idx - 1])
+            pc.setMGRestriction(level_idx, state.restrictions[level_idx - 1])
+
+        coarse = pc.getMGCoarseSolve()
+        coarse_ksp_type = str(
+            self.preconditioner_options.get("mg_coarse_ksp_type", PETSc.KSP.Type.PREONLY)
+        ).strip().lower()
+        coarse_pc_default = "lu" if int(matrix_ref.getComm().getSize()) == 1 else "redundant"
+        coarse_pc_type = str(
+            self.preconditioner_options.get("mg_coarse_pc_type", coarse_pc_default)
+        ).strip().lower()
+        coarse.setType(coarse_ksp_type)
+        coarse_pc = coarse.getPC()
+        coarse_pc.setType(coarse_pc_type)
+        if coarse_pc_type == str(PETSc.PC.Type.HYPRE).lower():
+            coarse_pc.setHYPREType(
+                str(self.preconditioner_options.get("mg_coarse_pc_hypre_type", "boomeramg"))
+            )
+        coarse.setTolerances(rtol=1.0e-10, atol=0.0, max_it=200)
+
+        for level_idx in range(1, len(state.level_orders)):
+            smoother = pc.getMGSmoother(level_idx)
+            smoother.setType(PETSc.KSP.Type.RICHARDSON)
+            smoother.setTolerances(rtol=0.0, atol=0.0, max_it=3)
+            smoother.getPC().setType(PETSc.PC.Type.SOR)
+        self._pmg_last_setup_info = {
+            "pmg_setup_time_s": float(self._preconditioner_diagnostics.preconditioner_setup_time_last),
+            **self._pmg_collect_pc_diagnostics(phase="setup"),
+        }
 
     def _max_deflation_basis_vectors(self) -> int | None:
         raw = self.preconditioner_options.get("max_deflation_basis_vectors")
@@ -928,8 +2096,6 @@ class PetscKSPFGMRESSolver:
         if PETSc is None:
             raise RuntimeError("PETSc is required for KSPFGMRES solver types.")
 
-        self._reset_petsc_objects()
-
         operator_matrix = self._prepare_operator(A, full_matrix=full_matrix, free_indices=free_indices)
         comm = self._matrix_comm()
         block_size = None
@@ -940,13 +2106,45 @@ class PetscKSPFGMRESSolver:
             block_size = int(self.preconditioner_options["block_size"])
         if int(comm.getSize()) > 1 and block_size is not None and not (PETSc is not None and isinstance(operator_matrix, PETSc.Mat)):
             ownership_range = owned_block_range(operator_matrix.shape[0] // block_size, block_size, comm)
-        self._A_petsc = to_petsc_aij_matrix(
+        new_A_petsc, new_A_owned = self._materialize_petsc_matrix(
             operator_matrix,
-            comm=operator_matrix.getComm() if hasattr(operator_matrix, "getComm") else comm,
+            comm=comm,
             block_size=block_size,
             ownership_range=ownership_range,
         )
-        self._ownership_range = self._A_petsc.getOwnershipRange()
+        new_ownership_range = new_A_petsc.getOwnershipRange()
+
+        if self._pc_backend not in {"pmg", "pmg_shell"}:
+            self._reset_petsc_objects()
+            self._A_petsc = new_A_petsc
+            self._owns_A_petsc = new_A_owned
+            self._P_petsc = None
+            self._owns_P_petsc = False
+            self._ownership_range = new_ownership_range
+        else:
+            reuse_ksp = self._can_reuse_pmg_ksp(new_A_petsc)
+            old_A_petsc = self._A_petsc
+            old_A_owned = self._owns_A_petsc
+            old_P_petsc = self._P_petsc
+            old_P_owned = self._owns_P_petsc
+            if not reuse_ksp and self._ksp is not None:
+                self._ksp.destroy()
+                self._ksp = None
+            self._A_petsc = new_A_petsc
+            self._owns_A_petsc = new_A_owned
+            self._P_petsc = self._A_petsc
+            self._owns_P_petsc = False
+            self._ownership_range = new_ownership_range
+            self._near_nullspace = None
+            self._near_nullspace_vecs = []
+            self._last_solve_info = {}
+            self._last_orthogonalization_info = {}
+            self._pmg_last_apply_info = {}
+            self._manualmg_last_apply_info = {}
+            if old_A_petsc is not None and old_A_petsc is not self._A_petsc:
+                self._destroy_owned_petsc_matrix(old_A_petsc, old_A_owned)
+            if old_P_petsc is not None and old_P_petsc is not self._P_petsc and old_P_petsc is not self._A_petsc:
+                self._destroy_owned_petsc_matrix(old_P_petsc, old_P_owned)
 
         if self._using_full_system and self.q_mask.size:
             self._A_petsc.setBlockSize(int(self.q_mask.shape[0]))
@@ -969,15 +2167,21 @@ class PetscKSPFGMRESSolver:
             self._near_nullspace = None
             self._near_nullspace_vecs = []
 
-        self._ksp = PETSc.KSP().create(comm=self._A_petsc.getComm())
-        self._ksp.setOptionsPrefix(self._options_prefix)
+        if self._ksp is None:
+            self._ksp = PETSc.KSP().create(comm=self._A_petsc.getComm())
+            self._ksp.setOptionsPrefix(self._options_prefix)
+            self._ksp.setType(PETSc.KSP.Type.FGMRES)
+            self._ksp.setInitialGuessNonzero(False)
+            self._ksp.setTolerances(rtol=self.tolerance, atol=1e-30, max_it=self.max_iterations)
         self._ksp.setOperators(self._A_petsc)
-        self._ksp.setType(PETSc.KSP.Type.FGMRES)
-        self._ksp.setInitialGuessNonzero(False)
-        self._ksp.setTolerances(rtol=self.tolerance, atol=1e-30, max_it=self.max_iterations)
         self._configure_prefixed_options(self._options_prefix)
         pc = self._ksp.getPC()
-        if self.pc_type == "GAMG":
+        matrix_ref = self._P_petsc if self._P_petsc is not None else self._A_petsc
+        if self._pc_backend == "pmg":
+            self._configure_pmg_pc(pc, matrix_ref=matrix_ref)
+        elif self._pc_backend == "pmg_shell":
+            self._configure_manualmg_pc(pc, matrix_ref=matrix_ref)
+        elif self.pc_type == "GAMG":
             pc.setType(PETSc.PC.Type.GAMG)
             if self._using_full_system and self.coord is not None and self.preconditioner_options.get("use_coordinates", True):
                 if int(self._A_petsc.getComm().getSize()) > 1:
@@ -996,7 +2200,7 @@ class PetscKSPFGMRESSolver:
             pc.setType(PETSc.PC.Type.NONE)
         self._ksp.setFromOptions()
         self._ksp.setUp()
-        self.iteration_collector.store_preconditioner_time(self.instance_id, perf_counter() - t0)
+        self._record_preconditioner_setup_time(perf_counter() - t0)
 
     def A_orthogonalize(self, A):
         t0 = perf_counter()
@@ -1107,6 +2311,13 @@ class PetscKSPFGMRESSolver:
         return bool(self._full_system_preconditioner and self.q_mask.size)
 
     def release_iteration_resources(self) -> None:
+        if self._pc_backend in {"pmg", "pmg_shell"}:
+            self._last_solve_info = {}
+            self._last_orthogonalization_info = {}
+            return
+        self._reset_petsc_objects()
+
+    def close(self) -> None:
         self._reset_petsc_objects()
 
 
@@ -1224,6 +2435,8 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
                 "print_level",
                 "use_as_preconditioner",
                 "factor_solver_type",
+                "allow_unsafe_hypre_vector_options",
+                "coarse_hypre_full_system",
                 "full_system_preconditioner",
                 "null_space",
                 "use_coordinates",
@@ -1263,8 +2476,9 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
             inner_pc.setType(PETSc.PC.Type.JACOBI)
         else:
             inner_pc.setType(PETSc.PC.Type.NONE)
+        # Leave PC setup to the owning KSP so prefixed `mg_*` nested options
+        # are applied before PETSc constructs MG smoothers/coarse solvers.
         inner_pc.setFromOptions()
-        inner_pc.setUp()
 
     def setup_preconditioner(
         self,
@@ -1363,7 +2577,7 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
             self._ksp.setFromOptions()
             self._ksp.setUp()
 
-        self.iteration_collector.store_preconditioner_time(self.instance_id, perf_counter() - t0)
+        self._record_preconditioner_setup_time(perf_counter() - t0)
 
     def A_orthogonalize(self, A):
         t0 = perf_counter()
@@ -1448,7 +2662,9 @@ class _ProjectedMatlabDeflationPC:
         if self._tmp is None:
             self._tmp = self.solver._A_petsc.createVecRight()
         self._tmp.set(0.0)
+        t0 = perf_counter()
         self.solver._inner_ksp.solve(x, self._tmp)
+        self.solver._record_preconditioner_apply_time(perf_counter() - t0)
         z_local = np.asarray(self._tmp.getArray(readonly=True), dtype=np.float64)
         y_local = self.solver._project_local_vector(z_local)
         y_arr = y.getArray(readonly=False)
@@ -1640,6 +2856,10 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
                     inner_pc.setCoordinates(self.coord[:, node0:node1].T.copy())
                 else:
                     inner_pc.setCoordinates(self.coord.T.copy())
+        elif self._pc_backend == "pmg":
+            self._configure_pmg_pc(inner_pc, matrix_ref=matrix_ref)
+        elif self._pc_backend == "pmg_shell":
+            self._configure_manualmg_pc(inner_pc, matrix_ref=matrix_ref)
         elif self._pc_backend == "hypre":
             inner_pc.setType(PETSc.PC.Type.HYPRE)
             inner_pc.setHYPREType(str(self.preconditioner_options.get("pc_hypre_type", "boomeramg")))
@@ -1677,8 +2897,9 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
             inner_pc.setType(PETSc.PC.Type.JACOBI)
         else:
             inner_pc.setType(PETSc.PC.Type.NONE)
+        # Leave PC setup to the owning KSP so prefixed `mg_*` nested options
+        # are applied before PETSc constructs MG smoothers/coarse solvers.
         inner_pc.setFromOptions()
-        inner_pc.setUp()
 
     def _configure_outer_ksp_only_options(self) -> None:
         opts = PETSc.Options()
@@ -1695,6 +2916,8 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
                 "print_level",
                 "use_as_preconditioner",
                 "factor_solver_type",
+                "allow_unsafe_hypre_vector_options",
+                "coarse_hypre_full_system",
                 "full_system_preconditioner",
                 "null_space",
                 "use_coordinates",
@@ -1706,7 +2929,10 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
                 "recycle_preconditioner",
                 "compiled_outer",
                 "max_deflation_basis_vectors",
+                "pmg_hierarchy",
             }:
+                continue
+            if self._pc_backend == "pmg_shell" and key.startswith(("pc_hypre_", "mg_")):
                 continue
             if key.startswith(("pc_", "mg_", "mat_")):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
@@ -1797,7 +3023,7 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         self._ksp.setFromOptions()
         self._ksp.setUp()
         self._refresh_projector_data(self._A_petsc)
-        self.iteration_collector.store_preconditioner_time(self.instance_id, perf_counter() - t0)
+        self._record_preconditioner_setup_time(perf_counter() - t0)
 
     def A_orthogonalize(self, A):
         t0 = perf_counter()
@@ -1977,6 +3203,11 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
             self._last_solve_info = {}
             self._last_orthogonalization_info = {}
             return
+        if self._pc_backend in {"pmg", "pmg_shell"}:
+            self._clear_transient_vectors()
+            self._last_solve_info = {}
+            self._last_orthogonalization_info = {}
+            return
         self._reset_petsc_objects()
 
     def _default_null_space(self):
@@ -2021,13 +3252,12 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
             PETSc is not None and isinstance(operator_matrix, PETSc.Mat)
         ):
             ownership_range = owned_block_range(operator_matrix.shape[0] // block_size, block_size, comm)
-        A_petsc = to_petsc_aij_matrix(
+        A_petsc, owns = self._materialize_petsc_matrix(
             operator_matrix,
-            comm=operator_matrix.getComm() if hasattr(operator_matrix, "getComm") else comm,
+            comm=comm,
             block_size=block_size,
             ownership_range=ownership_range,
         )
-        owns = not (PETSc is not None and isinstance(operator_matrix, PETSc.Mat))
         if self._using_full_system and self.q_mask.size:
             A_petsc.setBlockSize(int(self.q_mask.shape[0]))
         null_space = self._default_null_space()
@@ -2108,7 +3338,13 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         old_P_owned = self._owns_P_petsc
 
         if not reuse_inner:
-            self._reset_petsc_objects()
+            self._clear_transient_vectors()
+            if self._inner_ksp is not None:
+                self._inner_ksp.destroy()
+                self._inner_ksp = None
+            if self._ksp is not None:
+                self._ksp.destroy()
+                self._ksp = None
             self._inner_ksp = PETSc.KSP().create(comm=new_A_petsc.getComm())
             self._inner_ksp.setOptionsPrefix(f"{self._options_prefix}inner_")
             self._inner_ksp.setType(PETSc.KSP.Type.PREONLY)

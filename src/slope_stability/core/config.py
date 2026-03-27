@@ -63,6 +63,7 @@ class NewtonConfig:
 @dataclass(frozen=True)
 class ContinuationConfig:
     method: str = "indirect"
+    predictor: str = "secant"
     lambda_init: float = 1.0
     d_lambda_init: float = 0.1
     d_lambda_min: float = 1e-3
@@ -71,6 +72,17 @@ class ContinuationConfig:
     step_max: int = 100
     d_omega_ini_scale: float = 0.2
     d_t_min: float = 1e-3
+    omega_no_increase_newton_threshold: int | None = None
+    omega_half_newton_threshold: int | None = None
+    omega_target_newton_iterations: float | None = None
+    omega_adapt_min_scale: float | None = None
+    omega_adapt_max_scale: float | None = None
+    omega_hard_newton_threshold: int | None = None
+    omega_hard_linear_threshold: int | None = None
+    omega_efficiency_floor: float | None = None
+    omega_efficiency_drop_ratio: float | None = None
+    omega_efficiency_window: int = 3
+    omega_hard_shrink_scale: float | None = None
 
 
 @dataclass(frozen=True)
@@ -143,8 +155,8 @@ class Run3DSSRConfig:
             raise NotImplementedError(
                 "Seepage configs are intentionally not wired yet; use this scheme for 3D non-seepage SSR first."
             )
-        if self.problem.elem_type.upper() not in {"P2", "P4"}:
-            raise NotImplementedError("Only 3D P2/P4 runs are wired into the current config runner.")
+        if self.problem.elem_type.upper() not in {"P1", "P2", "P4"}:
+            raise NotImplementedError("Only 3D P1/P2/P4 runs are wired into the current config runner.")
         if self.continuation.method.lower() != "indirect":
             raise NotImplementedError("The config runner currently targets indirect 3D SSR continuation only.")
         if not self.material_rows():
@@ -161,6 +173,18 @@ class Run3DSSRConfig:
             "d_lambda_min": self.continuation.d_lambda_min,
             "d_lambda_diff_scaled_min": self.continuation.d_lambda_diff_scaled_min,
             "omega_max_stop": self.continuation.omega_max,
+            "continuation_predictor": self.continuation.predictor,
+            "omega_no_increase_newton_threshold": self.continuation.omega_no_increase_newton_threshold,
+            "omega_half_newton_threshold": self.continuation.omega_half_newton_threshold,
+            "omega_target_newton_iterations": self.continuation.omega_target_newton_iterations,
+            "omega_adapt_min_scale": self.continuation.omega_adapt_min_scale,
+            "omega_adapt_max_scale": self.continuation.omega_adapt_max_scale,
+            "omega_hard_newton_threshold": self.continuation.omega_hard_newton_threshold,
+            "omega_hard_linear_threshold": self.continuation.omega_hard_linear_threshold,
+            "omega_efficiency_floor": self.continuation.omega_efficiency_floor,
+            "omega_efficiency_drop_ratio": self.continuation.omega_efficiency_drop_ratio,
+            "omega_efficiency_window": self.continuation.omega_efficiency_window,
+            "omega_hard_shrink_scale": self.continuation.omega_hard_shrink_scale,
             "step_max": self.continuation.step_max,
             "it_newt_max": self.newton.it_max,
             "it_damp_max": self.newton.it_damp_max,
@@ -275,6 +299,7 @@ def load_run_3d_ssr_config(path: str | Path) -> Run3DSSRConfig:
 
     continuation = ContinuationConfig(
         method=str(continuation_data.get("method", "indirect")),
+        predictor=str(continuation_data.get("predictor", "secant")),
         lambda_init=float(continuation_data.get("lambda_init", 1.0)),
         d_lambda_init=float(continuation_data.get("d_lambda_init", 0.1)),
         d_lambda_min=float(continuation_data.get("d_lambda_min", 1e-3)),
@@ -283,6 +308,51 @@ def load_run_3d_ssr_config(path: str | Path) -> Run3DSSRConfig:
         step_max=int(continuation_data.get("step_max", 100)),
         d_omega_ini_scale=float(continuation_data.get("d_omega_ini_scale", 0.2)),
         d_t_min=float(continuation_data.get("d_t_min", 1e-3)),
+        omega_no_increase_newton_threshold=(
+            None
+            if continuation_data.get("omega_no_increase_newton_threshold") is None
+            else int(continuation_data.get("omega_no_increase_newton_threshold"))
+        ),
+        omega_half_newton_threshold=(
+            None
+            if continuation_data.get("omega_half_newton_threshold") is None
+            else int(continuation_data.get("omega_half_newton_threshold"))
+        ),
+        omega_target_newton_iterations=(
+            None
+            if continuation_data.get("omega_target_newton_iterations") is None
+            else float(continuation_data.get("omega_target_newton_iterations"))
+        ),
+        omega_adapt_min_scale=(
+            None if continuation_data.get("omega_adapt_min_scale") is None else float(continuation_data.get("omega_adapt_min_scale"))
+        ),
+        omega_adapt_max_scale=(
+            None if continuation_data.get("omega_adapt_max_scale") is None else float(continuation_data.get("omega_adapt_max_scale"))
+        ),
+        omega_hard_newton_threshold=(
+            None
+            if continuation_data.get("omega_hard_newton_threshold") is None
+            else int(continuation_data.get("omega_hard_newton_threshold"))
+        ),
+        omega_hard_linear_threshold=(
+            None
+            if continuation_data.get("omega_hard_linear_threshold") is None
+            else int(continuation_data.get("omega_hard_linear_threshold"))
+        ),
+        omega_efficiency_floor=(
+            None if continuation_data.get("omega_efficiency_floor") is None else float(continuation_data.get("omega_efficiency_floor"))
+        ),
+        omega_efficiency_drop_ratio=(
+            None
+            if continuation_data.get("omega_efficiency_drop_ratio") is None
+            else float(continuation_data.get("omega_efficiency_drop_ratio"))
+        ),
+        omega_efficiency_window=int(continuation_data.get("omega_efficiency_window", 3)),
+        omega_hard_shrink_scale=(
+            None
+            if continuation_data.get("omega_hard_shrink_scale") is None
+            else float(continuation_data.get("omega_hard_shrink_scale"))
+        ),
     )
 
     newton = NewtonConfig(

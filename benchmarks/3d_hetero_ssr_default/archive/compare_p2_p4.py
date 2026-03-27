@@ -13,10 +13,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_DIR = Path(__file__).resolve().parent
+BENCHMARK_DIR = SCRIPT_DIR.parent if SCRIPT_DIR.name == "archive" else SCRIPT_DIR
+ROOT = BENCHMARK_DIR.parents[1]
 DEFAULT_MESH = ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
 DEFAULT_OUT_ROOT = ROOT / "artifacts" / "p2_p4_compare_rank8_final"
-DEFAULT_REPORT = Path(__file__).resolve().parent / "report_p2_vs_p4_rank8_final.md"
+DEFAULT_REPORT = SCRIPT_DIR / "report_p2_vs_p4_rank8_final.md"
 
 
 def _load_memory_guard_summary(path: Path | None) -> dict[str, float | int | bool | str] | None:

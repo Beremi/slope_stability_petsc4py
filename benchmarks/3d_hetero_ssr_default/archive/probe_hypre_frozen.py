@@ -16,6 +16,11 @@ from slope_stability.core.elements import validate_supported_elem_type
 from slope_stability.fem.distributed_elastic import assemble_owned_elastic_rows_for_comm
 from slope_stability.fem.distributed_tangent import prepare_owned_tangent_pattern
 from slope_stability.fem.quadrature import quadrature_volume_3d
+from slope_stability.linear.pmg import (
+    build_3d_mixed_pmg_chain_hierarchy,
+    build_3d_mixed_pmg_hierarchy,
+    build_3d_pmg_hierarchy,
+)
 from slope_stability.linear.solver import SolverFactory
 from slope_stability.linear.preconditioners import attach_near_nullspace, make_near_nullspace_elasticity
 from slope_stability.mesh import load_mesh_from_file
@@ -84,6 +89,29 @@ def _set_petsc_option(options, key: str, value) -> None:
         options[key] = "true" if value else "false"
     else:
         options[key] = value
+
+
+def _reduced_timing_keys(payload: dict[str, object]) -> list[str]:
+    explicit = {
+        "runtime_seconds",
+        "setup_elapsed_s",
+        "solve_elapsed_s",
+        "solve_plus_setup_elapsed_s",
+        "preconditioner_setup_time_last",
+        "preconditioner_setup_time_total",
+        "preconditioner_apply_time_last",
+        "preconditioner_apply_time_total",
+        "manualmg_setup_time_s",
+    }
+    keys: list[str] = []
+    for key, value in payload.items():
+        if not isinstance(value, (int, float)):
+            continue
+        if key in explicit or key.endswith("_time_total_s") or key.endswith("_elapsed_s") or key.endswith("_time_s"):
+            if key.endswith("_max") or key.endswith("_sum"):
+                continue
+            keys.append(str(key))
+    return sorted(set(keys))
 
 
 def _native_ksp_type(name: str):
@@ -322,6 +350,8 @@ def _build_problem(
     davis_type: str,
     constitutive_mode: str,
     tangent_kernel: str,
+    pc_backend: str,
+    pmg_coarse_mesh_paths: tuple[Path, ...] | None = None,
 ):
     if material_rows is None:
         material_rows = load_material_rows_for_path(mesh_path)
@@ -342,20 +372,77 @@ def _build_problem(
         for row in mat_props
     ]
 
-    mesh = load_mesh_from_file(mesh_path, boundary_type=0, elem_type=elem_type)
-    reordered = reorder_mesh_nodes(
-        mesh.coord,
-        mesh.elem,
-        mesh.surf,
-        mesh.q_mask,
-        strategy=node_ordering,
-        n_parts=reorder_parts if str(node_ordering).lower() == "block_metis" else None,
-    )
+    pmg_hierarchy = None
+    if str(pc_backend).strip().lower() in {"pmg", "pmg_shell"}:
+        coarse_paths = tuple(pmg_coarse_mesh_paths or ())
+        if not coarse_paths:
+            pmg_hierarchy = build_3d_pmg_hierarchy(
+                mesh_path,
+                boundary_type=0,
+                node_ordering=node_ordering,
+                reorder_parts=reorder_parts,
+                material_rows=[list(map(float, row)) for row in material_rows],
+                comm=PETSc.COMM_WORLD,
+            )
+        elif len(coarse_paths) == 1:
+            pmg_hierarchy = build_3d_mixed_pmg_hierarchy(
+                mesh_path,
+                coarse_paths[0],
+                fine_elem_type=elem_type,
+                boundary_type=0,
+                node_ordering=node_ordering,
+                reorder_parts=reorder_parts,
+                material_rows=[list(map(float, row)) for row in material_rows],
+                comm=PETSc.COMM_WORLD,
+            )
+        else:
+            pmg_hierarchy = build_3d_mixed_pmg_chain_hierarchy(
+                mesh_path,
+                coarse_paths,
+                fine_elem_type=elem_type,
+                boundary_type=0,
+                node_ordering=node_ordering,
+                reorder_parts=reorder_parts,
+                material_rows=[list(map(float, row)) for row in material_rows],
+                comm=PETSc.COMM_WORLD,
+            )
+        coord = pmg_hierarchy.fine_level.coord.astype(np.float64)
+        elem = pmg_hierarchy.fine_level.elem.astype(np.int64)
+        q_mask = pmg_hierarchy.fine_level.q_mask.astype(bool)
+        material_identifier = pmg_hierarchy.fine_level.material_identifier.astype(np.int64).ravel()
+        elastic_rows = assemble_owned_elastic_rows_for_comm(
+            coord,
+            elem,
+            q_mask,
+            material_identifier,
+            materials,
+            PETSc.COMM_WORLD,
+            elem_type=elem_type,
+        )
+    else:
+        mesh = load_mesh_from_file(mesh_path, boundary_type=0, elem_type=elem_type)
+        reordered = reorder_mesh_nodes(
+            mesh.coord,
+            mesh.elem,
+            mesh.surf,
+            mesh.q_mask,
+            strategy=node_ordering,
+            n_parts=reorder_parts if str(node_ordering).lower() == "block_metis" else None,
+        )
 
-    coord = reordered.coord.astype(np.float64)
-    elem = reordered.elem.astype(np.int64)
-    q_mask = reordered.q_mask.astype(bool)
-    material_identifier = mesh.material.astype(np.int64).ravel()
+        coord = reordered.coord.astype(np.float64)
+        elem = reordered.elem.astype(np.int64)
+        q_mask = reordered.q_mask.astype(bool)
+        material_identifier = mesh.material.astype(np.int64).ravel()
+        elastic_rows = assemble_owned_elastic_rows_for_comm(
+            coord,
+            elem,
+            q_mask,
+            material_identifier,
+            materials,
+            PETSc.COMM_WORLD,
+            elem_type=elem_type,
+        )
 
     n_q = int(quadrature_volume_3d(elem_type)[0].shape[1])
     n_int = int(elem.shape[1] * n_q)
@@ -366,15 +453,6 @@ def _build_problem(
         materials,
     )
 
-    elastic_rows = assemble_owned_elastic_rows_for_comm(
-        coord,
-        elem,
-        q_mask,
-        material_identifier,
-        materials,
-        PETSc.COMM_WORLD,
-        elem_type=elem_type,
-    )
     global_size = int(coord.shape[0] * coord.shape[1])
     K_elast = local_csr_to_petsc_aij_matrix(
         elastic_rows.local_matrix,
@@ -431,15 +509,16 @@ def _build_problem(
         "const_builder": const_builder,
         "tangent_pattern": tangent_pattern,
         "materials": material_rows,
+        "pmg_hierarchy": pmg_hierarchy,
     }
 
 
-def _build_preconditioner_options(args) -> dict[str, object]:
+def _build_preconditioner_options(args, problem: dict[str, object]) -> dict[str, object]:
     options: dict[str, object] = {
         "threads": 16,
         "print_level": 0,
         "use_as_preconditioner": True,
-        "pc_backend": "hypre",
+        "pc_backend": str(args.pc_backend),
         "preconditioner_matrix_source": str(args.pmat_source),
         "preconditioner_matrix_policy": "current",
         "preconditioner_rebuild_policy": "every_newton",
@@ -449,6 +528,43 @@ def _build_preconditioner_options(args) -> dict[str, object]:
         "recycle_preconditioner": False,
         "max_deflation_basis_vectors": int(args.max_deflation_basis_vectors),
     }
+    pmg_hierarchy = problem.get("pmg_hierarchy")
+    mixed_parallel_shell = (
+        pmg_hierarchy is not None
+        and tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ()))[:1] == (1,)
+        and tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ()))[-1:] == (2,)
+        and all(int(getattr(level, "order", -1)) == 1 for level in tuple(getattr(pmg_hierarchy, "levels", ()))[0:-1])
+        and int(PETSc.COMM_WORLD.getSize()) > 1
+    )
+    if str(args.pc_backend).strip().lower() == "pmg":
+        options.update(
+            {
+                "full_system_preconditioner": False,
+                "pc_mg_galerkin": "both",
+                "pc_mg_cycle_type": "v",
+                "mg_levels_ksp_type": "richardson",
+                "mg_levels_ksp_max_it": 3,
+                "mg_levels_pc_type": "sor",
+                "mg_coarse_ksp_type": "preonly",
+                "mg_coarse_pc_type": "lu" if int(PETSc.COMM_WORLD.getSize()) == 1 else "redundant",
+                "mg_coarse_redundant_ksp_type": "preonly",
+                "mg_coarse_redundant_pc_type": "lu",
+                "pmg_hierarchy": pmg_hierarchy,
+            }
+        )
+    if str(args.pc_backend).strip().lower() == "pmg_shell":
+        options.update(
+            {
+                "full_system_preconditioner": False,
+                "mg_levels_ksp_type": "chebyshev" if mixed_parallel_shell else "richardson",
+                "mg_levels_ksp_max_it": 3,
+                "mg_levels_pc_type": "jacobi" if mixed_parallel_shell else "sor",
+                "mg_coarse_ksp_type": "preonly",
+                "mg_coarse_pc_type": "hypre",
+                "mg_coarse_pc_hypre_type": "boomeramg",
+                "pmg_hierarchy": pmg_hierarchy,
+            }
+        )
     if args.pc_hypre_coarsen_type is not None:
         options["pc_hypre_boomeramg_coarsen_type"] = str(args.pc_hypre_coarsen_type)
     if args.pc_hypre_interp_type is not None:
@@ -504,8 +620,27 @@ def run_probe(args) -> dict[str, object]:
     if material_rows is not None:
         material_rows = [list(map(float, row)) for row in material_rows]
     regularization_r = float(args.regularization_r if args.regularization_r is not None else state["regularization_r"])
+    outer_solver_family = str(args.outer_solver_family).strip().lower()
+    if str(args.pc_backend).strip().lower() in {"pmg", "pmg_shell"}:
+        coarse_paths = tuple(Path(path) for path in (args.pmg_coarse_mesh_path or []))
+        if not coarse_paths:
+            if str(elem_type).upper() != "P4":
+                raise ValueError(f"{args.pc_backend} backend currently supports only P4 frozen-state probes.")
+        elif str(elem_type).upper() not in {"P2", "P4"}:
+            raise ValueError(
+                f"{args.pc_backend} backend with --pmg-coarse-mesh-path currently supports only P2 or P4 fine probes."
+            )
+        if str(args.pmat_source).strip().lower() != "tangent":
+            raise ValueError(f"{args.pc_backend} backend currently supports only pmat_source=tangent.")
+        if outer_solver_family != "repo":
+            raise ValueError(f"{args.pc_backend} backend is only available through the repo solver path.")
+        if "PETSC_MATLAB_DFGMRES" not in str(args.solver_type).upper():
+            raise ValueError(f"{args.pc_backend} backend currently requires a PETSC_MATLAB_DFGMRES* solver_type.")
+    elif bool(args.pmg_microbenchmark_only):
+        raise ValueError("--pmg-microbenchmark-only requires --pc-backend pmg.")
 
     t0 = perf_counter()
+    t_problem_build0 = perf_counter()
     problem = _build_problem(
         mesh_path=mesh_path,
         elem_type=elem_type,
@@ -515,7 +650,10 @@ def run_probe(args) -> dict[str, object]:
         davis_type=str(args.davis_type),
         constitutive_mode=str(args.constitutive_mode),
         tangent_kernel=str(args.tangent_kernel),
+        pc_backend=str(args.pc_backend),
+        pmg_coarse_mesh_paths=tuple(Path(path) for path in (args.pmg_coarse_mesh_path or [])),
     )
+    problem_build_elapsed_s = float(perf_counter() - t_problem_build0)
     coord = problem["coord"]
     q_mask = problem["q_mask"]
     K_elast = problem["K_elast"]
@@ -528,6 +666,7 @@ def run_probe(args) -> dict[str, object]:
             "Check node ordering / reorder_parts against the source artifact."
         )
 
+    t_operator_build0 = perf_counter()
     const_builder.reduction(float(state["lambda_value"]))
     F_state, K_tangent = const_builder.build_F_K_tangent_reduced(state_u)
     load_full = np.asarray(f_V, dtype=np.float64).reshape(-1, order="F")
@@ -546,14 +685,15 @@ def run_probe(args) -> dict[str, object]:
         Pmat = K_elast
     else:
         raise ValueError(f"Unsupported pmat_source {args.pmat_source!r}")
+    operator_build_elapsed_s = float(perf_counter() - t_operator_build0)
 
     K_free = None
     P_free = None
     native_ksp = None
     solver = None
     solve_info: dict[str, object] = {}
+    pmg_microbenchmark: dict[str, object] = {}
 
-    outer_solver_family = str(args.outer_solver_family).strip().lower()
     if outer_solver_family == "native_petsc":
         null_space = make_near_nullspace_elasticity(
             coord,
@@ -606,7 +746,7 @@ def run_probe(args) -> dict[str, object]:
             "true_residual_final": float(true_history[-1] if true_history else residual_norm / max(np.linalg.norm(f_free), 1.0)),
         }
     elif outer_solver_family == "repo":
-        preconditioner_options = _build_preconditioner_options(args)
+        preconditioner_options = _build_preconditioner_options(args, problem)
         solver = SolverFactory.create(
             args.solver_type,
             tolerance=float(args.linear_tolerance),
@@ -631,14 +771,23 @@ def run_probe(args) -> dict[str, object]:
                 preconditioning_matrix=Pmat,
             )
             _dump_ksp_view(data_dir / "ksp_view.txt", solver)
-            x_free = np.asarray(
-                solver.solve(K_tangent, f_free, full_rhs=rhs_full, free_indices=free_idx),
-                dtype=np.float64,
-            ).reshape(-1)
-            x_full = np.zeros_like(rhs_full)
-            x_full[free_idx] = x_free
-            residual = np.asarray(matvec_to_numpy(K_tangent, x_full), dtype=np.float64).reshape(-1) - rhs_full
-            residual_norm = float(np.linalg.norm(residual[free_idx]))
+            if str(args.pc_backend).strip().lower() == "pmg" and int(PETSc.COMM_WORLD.getSize()) > 1:
+                run_pmg_micro = getattr(solver, "run_pmg_microbenchmark", None)
+                if callable(run_pmg_micro):
+                    pmg_microbenchmark = dict(run_pmg_micro(rhs_full))
+            if bool(args.pmg_microbenchmark_only):
+                x_free = np.zeros_like(f_free)
+                residual = np.zeros_like(f_free)
+                residual_norm = 0.0
+            else:
+                x_free = np.asarray(
+                    solver.solve(K_tangent, f_free, full_rhs=rhs_full, free_indices=free_idx),
+                    dtype=np.float64,
+                ).reshape(-1)
+                x_full = np.zeros_like(rhs_full)
+                x_full[free_idx] = x_free
+                residual = np.asarray(matvec_to_numpy(K_tangent, x_full), dtype=np.float64).reshape(-1) - rhs_full
+                residual_norm = float(np.linalg.norm(residual[free_idx]))
         else:
             K_free = extract_submatrix_free(K_tangent, free_idx)
             if Pmat is K_tangent:
@@ -653,16 +802,26 @@ def run_probe(args) -> dict[str, object]:
                 free_indices=free_idx,
                 preconditioning_matrix=P_free,
             )
-            if rank == 0:
-                _dump_ksp_view(data_dir / "ksp_view.txt", solver)
-            x_free = np.asarray(solver.solve(K_free, f_free, free_indices=free_idx), dtype=np.float64).reshape(-1)
-            residual = np.asarray(K_free @ x_free, dtype=np.float64).reshape(-1) - f_free
-            residual_norm = float(np.linalg.norm(residual))
+            _dump_ksp_view(data_dir / "ksp_view.txt", solver)
+            if str(args.pc_backend).strip().lower() == "pmg" and int(PETSc.COMM_WORLD.getSize()) > 1:
+                run_pmg_micro = getattr(solver, "run_pmg_microbenchmark", None)
+                if callable(run_pmg_micro):
+                    pmg_microbenchmark = dict(run_pmg_micro(f_free))
+            if bool(args.pmg_microbenchmark_only):
+                x_free = np.zeros_like(f_free)
+                residual = np.zeros_like(f_free)
+                residual_norm = 0.0
+            else:
+                x_free = np.asarray(solver.solve(K_free, f_free, free_indices=free_idx), dtype=np.float64).reshape(-1)
+                residual = np.asarray(matvec_to_numpy(K_free, x_free), dtype=np.float64).reshape(-1) - f_free
+                residual_norm = float(np.linalg.norm(residual))
         _solve_elapsed_total = float(perf_counter() - solve_setup_t0)
         snap1 = _collector_snapshot(solver)
         solve_delta = _collector_delta(snap0, snap1)
         diagnostics = solver.get_preconditioner_diagnostics()
         solve_info = getattr(solver, "get_last_solve_info", lambda: {})()
+        if pmg_microbenchmark:
+            solve_info["pmg_microbenchmark"] = dict(pmg_microbenchmark)
         solve_elapsed = float(solve_delta["solve_time"])
         setup_elapsed = float(solve_delta["preconditioner_time"])
     else:
@@ -676,6 +835,8 @@ def run_probe(args) -> dict[str, object]:
     if not true_history and final_relative_residual >= 0.0:
         true_history = [final_relative_residual]
 
+    runtime_seconds = float(perf_counter() - t0)
+    solve_plus_setup_elapsed_s = float(float(solve_delta["preconditioner_time"]) + float(solve_delta["solve_time"]))
     result: dict[str, object] = {
         "status": "completed",
         "mesh_path": str(mesh_path),
@@ -683,13 +844,27 @@ def run_probe(args) -> dict[str, object]:
         "node_ordering": str(node_ordering),
         "reorder_parts": (None if state["reorder_parts"] is None else int(state["reorder_parts"])),
         "solver_type": str(args.solver_type),
+        "benchmark_mode": ("pmg_microbenchmark" if bool(args.pmg_microbenchmark_only) else "frozen_probe"),
         "outer_solver_family": outer_solver_family,
         "native_ksp_type": (None if outer_solver_family != "native_petsc" else str(args.native_ksp_type)),
         "native_ksp_norm_type": (None if outer_solver_family != "native_petsc" else str(args.native_ksp_norm_type)),
-        "pc_backend": ("hypre" if outer_solver_family != "native_petsc" else str(getattr(args, "native_pc_type", "hypre"))),
+        "pc_backend": (
+            str(args.pc_backend)
+            if outer_solver_family == "repo"
+            else str(getattr(args, "native_pc_type", "hypre"))
+        ),
         "native_pc_type": (None if outer_solver_family != "native_petsc" else str(getattr(args, "native_pc_type", "hypre"))),
         "rhs_source": str(args.rhs_source),
         "pmat_source": str(args.pmat_source),
+        "pmg_coarse_mesh_path": (
+            None
+            if not args.pmg_coarse_mesh_path
+            else (
+                str(Path(args.pmg_coarse_mesh_path[0]))
+                if len(args.pmg_coarse_mesh_path) == 1
+                else [str(Path(path)) for path in args.pmg_coarse_mesh_path]
+            )
+        ),
         "regularization_r": float(regularization_r),
         "pc_hypre_coarsen_type": args.pc_hypre_coarsen_type,
         "pc_hypre_interp_type": args.pc_hypre_interp_type,
@@ -708,11 +883,13 @@ def run_probe(args) -> dict[str, object]:
         "state_omega": state["omega_value"],
         "state_step_u_shape": list(state["step_u_shape"]),
         "state_lambda_hist_len": int(state["lambda_hist_len"]),
-        "runtime_seconds": float(perf_counter() - t0),
+        "runtime_seconds": runtime_seconds,
+        "problem_build_elapsed_s": problem_build_elapsed_s,
+        "operator_build_elapsed_s": operator_build_elapsed_s,
         "setup_elapsed_s": float(solve_delta["preconditioner_time"]),
         "solve_elapsed_s": float(solve_delta["solve_time"]),
         "orthogonalization_elapsed_s": float(solve_delta["orthogonalization_time"]),
-        "solve_plus_setup_elapsed_s": float(float(solve_delta["preconditioner_time"]) + float(solve_delta["solve_time"])),
+        "solve_plus_setup_elapsed_s": solve_plus_setup_elapsed_s,
         "iteration_count": int(solve_delta["iterations"]),
         "rhs_norm": float(rhs_norm),
         "residual_norm": float(residual_norm),
@@ -721,29 +898,40 @@ def run_probe(args) -> dict[str, object]:
         "true_residual_history": true_history,
         "true_residual_final": float(solve_info.get("true_residual_final", final_relative_residual)),
         "solve_delta": solve_delta,
+        "pmg_microbenchmark_only": bool(args.pmg_microbenchmark_only),
+        "pmg_microbenchmark": (dict(pmg_microbenchmark) if pmg_microbenchmark else None),
         **diagnostics,
     }
-    result["runtime_seconds_max"] = float(mpi_comm.allreduce(result["runtime_seconds"], op=MPI.MAX))
-    result["setup_elapsed_s_max"] = float(mpi_comm.allreduce(result["setup_elapsed_s"], op=MPI.MAX))
-    result["solve_elapsed_s_max"] = float(mpi_comm.allreduce(result["solve_elapsed_s"], op=MPI.MAX))
+    result["runtime_other_elapsed_s"] = max(
+        0.0,
+        float(runtime_seconds) - float(problem_build_elapsed_s) - float(operator_build_elapsed_s) - float(solve_plus_setup_elapsed_s),
+    )
+    for key in _reduced_timing_keys(result):
+        value = float(result[key])
+        result[f"{key}_max"] = float(mpi_comm.allreduce(value, op=MPI.MAX))
+        result[f"{key}_sum"] = float(mpi_comm.allreduce(value, op=MPI.SUM))
     result["residual_norm_max"] = float(mpi_comm.allreduce(result["residual_norm"], op=MPI.MAX))
 
     if rank == 0:
         (data_dir / "run_info.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         md_lines = [
-            "# Hypre Frozen-State Probe",
+            "# Frozen-State Preconditioner Probe",
             "",
             f"- Element type: `{elem_type}`",
             f"- Frozen state: `{state['selected_label']}`",
             f"- Lambda: `{state['lambda_value']:.9f}`",
             f"- Outer solver family: `{outer_solver_family}`",
+            f"- Benchmark mode: `{result['benchmark_mode']}`",
             f"- Pmat source: `{args.pmat_source}`",
+            f"- Backend: `{result['pc_backend']}`",
             f"- BoomerAMG max_iter: `{args.pc_hypre_boomeramg_max_iter}`",
             f"- Iterations: `{result['iteration_count']}`",
             f"- Setup elapsed: `{result['setup_elapsed_s']:.6f} s`",
             f"- Solve elapsed: `{result['solve_elapsed_s']:.6f} s`",
             f"- Final relative residual: `{result['final_relative_residual']:.3e}`",
         ]
+        if pmg_microbenchmark:
+            md_lines.append(f"- PMG microbenchmark PCApply: `{float(pmg_microbenchmark.get('pc_apply_elapsed_s', 0.0)):.6f} s`")
         (out_dir / "frozen_probe.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
     release = getattr(solver, "release_iteration_resources", None)
@@ -773,13 +961,14 @@ def run_probe(args) -> dict[str, object]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Frozen-state Hypre explicit-Pmat probe for 3D SSR.")
+    parser = argparse.ArgumentParser(description="Frozen-state explicit-Pmat probe for 3D SSR.")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--state-npz", type=Path, required=True)
     parser.add_argument("--state-run-info", type=Path, default=None)
     parser.add_argument("--state-selector", type=str, default="easy", choices=["easy", "hard", "final", "index"])
     parser.add_argument("--state-index", type=int, default=None)
     parser.add_argument("--mesh-path", type=Path, default=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh")
+    parser.add_argument("--pmg-coarse-mesh-path", type=Path, action="append", default=[])
     parser.add_argument("--elem-type", type=str, default="P4", choices=["P1", "P2", "P4"])
     parser.add_argument(
         "--node-ordering",
@@ -806,6 +995,7 @@ def main() -> None:
     )
     parser.add_argument("--rhs-source", type=str, default="residual", choices=["residual", "body"])
     parser.add_argument("--solver-type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")
+    parser.add_argument("--pc-backend", type=str, default="hypre", choices=["hypre", "gamg", "bddc", "pmg", "pmg_shell"])
     parser.add_argument("--pc-hypre-coarsen-type", type=str, default="HMIS")
     parser.add_argument("--pc-hypre-interp-type", type=str, default="ext+i")
     parser.add_argument("--pc-hypre-strong-threshold", type=float, default=None)
@@ -815,6 +1005,7 @@ def main() -> None:
     parser.add_argument("--pc-hypre-nongalerkin-tol", type=float, default=None)
     parser.add_argument("--max-deflation-basis-vectors", type=int, default=16)
     parser.add_argument("--petsc-opt", action="append", default=[])
+    parser.add_argument("--pmg-microbenchmark-only", action="store_true", default=False)
     args = parser.parse_args()
     args.elem_type = validate_supported_elem_type(3, args.elem_type)
     result = run_probe(args)

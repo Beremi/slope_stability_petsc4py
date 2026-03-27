@@ -12,6 +12,7 @@ except Exception:  # pragma: no cover
     PETSc = None
 
 _PETSC_MAT_CSR_REFS: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_PETSC_MAT_COO_REFS: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _PETSC_MAT_METADATA: dict[int, dict[str, object]] = {}
 _PETSC_MAT_IS_REFS: dict[int, tuple[object, object]] = {}
 
@@ -46,6 +47,18 @@ def unflatten_field(vec: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
 
     dim, n_nodes = shape
     return np.asarray(vec, dtype=np.float64).reshape((dim, n_nodes), order="F")
+
+
+def full_field_from_free_values(values: np.ndarray, free_idx: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Lift free DOF values back into a full ``(dim, n_nodes)`` field.
+
+    The mapping follows the same MATLAB-style column-major ordering used by
+    :func:`q_to_free_indices`.
+    """
+
+    flat = np.zeros(int(np.prod(shape, dtype=np.int64)), dtype=np.float64)
+    flat[np.asarray(free_idx, dtype=np.int64)] = np.asarray(values, dtype=np.float64).reshape(-1)
+    return unflatten_field(flat, shape)
 
 
 def to_numpy_vector(x) -> np.ndarray:
@@ -191,6 +204,7 @@ def local_csr_to_petsc_aij_matrix(
     global_shape: tuple[int, int],
     comm,
     block_size: int | None = None,
+    local_col_size: int | None = None,
 ):
     """Create a distributed PETSc AIJ matrix from already-owned CSR rows."""
 
@@ -201,15 +215,73 @@ def local_csr_to_petsc_aij_matrix(
     indptr = np.array(csr.indptr, dtype=PETSc.IntType, copy=True)
     indices = np.array(csr.indices, dtype=PETSc.IntType, copy=True)
     data = np.array(csr.data, dtype=np.float64, copy=True)
+    if local_col_size is not None:
+        local_cols = int(local_col_size)
+    elif int(comm.getSize()) == 1:
+        local_cols = int(csr.shape[1])
+    elif (
+        block_size is not None
+        and int(global_shape[0]) == int(global_shape[1])
+        and int(csr.shape[0]) % int(block_size) == 0
+    ):
+        # Preserve node-aligned ownership for distributed square block operators.
+        local_cols = int(csr.shape[0])
+    else:
+        local_cols = PETSc.DECIDE
     mat = PETSc.Mat().createAIJ(
-        size=((csr.shape[0], int(global_shape[0])), (csr.shape[0], int(global_shape[1]))),
+        size=((csr.shape[0], int(global_shape[0])), (local_cols, int(global_shape[1]))),
         csr=(indptr, indices, data),
         comm=comm,
     )
-    if block_size is not None:
+    if (
+        block_size is not None
+        and int(csr.shape[0]) % int(block_size) == 0
+        and int(global_shape[0]) % int(block_size) == 0
+        and int(global_shape[1]) % int(block_size) == 0
+        and int(local_cols) != int(PETSc.DECIDE)
+        and int(local_cols) % int(block_size) == 0
+    ):
         mat.setBlockSize(int(block_size))
     mat.assemble()
     _PETSC_MAT_CSR_REFS[int(mat.handle)] = (indptr, indices, data)
+    return mat
+
+
+def owned_coo_to_petsc_aij_matrix(
+    rows,
+    cols,
+    data,
+    *,
+    global_shape: tuple[int, int],
+    owned_row_range: tuple[int, int],
+    comm,
+    local_col_size: int | None = None,
+):
+    """Create a distributed PETSc AIJ matrix from owned global COO triplets."""
+
+    _require_petsc()
+    row_arr = np.asarray(rows, dtype=PETSc.IntType).reshape(-1)
+    col_arr = np.asarray(cols, dtype=PETSc.IntType).reshape(-1)
+    data_arr = np.asarray(data, dtype=np.float64).reshape(-1)
+    if row_arr.size != col_arr.size or row_arr.size != data_arr.size:
+        raise ValueError("COO rows, cols, and data must have the same length")
+
+    row0, row1 = (int(owned_row_range[0]), int(owned_row_range[1]))
+    if row_arr.size:
+        if int(row_arr.min()) < row0 or int(row_arr.max()) >= row1:
+            raise ValueError("COO rows must be locally owned by the target rank")
+    local_rows = int(row1 - row0)
+    local_cols = int(local_col_size) if local_col_size is not None else PETSc.DECIDE
+
+    mat = PETSc.Mat().createAIJ(
+        size=((local_rows, int(global_shape[0])), (local_cols, int(global_shape[1]))),
+        comm=comm,
+    )
+    if row_arr.size:
+        mat.setPreallocationCOO(row_arr, col_arr)
+        mat.setValuesCOO(data_arr)
+    mat.assemble()
+    _PETSC_MAT_COO_REFS[int(mat.handle)] = (row_arr, col_arr, data_arr)
     return mat
 
 
@@ -472,6 +544,7 @@ def release_petsc_aij_matrix(A) -> None:
 
     if PETSc is not None and isinstance(A, PETSc.Mat):
         _PETSC_MAT_CSR_REFS.pop(int(A.handle), None)
+        _PETSC_MAT_COO_REFS.pop(int(A.handle), None)
         metadata = _PETSC_MAT_METADATA.pop(int(A.handle), None)
         if metadata:
             for value in metadata.values():
@@ -527,8 +600,22 @@ def extract_submatrix_free(A, free_idx: np.ndarray):
     """Extract the free-free block used for constrained systems."""
 
     if PETSc is not None and isinstance(A, PETSc.Mat):
-        iset = PETSc.IS().createGeneral(free_idx.astype(PETSc.IntType), comm=A.getComm())
-        return A.createSubMatrix(iset, iset)
+        free_arr = np.asarray(free_idx, dtype=PETSc.IntType).reshape(-1)
+        comm = A.getComm()
+        if int(comm.getSize()) > 1:
+            row0, row1 = A.getOwnershipRange()
+            mask = (free_arr >= int(row0)) & (free_arr < int(row1))
+            free_arr = np.asarray(free_arr[mask], dtype=PETSc.IntType)
+        iset = PETSc.IS().createGeneral(free_arr, comm=comm)
+        sub = A.createSubMatrix(iset, iset)
+        try:
+            block_size = int(sub.getBlockSize() or 1)
+            n_global, _m_global = sub.getSize()
+            if block_size > 1 and int(n_global) % block_size != 0:
+                sub.setBlockSize(1)
+        except Exception:
+            pass
+        return sub
     return A[np.ix_(free_idx, free_idx)]
 
 

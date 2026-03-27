@@ -13,7 +13,7 @@
 
 - New sweep summary: [kernel_rows/summary.json](/home/beremi/repos/slope_stability-1/artifacts/p4_scaling_rows_nob_actual/kernel_rows/summary.json)
 - New sweep report: [kernel_rows/report.md](/home/beremi/repos/slope_stability-1/artifacts/p4_scaling_rows_nob_actual/kernel_rows/report.md)
-- Previous actual `rows+overlap` baseline: [report_p4_actual_scaling_vs_previous.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_actual_scaling_vs_previous.md)
+- Previous actual `rows+overlap` baseline: [report_p4_actual_scaling_vs_previous.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_actual_scaling_vs_previous.md)
 - Previous memory smoke: [run_info.json](/home/beremi/repos/slope_stability-1/artifacts/petsc_smoke_rows_overlap_memfix_step1/data/run_info.json)
 - New memory smoke: [run_info.json](/home/beremi/repos/slope_stability-1/artifacts/petsc_smoke_rows_overlap_nob_step1/data/run_info.json)
 

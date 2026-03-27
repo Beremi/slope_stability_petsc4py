@@ -14,7 +14,7 @@
   - `recv_neighbor_ranks`, `recv_ptr`, `recv_overlap_pos`, `recv_global_ip`
   - `send_neighbor_ranks`, `send_ptr`, `send_unique_pos`, `send_global_ip`
 - Runtime exchange uses packed `mpi4py` point-to-point sends/receives. The old `unique_gather` path remains as a fallback/reference.
-- Extended [scale_p4.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/scale_p4.py) so it can benchmark:
+- Extended [scale_p4.py](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/scale_p4.py) so it can benchmark:
   - tangent kernels: `--kernels legacy rows`
   - constitutive modes: `--constitutive-modes overlap unique_exchange`
   - and report `local_constitutive_comm` separately.
@@ -69,10 +69,10 @@
 
 ## Comparison To The Previous Version
 
-- The previous production optimization report was [report_tangent_kernel_validation_vs_previous.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_tangent_kernel_validation_vs_previous.md). That report covered the `legacy` vs `rows` tangent-kernel change and showed real local owned-row assembly speedups.
+- The previous production optimization report was [report_tangent_kernel_validation_vs_previous.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_tangent_kernel_validation_vs_previous.md). That report covered the `legacy` vs `rows` tangent-kernel change and showed real local owned-row assembly speedups.
 - The previous end-to-end runtime baselines used for context remain:
-  - [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_scaling_step2.md)
-  - [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p2_vs_p4_rank8_final_guarded80_v2.md)
+  - [report_p4_scaling_step2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_scaling_step2.md)
+  - [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p2_vs_p4_rank8_final_guarded80_v2.md)
 - Relative to that previous version, the new change is specifically:
   - the unique constitutive path no longer needs runtime global reconstruction of overlap-local constitutive fields via `allgather`
   - it now has an exchange-ready owned-row metadata layer and a `unique_exchange` runtime mode
@@ -85,7 +85,7 @@ Full phase-1 and phase-2 acceptance runs were not executable in this environment
 What is ready to run on a PETSc-capable machine:
 
 ```bash
-PYTHONPATH=src python benchmarks/3d_hetero_ssr_default/scale_p4.py \
+PYTHONPATH=src python benchmarks/3d_hetero_ssr_default/archive/scale_p4.py \
   --kernels legacy rows \
   --constitutive-modes overlap \
   --ranks 1 2 4 8 \
@@ -93,7 +93,7 @@ PYTHONPATH=src python benchmarks/3d_hetero_ssr_default/scale_p4.py \
 ```
 
 ```bash
-PYTHONPATH=src python benchmarks/3d_hetero_ssr_default/scale_p4.py \
+PYTHONPATH=src python benchmarks/3d_hetero_ssr_default/archive/scale_p4.py \
   --kernels rows \
   --constitutive-modes overlap unique_exchange \
   --ranks 1 2 4 8 \

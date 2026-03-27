@@ -16,10 +16,10 @@ There are two distinct outcomes for the fresh rank-8 runs:
 
 ## Fresh Artifacts
 
-- Completed comparison report: [report_p2_vs_p4_rank8_final_memfix.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p2_vs_p4_rank8_final_memfix.md)
+- Completed comparison report: [report_p2_vs_p4_rank8_final_memfix.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p2_vs_p4_rank8_final_memfix.md)
 - Completed comparison summary: [summary.json](/home/beremi/repos/slope_stability-1/artifacts/p2_p4_compare_rank8_final_memfix/summary.json)
-- Recycle-enabled failure note: [report_p4_rank8_recycle_guard80_failed.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p4_rank8_recycle_guard80_failed.md)
-- Previous guarded comparison baseline: [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p2_vs_p4_rank8_final_guarded80_v2.md)
+- Recycle-enabled failure note: [report_p4_rank8_recycle_guard80_failed.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p4_rank8_recycle_guard80_failed.md)
+- Previous guarded comparison baseline: [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p2_vs_p4_rank8_final_guarded80_v2.md)
 
 ## Requested Recycle-Enabled `P4` Run
 

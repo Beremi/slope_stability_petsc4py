@@ -17,7 +17,7 @@
 - Failed stdout: [p4_rows_overlap_recycle_guard80_failed.stdout.log](/home/beremi/repos/slope_stability-1/artifacts/p2_p4_compare_rank8_final_memfix/p4_rows_overlap_recycle_guard80_failed.stdout.log)
 - Failed stderr: [p4_rows_overlap_recycle_guard80_failed.stderr.log](/home/beremi/repos/slope_stability-1/artifacts/p2_p4_compare_rank8_final_memfix/p4_rows_overlap_recycle_guard80_failed.stderr.log)
 - Partial progress: [progress.jsonl](/home/beremi/repos/slope_stability-1/artifacts/p2_p4_compare_rank8_final_memfix/p4_rank8_step100_recycle_guard80_failed/data/progress.jsonl)
-- Previous guarded comparison baseline: [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/report_p2_vs_p4_rank8_final_guarded80_v2.md)
+- Previous guarded comparison baseline: [report_p2_vs_p4_rank8_final_guarded80_v2.md](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/archive/report_p2_vs_p4_rank8_final_guarded80_v2.md)
 
 ## Outcome
 
