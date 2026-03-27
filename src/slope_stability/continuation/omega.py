@@ -43,7 +43,7 @@ def omega_SSR_direct_continuation(
     omega = 0.0
     constitutive_matrix_builder.reduction(lambda_ini)
 
-    U, flag = newton(
+    U, flag, _ = newton(
         U_ini,
         tol,
         it_newt_max,
@@ -65,7 +65,7 @@ def omega_SSR_direct_continuation(
     U_beta = beta * np.asarray(U_ini, dtype=np.float64) + (1.0 - beta) * np.asarray(U, dtype=np.float64)
 
     constitutive_matrix_builder.reduction(lambda_ini - eps)
-    U_eps, flag = newton(
+    U_eps, flag, _ = newton(
         U_beta,
         tol,
         it_newt_max,

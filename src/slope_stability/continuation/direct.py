@@ -80,7 +80,8 @@ def init_phase_SSR_direct_continuation(
     while True:
         lambda_it = lambda1 + d_lambda
 
-        linear_system_solver.expand_deflation_basis((U1.reshape(-1, order="F")[q_to_free_indices(Q)]))
+        if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
+            linear_system_solver.expand_deflation_basis((U1.reshape(-1, order="F")[q_to_free_indices(Q)]))
         U2, omega2, flag = omega_SSR_direct_continuation(
             lambda_it,
             U1,
@@ -157,7 +158,8 @@ def SSR_direct_continuation(
         linear_system_solver,
     )
 
-    linear_system_solver.expand_deflation_basis(U_old.reshape(-1, order="F")[q_to_free_indices(Q)])
+    if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
+        linear_system_solver.expand_deflation_basis(U_old.reshape(-1, order="F")[q_to_free_indices(Q)])
 
     lambda_hist[0] = lambda_old
     omega_hist[0] = omega_old
@@ -207,7 +209,8 @@ def SSR_direct_continuation(
             omega_hist[step - 1] = omega
             Umax_hist[step - 1] = np.max(np.linalg.norm(U, axis=0))
             work_hist[step - 1] = float(np.dot(U.ravel(order="F"), f.ravel(order="F")))
-            linear_system_solver.expand_deflation_basis(U.reshape(-1, order="F")[q_to_free_indices(Q)])
+            if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
+                linear_system_solver.expand_deflation_basis(U.reshape(-1, order="F")[q_to_free_indices(Q)])
 
             if (d_lambda / d_omega_test) * (omega_hist[step - 1] - omega_hist[0]) < d_lambda_diff_scaled_min:
                 break

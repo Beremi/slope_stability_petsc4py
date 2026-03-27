@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from time import perf_counter
+from typing import Callable
+
 import numpy as np
 
 from .damping import damping, damping_alg5
 from ..utils import q_to_free_indices
-from ..utils import extract_submatrix_free, release_petsc_aij_matrix
+from ..utils import extract_submatrix_free, release_petsc_aij_matrix, to_petsc_aij_matrix
 
 try:  # pragma: no cover - PETSc optional in tests
     from petsc4py import PETSc
@@ -32,6 +35,10 @@ def _free_norm(v: np.ndarray, Q: np.ndarray) -> float:
 
 
 def _combine_matrices(alpha: float, A, beta: float, B):
+    if PETSc is not None and isinstance(A, PETSc.Mat) and not isinstance(B, PETSc.Mat):
+        B = to_petsc_aij_matrix(B, comm=A.getComm(), block_size=A.getBlockSize() or None)
+    elif PETSc is not None and isinstance(B, PETSc.Mat) and not isinstance(A, PETSc.Mat):
+        A = to_petsc_aij_matrix(A, comm=B.getComm(), block_size=B.getBlockSize() or None)
     if PETSc is not None and isinstance(A, PETSc.Mat) and isinstance(B, PETSc.Mat):
         C = A.copy()
         C.scale(float(alpha))
@@ -110,6 +117,38 @@ def _needs_preconditioning_matrix_refresh(linear_system_solver) -> bool:
     return False
 
 
+def _collector_snapshot(linear_system_solver) -> dict[str, float | int]:
+    collector = getattr(linear_system_solver, "iteration_collector", None)
+    if collector is None:
+        return {
+            "iterations": 0,
+            "solve_time": 0.0,
+            "preconditioner_time": 0.0,
+            "orthogonalization_time": 0.0,
+        }
+    return {
+        "iterations": int(collector.get_total_iterations()),
+        "solve_time": float(collector.get_total_solve_time()),
+        "preconditioner_time": float(collector.get_total_preconditioner_time()),
+        "orthogonalization_time": float(collector.get_total_orthogonalization_time()),
+    }
+
+
+def _collector_delta(before: dict[str, float | int], after: dict[str, float | int]) -> dict[str, float | int]:
+    return {
+        "iterations": int(after["iterations"]) - int(before["iterations"]),
+        "solve_time": float(after["solve_time"]) - float(before["solve_time"]),
+        "preconditioner_time": float(after["preconditioner_time"]) - float(before["preconditioner_time"]),
+        "orthogonalization_time": float(after["orthogonalization_time"]) - float(before["orthogonalization_time"]),
+    }
+
+
+def _emit_progress(progress_callback: Callable[[dict], None] | None, *, event: str, **payload) -> None:
+    if progress_callback is None:
+        return
+    progress_callback({"event": event, **payload})
+
+
 def _requires_explicit_preconditioning_matrix(linear_system_solver) -> bool:
     fn = getattr(linear_system_solver, "preconditioner_requires_explicit_matrix", None)
     if callable(fn):
@@ -154,9 +193,25 @@ def _destroy_petsc_mat(A) -> None:
         A.destroy()
 
 
-def _cleanup_pre_solve_iteration_mats(*, K_tangent, K_r, use_full_operator: bool) -> None:
-    _destroy_petsc_mat(K_tangent)
-    if not bool(use_full_operator):
+def _is_builder_cached_matrix(A, constitutive_matrix_builder) -> bool:
+    if A is None or constitutive_matrix_builder is None:
+        return False
+    for attr in (
+        "_owned_tangent_mat",
+        "_owned_regularized_mat",
+        "_bddc_tangent_mat",
+        "_bddc_elastic_mat",
+        "_bddc_regularized_mat",
+    ):
+        if getattr(constitutive_matrix_builder, attr, None) is A:
+            return True
+    return False
+
+
+def _cleanup_pre_solve_iteration_mats(*, K_tangent, K_r, use_full_operator: bool, constitutive_matrix_builder=None) -> None:
+    if not _is_builder_cached_matrix(K_tangent, constitutive_matrix_builder):
+        _destroy_petsc_mat(K_tangent)
+    if not bool(use_full_operator) and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
         _destroy_petsc_mat(K_r)
 
 
@@ -203,6 +258,22 @@ def _build_regularized_from_cached_if_available(constitutive_matrix_builder, r: 
     return None
 
 
+def _ensure_tangent_matrix_for_regularization(
+    constitutive_matrix_builder,
+    U_it,
+    *,
+    K_tangent,
+    use_free_build: bool,
+):
+    if K_tangent is not None:
+        return K_tangent
+    if use_free_build and _supports_free_builder(constitutive_matrix_builder, "build_F_K_tangent_reduced_free"):
+        _unused_F_free, K_tangent = constitutive_matrix_builder.build_F_K_tangent_reduced_free(U_it)
+        return K_tangent
+    _unused_F, K_tangent = constitutive_matrix_builder.build_F_K_tangent_reduced(U_it)
+    return K_tangent
+
+
 def _supports_free_builder(constitutive_matrix_builder, name: str) -> bool:
     fn = getattr(constitutive_matrix_builder, name, None)
     return callable(fn) and getattr(constitutive_matrix_builder, "owned_tangent_pattern", None) is not None
@@ -230,6 +301,8 @@ def newton(
     f: np.ndarray,
     constitutive_matrix_builder,
     linear_system_solver,
+    *,
+    progress_callback: Callable[[dict], None] | None = None,
 ):
     """Plain Newton solver for ``F(U) = f``.
 
@@ -257,6 +330,8 @@ def newton(
 
     while True:
         it += 1
+        iter_t0 = perf_counter()
+        snap_before_iter = _collector_snapshot(linear_system_solver)
 
         use_full_operator = _prefers_full_system_operator(linear_system_solver, K_elast)
         use_free_build = _supports_free_builder(constitutive_matrix_builder, "build_F_reduced_free")
@@ -267,6 +342,7 @@ def newton(
         F = None
         F_local = None
         F_free_local = None
+        f_free_local = None
 
         if compute_diffs:
             if use_local_build:
@@ -292,14 +368,6 @@ def newton(
             else:
                 F, K_tangent = constitutive_matrix_builder.build_F_K_tangent_reduced(U_it)
                 F_free = _to_free_vector(F, Q)
-            if use_local_build:
-                f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
-                criterion = _dist_norm_local(F_free_local - f_free_local, comm) / norm_f
-            else:
-                criterion = float(np.linalg.norm(F_free - f_free)) / norm_f
-            if criterion < tol:
-                _cleanup_pre_solve_iteration_mats(K_tangent=K_tangent, K_r=K_r, use_full_operator=use_full_operator)
-                break
         else:
             if use_local_build:
                 F_local = np.asarray(constitutive_matrix_builder.build_F_reduced_local(U_it), dtype=np.float64).reshape(-1)
@@ -310,14 +378,45 @@ def newton(
             else:
                 F = constitutive_matrix_builder.build_F_reduced(U_it)
                 F_free = _to_free_vector(F, Q)
+
+        if use_local_build:
+            f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
+            criterion_abs = _dist_norm_local(F_free_local - f_free_local, comm)
+        else:
+            criterion_abs = float(np.linalg.norm(F_free - f_free))
+        criterion = criterion_abs / norm_f
+
+        if compute_diffs and criterion < tol:
+            _emit_progress(
+                progress_callback,
+                event="newton_iteration",
+                solver="newton",
+                iteration=int(it),
+                criterion=float(criterion_abs),
+                rel_residual=float(criterion),
+                alpha=None,
+                r=float(r),
+                linear_iterations=0,
+                linear_solve_time=0.0,
+                linear_preconditioner_time=0.0,
+                linear_orthogonalization_time=0.0,
+                iteration_wall_time=float(perf_counter() - iter_t0),
+                tolerance=float(tol),
+                status="converged",
+            )
+            _cleanup_pre_solve_iteration_mats(
+                K_tangent=K_tangent,
+                K_r=K_r,
+                use_full_operator=use_full_operator,
+                constitutive_matrix_builder=constitutive_matrix_builder,
+            )
+            break
         if use_local_build:
             f_local = _local_owned_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
-            f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
             rhs_local = f_local - F_local
             rhs = f_free_local - F_free_local
         else:
             rhs_local = None
-            f_free_local = None
             F_free_local = None
             rhs = f_free - F_free
         if K_r is None:
@@ -325,6 +424,12 @@ def newton(
             if cached_regularized is not None:
                 K_r = cached_regularized
             else:
+                K_tangent = _ensure_tangent_matrix_for_regularization(
+                    constitutive_matrix_builder,
+                    U_it,
+                    K_tangent=K_tangent,
+                    use_free_build=use_free_build,
+                )
                 K_r = _combine_matrices(r, K_elast, 1.0 - r, K_tangent)
         preconditioning_matrix = None
         if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
@@ -345,7 +450,8 @@ def newton(
                     free_idx=free_idx,
                     preconditioning_matrix=preconditioning_matrix,
                 )
-                linear_system_solver.A_orthogonalize(K_r)
+                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                    linear_system_solver.A_orthogonalize(K_r)
                 if use_local_build:
                     dU_free = _solve_linear_system_local(
                         linear_system_solver,
@@ -360,15 +466,17 @@ def newton(
             else:
                 K_free = extract_submatrix_free(K_r, free_idx)
                 _setup_linear_system(linear_system_solver, K_free, A_full=K_r, free_idx=free_idx)
-                linear_system_solver.A_orthogonalize(K_free)
+                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                    linear_system_solver.A_orthogonalize(K_free)
                 dU_free = _solve_linear_system(linear_system_solver, K_free, rhs, free_idx=free_idx)
         finally:
+            _release_iteration_resources(linear_system_solver)
             _destroy_petsc_mat(K_free)
-            _destroy_petsc_mat(K_tangent)
-            if use_full_operator:
-                _release_iteration_resources(linear_system_solver)
-            else:
+            if not _is_builder_cached_matrix(K_tangent, constitutive_matrix_builder):
+                _destroy_petsc_mat(K_tangent)
+            if not use_full_operator and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
                 _destroy_petsc_mat(K_r)
+        iter_delta = _collector_delta(snap_before_iter, _collector_snapshot(linear_system_solver))
 
         dU = np.zeros(U_it.size, dtype=np.float64)
         dU[free_idx] = np.asarray(dU_free, dtype=np.float64)
@@ -390,6 +498,24 @@ def newton(
             comm=comm,
         )
 
+        _emit_progress(
+            progress_callback,
+            event="newton_iteration",
+            solver="newton",
+            iteration=int(it),
+            criterion=float(criterion_abs),
+            rel_residual=float(criterion),
+            alpha=float(alpha),
+            r=float(r),
+            linear_iterations=int(iter_delta["iterations"]),
+            linear_solve_time=float(iter_delta["solve_time"]),
+            linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
+            linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
+            iteration_wall_time=float(perf_counter() - iter_t0),
+            tolerance=float(tol),
+            status="iterate",
+        )
+
         compute_diffs = True
         if alpha < 1e-1:
             if alpha == 0.0:
@@ -398,7 +524,8 @@ def newton(
             else:
                 r *= 2.0 ** 0.25
         else:
-            linear_system_solver.expand_deflation_basis(_to_free_vector(dU, Q))
+            if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
+                linear_system_solver.expand_deflation_basis(_to_free_vector(dU, Q))
             if alpha > 0.5:
                 r = max(r / np.sqrt(2.0), r_min)
 
@@ -427,6 +554,8 @@ def newton_ind_ssr(
     f: np.ndarray,
     constitutive_matrix_builder,
     linear_system_solver,
+    *,
+    progress_callback: Callable[[dict], None] | None = None,
 ):
     """Nested Newton for ``F_lambda(U)=f`` with additional condition ``f^T U = omega``.
 
@@ -439,7 +568,20 @@ def newton_ind_ssr(
 
     free_idx = q_to_free_indices(Q)
     if free_idx.size == 0:
-        history = {"residual": np.array([0.0]), "r": np.array([r_min]), "alpha": np.array([1.0])}
+        history = {
+            "criterion": np.array([0.0], dtype=np.float64),
+            "residual": np.array([0.0], dtype=np.float64),
+            "r": np.array([r_min], dtype=np.float64),
+            "alpha": np.array([1.0], dtype=np.float64),
+            "lambda": np.array([float(lambda_it)], dtype=np.float64),
+            "delta_lambda": np.array([0.0], dtype=np.float64),
+            "accepted_delta_lambda": np.array([0.0], dtype=np.float64),
+            "linear_iterations": np.array([0], dtype=np.int64),
+            "linear_solve_time": np.array([0.0], dtype=np.float64),
+            "linear_preconditioner_time": np.array([0.0], dtype=np.float64),
+            "linear_orthogonalization_time": np.array([0.0], dtype=np.float64),
+            "iteration_wall_time": np.array([0.0], dtype=np.float64),
+        }
         return U_it, float(lambda_it), 0, 0, history
     f_free = _to_free_vector(f, Q)
 
@@ -454,12 +596,23 @@ def newton_ind_ssr(
     compute_diffs = True
     rel_resid = np.nan
 
+    criterion_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     residual_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     r_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     alpha_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    delta_lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    accepted_delta_lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    linear_iterations_hist = np.zeros(int(it_newt_max), dtype=np.int64)
+    linear_solve_hist = np.zeros(int(it_newt_max), dtype=np.float64)
+    linear_preconditioner_hist = np.zeros(int(it_newt_max), dtype=np.float64)
+    linear_orthogonalization_hist = np.zeros(int(it_newt_max), dtype=np.float64)
+    iteration_wall_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
 
     while True:
         it += 1
+        iter_t0 = perf_counter()
+        snap_before_iter = _collector_snapshot(linear_system_solver)
 
         use_full_operator = _prefers_full_system_operator(linear_system_solver, K_elast)
         use_free_build = _supports_free_builder(constitutive_matrix_builder, "build_F_all_free")
@@ -470,6 +623,7 @@ def newton_ind_ssr(
         F = None
         F_local = None
         F_free_local = None
+        f_free_local = None
 
         if compute_diffs:
             if use_local_build:
@@ -496,16 +650,6 @@ def newton_ind_ssr(
             else:
                 F, K_tangent = constitutive_matrix_builder.build_F_K_tangent_all(lambda_it, U_it)
                 F_free = _to_free_vector(F, Q)
-            if use_local_build:
-                f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
-                criterion = _dist_norm_local(F_free_local - f_free_local, comm)
-            else:
-                criterion = float(np.linalg.norm(F_free - f_free))
-            rel_resid = criterion / norm_f
-            residual_hist[it - 1] = rel_resid
-            if rel_resid < tol and it > 1:
-                _cleanup_pre_solve_iteration_mats(K_tangent=K_tangent, K_r=K_r, use_full_operator=use_full_operator)
-                break
         else:
             if use_local_build:
                 F_local = np.asarray(constitutive_matrix_builder.build_F_all_local(lambda_it, U_it), dtype=np.float64).reshape(-1)
@@ -517,12 +661,58 @@ def newton_ind_ssr(
                 F = constitutive_matrix_builder.build_F_all(lambda_it, U_it)
                 F_free = _to_free_vector(F, Q)
 
+        if use_local_build:
+            f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
+            criterion = _dist_norm_local(F_free_local - f_free_local, comm)
+        else:
+            criterion = float(np.linalg.norm(F_free - f_free))
+        rel_resid = criterion / norm_f
+        criterion_hist[it - 1] = criterion
+        residual_hist[it - 1] = rel_resid
+        lambda_hist[it - 1] = float(lambda_it)
+        if compute_diffs and rel_resid < tol and it > 1:
+            iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
+            _emit_progress(
+                progress_callback,
+                event="newton_iteration",
+                solver="newton_ind_ssr",
+                iteration=int(it),
+                criterion=float(criterion),
+                rel_residual=float(rel_resid),
+                alpha=None,
+                r=float(r),
+                lambda_value=float(lambda_it),
+                delta_lambda=None,
+                accepted_delta_lambda=None,
+                omega_value=float(omega),
+                linear_iterations=0,
+                linear_solve_time=0.0,
+                linear_preconditioner_time=0.0,
+                linear_orthogonalization_time=0.0,
+                iteration_wall_time=float(iteration_wall_hist[it - 1]),
+                tolerance=float(tol),
+                status="converged",
+            )
+            _cleanup_pre_solve_iteration_mats(
+                K_tangent=K_tangent,
+                K_r=K_r,
+                use_full_operator=use_full_operator,
+                constitutive_matrix_builder=constitutive_matrix_builder,
+            )
+            break
+
         r_hist[it - 1] = r
         if K_r is None:
             cached_regularized = _build_regularized_from_cached_if_available(constitutive_matrix_builder, r) if use_full_operator else None
             if cached_regularized is not None:
                 K_r = cached_regularized
             else:
+                K_tangent = _ensure_tangent_matrix_for_regularization(
+                    constitutive_matrix_builder,
+                    U_it,
+                    K_tangent=K_tangent,
+                    use_free_build=use_free_build,
+                )
                 K_r = _combine_matrices(r, K_elast, 1.0 - r, K_tangent)
         preconditioning_matrix = None
         if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
@@ -561,7 +751,8 @@ def newton_ind_ssr(
                     free_idx=free_idx,
                     preconditioning_matrix=preconditioning_matrix,
                 )
-                linear_system_solver.A_orthogonalize(K_r)
+                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                    linear_system_solver.A_orthogonalize(K_r)
                 if use_local_build:
                     f_local = _local_owned_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
                     f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
@@ -594,7 +785,8 @@ def newton_ind_ssr(
             else:
                 K_free = extract_submatrix_free(K_r, free_idx)
                 _setup_linear_system(linear_system_solver, K_free, A_full=K_r, free_idx=free_idx)
-                linear_system_solver.A_orthogonalize(K_free)
+                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                    linear_system_solver.A_orthogonalize(K_free)
                 dW_free = _solve_linear_system(linear_system_solver, K_free, -G_free, free_idx=free_idx)
                 dV_free = _solve_linear_system(
                     linear_system_solver,
@@ -603,12 +795,13 @@ def newton_ind_ssr(
                     free_idx=free_idx,
                 )
         finally:
+            _release_iteration_resources(linear_system_solver)
             _destroy_petsc_mat(K_free)
-            _destroy_petsc_mat(K_tangent)
-            if use_full_operator:
-                _release_iteration_resources(linear_system_solver)
-            else:
+            if not _is_builder_cached_matrix(K_tangent, constitutive_matrix_builder):
+                _destroy_petsc_mat(K_tangent)
+            if not use_full_operator and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
                 _destroy_petsc_mat(K_r)
+        iter_delta = _collector_delta(snap_before_iter, _collector_snapshot(linear_system_solver))
 
         W = np.zeros(U_it.size, dtype=np.float64)
         V = np.zeros(U_it.size, dtype=np.float64)
@@ -639,6 +832,35 @@ def newton_ind_ssr(
             comm=comm,
         )
         alpha_hist[it - 1] = alpha
+        delta_lambda_hist[it - 1] = float(d_l)
+        accepted_delta_lambda_hist[it - 1] = float(alpha * d_l)
+        linear_iterations_hist[it - 1] = int(iter_delta["iterations"])
+        linear_solve_hist[it - 1] = float(iter_delta["solve_time"])
+        linear_preconditioner_hist[it - 1] = float(iter_delta["preconditioner_time"])
+        linear_orthogonalization_hist[it - 1] = float(iter_delta["orthogonalization_time"])
+        iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
+
+        _emit_progress(
+            progress_callback,
+            event="newton_iteration",
+            solver="newton_ind_ssr",
+            iteration=int(it),
+            criterion=float(criterion),
+            rel_residual=float(rel_resid),
+            alpha=float(alpha),
+            r=float(r),
+            lambda_value=float(lambda_it),
+            delta_lambda=float(d_l),
+            accepted_delta_lambda=float(alpha * d_l),
+            omega_value=float(omega),
+            linear_iterations=int(iter_delta["iterations"]),
+            linear_solve_time=float(iter_delta["solve_time"]),
+            linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
+            linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
+            iteration_wall_time=float(iteration_wall_hist[it - 1]),
+            tolerance=float(tol),
+            status="iterate",
+        )
 
         compute_diffs = True
         if alpha < 1e-1:
@@ -648,8 +870,9 @@ def newton_ind_ssr(
             else:
                 r *= 2.0 ** 0.25
         else:
-            linear_system_solver.expand_deflation_basis(_to_free_vector(W, Q))
-            linear_system_solver.expand_deflation_basis(_to_free_vector(V, Q))
+            if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
+                linear_system_solver.expand_deflation_basis(_to_free_vector(W, Q))
+                linear_system_solver.expand_deflation_basis(_to_free_vector(V, Q))
             if alpha > 0.5:
                 r = max(r / np.sqrt(2.0), r_min)
 
@@ -671,9 +894,18 @@ def newton_ind_ssr(
             break
 
     history = {
+        "criterion": criterion_hist[:it],
         "residual": residual_hist[:it],
         "r": r_hist[:it],
         "alpha": alpha_hist[:it],
+        "lambda": lambda_hist[:it],
+        "delta_lambda": delta_lambda_hist[:it],
+        "accepted_delta_lambda": accepted_delta_lambda_hist[:it],
+        "linear_iterations": linear_iterations_hist[:it],
+        "linear_solve_time": linear_solve_hist[:it],
+        "linear_preconditioner_time": linear_preconditioner_hist[:it],
+        "linear_orthogonalization_time": linear_orthogonalization_hist[:it],
+        "iteration_wall_time": iteration_wall_hist[:it],
     }
     return U_it, float(lambda_it), flag_N, it, history
 
@@ -691,6 +923,8 @@ def newton_ind_ll(
     f: np.ndarray,
     constitutive_matrix_builder,
     linear_system_solver,
+    *,
+    progress_callback: Callable[[dict], None] | None = None,
 ):
     """Nested Newton for indirect limit-load continuation.
 
@@ -703,7 +937,20 @@ def newton_ind_ll(
 
     free_idx = q_to_free_indices(Q)
     if free_idx.size == 0:
-        history = {"residual": np.array([0.0]), "r": np.array([r_min]), "alpha": np.array([1.0])}
+        history = {
+            "criterion": np.array([0.0], dtype=np.float64),
+            "residual": np.array([0.0], dtype=np.float64),
+            "r": np.array([r_min], dtype=np.float64),
+            "alpha": np.array([1.0], dtype=np.float64),
+            "lambda": np.array([float(t_ini)], dtype=np.float64),
+            "delta_lambda": np.array([0.0], dtype=np.float64),
+            "accepted_delta_lambda": np.array([0.0], dtype=np.float64),
+            "linear_iterations": np.array([0], dtype=np.int64),
+            "linear_solve_time": np.array([0.0], dtype=np.float64),
+            "linear_preconditioner_time": np.array([0.0], dtype=np.float64),
+            "linear_orthogonalization_time": np.array([0.0], dtype=np.float64),
+            "iteration_wall_time": np.array([0.0], dtype=np.float64),
+        }
         return U_it, float(t_ini), 0, 0, history
 
     norm_f = _free_norm(f, Q)
@@ -717,12 +964,23 @@ def newton_ind_ll(
     compute_diffs = True
     rel_resid = np.nan
 
+    criterion_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     residual_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     r_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     alpha_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    delta_lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    accepted_delta_lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    linear_iterations_hist = np.zeros(int(it_newt_max), dtype=np.int64)
+    linear_solve_hist = np.zeros(int(it_newt_max), dtype=np.float64)
+    linear_preconditioner_hist = np.zeros(int(it_newt_max), dtype=np.float64)
+    linear_orthogonalization_hist = np.zeros(int(it_newt_max), dtype=np.float64)
+    iteration_wall_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
 
     while True:
         it += 1
+        iter_t0 = perf_counter()
+        snap_before_iter = _collector_snapshot(linear_system_solver)
 
         use_full_operator = _prefers_full_system_operator(linear_system_solver, K_elast)
         use_free_build = _supports_free_builder(constitutive_matrix_builder, "build_F_reduced_free")
@@ -733,6 +991,7 @@ def newton_ind_ll(
         F_int = None
         F_int_local = None
         F_int_free_local = None
+        f_free_local = None
 
         if compute_diffs:
             if use_local_build:
@@ -758,16 +1017,6 @@ def newton_ind_ll(
             else:
                 F_int, K_tangent = constitutive_matrix_builder.build_F_K_tangent_reduced(U_it)
                 F_int_free = _to_free_vector(F_int, Q)
-            if use_local_build:
-                f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
-                criterion = _dist_norm_local(t_it * f_free_local - F_int_free_local, comm)
-            else:
-                criterion = float(np.linalg.norm(t_it * _to_free_vector(f, Q) - F_int_free))
-            rel_resid = criterion / norm_f
-            residual_hist[it - 1] = rel_resid
-            if rel_resid < tol and it > 1:
-                _cleanup_pre_solve_iteration_mats(K_tangent=K_tangent, K_r=K_r, use_full_operator=use_full_operator)
-                break
         else:
             if use_local_build:
                 F_int_local = np.asarray(constitutive_matrix_builder.build_F_reduced_local(U_it), dtype=np.float64).reshape(-1)
@@ -779,12 +1028,58 @@ def newton_ind_ll(
                 F_int = constitutive_matrix_builder.build_F_reduced(U_it)
                 F_int_free = _to_free_vector(F_int, Q)
 
+        if use_local_build:
+            f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
+            criterion = _dist_norm_local(t_it * f_free_local - F_int_free_local, comm)
+        else:
+            criterion = float(np.linalg.norm(t_it * _to_free_vector(f, Q) - F_int_free))
+        rel_resid = criterion / norm_f
+        criterion_hist[it - 1] = criterion
+        residual_hist[it - 1] = rel_resid
+        lambda_hist[it - 1] = float(t_it)
+        if compute_diffs and rel_resid < tol and it > 1:
+            iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
+            _emit_progress(
+                progress_callback,
+                event="newton_iteration",
+                solver="newton_ind_ll",
+                iteration=int(it),
+                criterion=float(criterion),
+                rel_residual=float(rel_resid),
+                alpha=None,
+                r=float(r),
+                lambda_value=float(t_it),
+                delta_lambda=None,
+                accepted_delta_lambda=None,
+                omega_value=float(omega),
+                linear_iterations=0,
+                linear_solve_time=0.0,
+                linear_preconditioner_time=0.0,
+                linear_orthogonalization_time=0.0,
+                iteration_wall_time=float(iteration_wall_hist[it - 1]),
+                tolerance=float(tol),
+                status="converged",
+            )
+            _cleanup_pre_solve_iteration_mats(
+                K_tangent=K_tangent,
+                K_r=K_r,
+                use_full_operator=use_full_operator,
+                constitutive_matrix_builder=constitutive_matrix_builder,
+            )
+            break
+
         r_hist[it - 1] = r
         if K_r is None:
             cached_regularized = _build_regularized_from_cached_if_available(constitutive_matrix_builder, r) if use_full_operator else None
             if cached_regularized is not None:
                 K_r = cached_regularized
             else:
+                K_tangent = _ensure_tangent_matrix_for_regularization(
+                    constitutive_matrix_builder,
+                    U_it,
+                    K_tangent=K_tangent,
+                    use_free_build=use_free_build,
+                )
                 K_r = _combine_matrices(r, K_elast, 1.0 - r, K_tangent)
         preconditioning_matrix = None
         if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
@@ -806,7 +1101,8 @@ def newton_ind_ll(
                     free_idx=free_idx,
                     preconditioning_matrix=preconditioning_matrix,
                 )
-                linear_system_solver.A_orthogonalize(K_r)
+                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                    linear_system_solver.A_orthogonalize(K_r)
                 if use_local_build:
                     f_local = _local_owned_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
                     f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
@@ -844,7 +1140,8 @@ def newton_ind_ll(
             else:
                 K_free = extract_submatrix_free(K_r, free_idx)
                 _setup_linear_system(linear_system_solver, K_free, A_full=K_r, free_idx=free_idx)
-                linear_system_solver.A_orthogonalize(K_free)
+                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                    linear_system_solver.A_orthogonalize(K_free)
                 dW_free = _solve_linear_system(
                     linear_system_solver,
                     K_free,
@@ -858,12 +1155,13 @@ def newton_ind_ll(
                     free_idx=free_idx,
                 )
         finally:
+            _release_iteration_resources(linear_system_solver)
             _destroy_petsc_mat(K_free)
-            _destroy_petsc_mat(K_tangent)
-            if use_full_operator:
-                _release_iteration_resources(linear_system_solver)
-            else:
+            if not _is_builder_cached_matrix(K_tangent, constitutive_matrix_builder):
+                _destroy_petsc_mat(K_tangent)
+            if not use_full_operator and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
                 _destroy_petsc_mat(K_r)
+        iter_delta = _collector_delta(snap_before_iter, _collector_snapshot(linear_system_solver))
 
         W = np.zeros(U_it.size, dtype=np.float64)
         V = np.zeros(U_it.size, dtype=np.float64)
@@ -895,6 +1193,35 @@ def newton_ind_ll(
             comm=comm,
         )
         alpha_hist[it - 1] = alpha
+        delta_lambda_hist[it - 1] = float(d_t)
+        accepted_delta_lambda_hist[it - 1] = float(alpha * d_t)
+        linear_iterations_hist[it - 1] = int(iter_delta["iterations"])
+        linear_solve_hist[it - 1] = float(iter_delta["solve_time"])
+        linear_preconditioner_hist[it - 1] = float(iter_delta["preconditioner_time"])
+        linear_orthogonalization_hist[it - 1] = float(iter_delta["orthogonalization_time"])
+        iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
+
+        _emit_progress(
+            progress_callback,
+            event="newton_iteration",
+            solver="newton_ind_ll",
+            iteration=int(it),
+            criterion=float(criterion),
+            rel_residual=float(rel_resid),
+            alpha=float(alpha),
+            r=float(r),
+            lambda_value=float(t_it),
+            delta_lambda=float(d_t),
+            accepted_delta_lambda=float(alpha * d_t),
+            omega_value=float(omega),
+            linear_iterations=int(iter_delta["iterations"]),
+            linear_solve_time=float(iter_delta["solve_time"]),
+            linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
+            linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
+            iteration_wall_time=float(iteration_wall_hist[it - 1]),
+            tolerance=float(tol),
+            status="iterate",
+        )
 
         compute_diffs = True
         if alpha < 1e-1:
@@ -904,8 +1231,9 @@ def newton_ind_ll(
             else:
                 r *= 2.0 ** 0.25
         else:
-            linear_system_solver.expand_deflation_basis(_to_free_vector(W, Q))
-            linear_system_solver.expand_deflation_basis(_to_free_vector(V, Q))
+            if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
+                linear_system_solver.expand_deflation_basis(_to_free_vector(W, Q))
+                linear_system_solver.expand_deflation_basis(_to_free_vector(V, Q))
             if alpha > 0.5:
                 r = max(r / np.sqrt(2.0), r_min)
 
@@ -925,8 +1253,17 @@ def newton_ind_ll(
             break
 
     history = {
+        "criterion": criterion_hist[:it],
         "residual": residual_hist[:it],
         "r": r_hist[:it],
         "alpha": alpha_hist[:it],
+        "lambda": lambda_hist[:it],
+        "delta_lambda": delta_lambda_hist[:it],
+        "accepted_delta_lambda": accepted_delta_lambda_hist[:it],
+        "linear_iterations": linear_iterations_hist[:it],
+        "linear_solve_time": linear_solve_hist[:it],
+        "linear_preconditioner_time": linear_preconditioner_hist[:it],
+        "linear_orthogonalization_time": linear_orthogonalization_hist[:it],
+        "iteration_wall_time": iteration_wall_hist[:it],
     }
     return U_it, t_it, flag_N, it, history

@@ -85,9 +85,10 @@ def LL_indirect_continuation(
     U = np.asarray(U_elast, dtype=np.float64)
     Q = np.asarray(Q, dtype=bool)
 
-    omega_hist = np.zeros(step_max, dtype=np.float64)
-    t_hist = np.zeros(step_max, dtype=np.float64)
-    U_max_hist = np.zeros(step_max, dtype=np.float64)
+    history_size = max(2, int(step_max) + 1)
+    omega_hist = np.zeros(history_size, dtype=np.float64)
+    t_hist = np.zeros(history_size, dtype=np.float64)
+    U_max_hist = np.zeros(history_size, dtype=np.float64)
 
     omega = 0.0
     omega_old = 0.0
@@ -129,10 +130,38 @@ def LL_indirect_continuation(
     def _emit(event: str, **payload) -> None:
         if progress_callback is None:
             return
-        progress_callback({"event": event, **payload})
+        progress_callback({"event": event, "continuation_kind": "ll_indirect", **payload})
+
+    def _newton_progress_callback(
+        *,
+        target_step: int,
+        accepted_steps: int,
+        attempt_in_step: int,
+        omega_target: float,
+        lambda_before: float,
+    ):
+        if progress_callback is None:
+            return None
+
+        def _callback(event: dict) -> None:
+            progress_callback(
+                {
+                    "continuation_kind": "ll_indirect",
+                    "phase": "continuation",
+                    "target_step": int(target_step),
+                    "accepted_steps": int(accepted_steps),
+                    "attempt_in_step": int(attempt_in_step),
+                    "omega_target": float(omega_target),
+                    "lambda_before": float(lambda_before),
+                    **event,
+                }
+            )
+
+        return _callback
 
     _emit(
         "init_complete",
+        phase="init",
         accepted_steps=1,
         lambda_hist=[float(t)],
         omega_hist=[float(omega)],
@@ -148,6 +177,7 @@ def LL_indirect_continuation(
     n_omega_max = 5
     step = 1
     t_total = perf_counter()
+    stop_reason = "completed"
 
     attempt_counter_for_step = 0
     step_wall_accum = 0.0
@@ -172,6 +202,7 @@ def LL_indirect_continuation(
 
         snap_before = _collector_snapshot(linear_system_solver)
         t_attempt = perf_counter()
+        attempt_in_step = attempt_counter_for_step + 1
         basis_before_attempt = _basis_snapshot(linear_system_solver)
         U_it, t_it, flag, it_newt, history = newton_ind_ll(
             U_ini,
@@ -186,6 +217,13 @@ def LL_indirect_continuation(
             f,
             constitutive_matrix_builder,
             linear_system_solver,
+            progress_callback=_newton_progress_callback(
+                target_step=step + 1,
+                accepted_steps=step,
+                attempt_in_step=attempt_in_step,
+                omega_target=float(omega_it),
+                lambda_before=float(t),
+            ),
         )
         _basis_restore(linear_system_solver, basis_before_attempt)
         _notify_attempt(linear_system_solver, success=(flag == 0))
@@ -218,8 +256,10 @@ def LL_indirect_continuation(
 
         _emit(
             "attempt_complete",
+            phase="continuation",
             target_step=int(step + 1),
             accepted_steps=int(step),
+            attempt_in_step=int(attempt_in_step),
             success=bool(flag == 0),
             omega_target=float(omega_it),
             lambda_before=float(t),
@@ -241,7 +281,8 @@ def LL_indirect_continuation(
             step += 1
             U_old = U
             U = U_it
-            linear_system_solver.expand_deflation_basis(_free(U, Q))
+            if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
+                linear_system_solver.expand_deflation_basis(_free(U, Q))
             omega_old = omega
             omega = omega_it
 
@@ -269,10 +310,13 @@ def LL_indirect_continuation(
 
             _emit(
                 "step_accepted",
+                phase="continuation",
                 accepted_steps=int(step),
                 lambda_value=float(t),
                 omega_value=float(omega),
                 d_lambda=float(d_t),
+                d_omega=float(d_omega),
+                u_max=float(U_max_hist[step - 1]),
                 attempt_count=int(attempt_counter_for_step),
                 newton_iterations=int(it_newt),
                 newton_iterations_total=int(step_newton_accum),
@@ -294,6 +338,7 @@ def LL_indirect_continuation(
             step_orth_accum = 0.0
 
             if d_t < d_t_min:
+                stop_reason = "d_t_min"
                 break
 
             if (it_newt < 20) and (step > 2) and (
@@ -302,10 +347,13 @@ def LL_indirect_continuation(
                 d_omega *= 2.0
 
         if n_omega >= n_omega_max:
+            stop_reason = "omega_reduction_limit"
             break
         if omega >= omega_max:
+            stop_reason = "omega_max"
             break
         if step >= step_max:
+            stop_reason = "step_max"
             break
 
     t_hist = t_hist[:step]
@@ -315,9 +363,11 @@ def LL_indirect_continuation(
 
     _emit(
         "finished",
+        phase="continuation",
         accepted_steps=int(step),
         lambda_last=float(t_hist[-1]),
         omega_last=float(omega_hist[-1]),
+        stop_reason=str(stop_reason),
         total_wall_time=float(stats["total_wall_time"]),
     )
 

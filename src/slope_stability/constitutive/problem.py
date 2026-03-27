@@ -1299,6 +1299,9 @@ class ConstitutiveOperator:
         self.release_petsc_caches()
 
     def _local_comm(self):
+        owned_comm = getattr(self, "_owned_comm", None)
+        if owned_comm is not None:
+            return owned_comm
         if PETSc is not None:
             return PETSc.COMM_WORLD
         if PYMPI is not None:
@@ -1577,7 +1580,7 @@ class ConstitutiveOperator:
             self._owned_tangent_mat = local_csr_to_petsc_aij_matrix(
                 local_matrix,
                 global_shape=(global_size, global_size),
-                comm=PETSc.COMM_WORLD,
+                comm=self._local_comm(),
                 block_size=self.dim,
             )
         else:
@@ -1628,7 +1631,7 @@ class ConstitutiveOperator:
             self._owned_regularized_mat = local_csr_to_petsc_aij_matrix(
                 local_matrix,
                 global_shape=(global_size, global_size),
-                comm=PETSc.COMM_WORLD,
+                comm=self._local_comm(),
                 block_size=self.dim,
             )
         else:
@@ -1742,7 +1745,7 @@ class ConstitutiveOperator:
                 local_matrix,
                 global_size=int(self.q_mask.size),
                 local_to_global=np.asarray(pattern.local_global_dofs, dtype=np.int64),
-                comm=PETSc.COMM_WORLD,
+                comm=self._local_comm(),
                 block_size=self.dim,
                 local_vector_size=local_vector_size,
                 local_mat_type=local_mat_type,
@@ -1787,7 +1790,7 @@ class ConstitutiveOperator:
                 local_matrix,
                 global_size=int(self.q_mask.size),
                 local_to_global=np.asarray(pattern.local_global_dofs, dtype=np.int64),
-                comm=PETSc.COMM_WORLD,
+                comm=self._local_comm(),
                 block_size=self.dim,
                 local_vector_size=local_vector_size,
                 local_mat_type=local_mat_type,
@@ -1834,7 +1837,7 @@ class ConstitutiveOperator:
                 local_matrix,
                 global_size=int(self.q_mask.size),
                 local_to_global=np.asarray(pattern.local_global_dofs, dtype=np.int64),
-                comm=PETSc.COMM_WORLD,
+                comm=self._local_comm(),
                 block_size=self.dim,
                 local_vector_size=local_vector_size,
                 local_mat_type=local_mat_type,
