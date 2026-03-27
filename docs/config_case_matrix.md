@@ -14,7 +14,7 @@ Supported config-driven cases in this checkpoint:
 | --- | --- | --- | --- |
 | `slope_stability_2D_homo_SSR.m` | [run_2D_homo_SSR_capture/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/run_2D_homo_SSR_capture/case.toml) | `2d_homo_ssr` | runnable |
 | `slope_stability_2D_homo_LL.m` | [run_2d_homo_ll/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/run_2d_homo_ll/case.toml) | `2d_homo_ssr` + `analysis = "ll"` | runnable |
-| `slope_stability_2D_Kozinec_SSR.m` | [run_2d_kozinec_ssr/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/run_2d_kozinec_ssr/case.toml) | `2d_kozinec_ssr` | runnable path is wired; default `P4` + `DIRECT` is heavier than the short smoke suite |
+| `slope_stability_2D_Kozinec_SSR.m` | [run_2d_kozinec_ssr/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/run_2d_kozinec_ssr/case.toml) | `2d_kozinec_ssr` | runnable; default `P2` + `PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE` avoids the broken quartic startup path |
 | `slope_stability_2D_Kozinec_LL.m` | [run_2d_kozinec_ll/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/run_2d_kozinec_ll/case.toml) | `2d_kozinec_ll` | runnable |
 | `slope_stability_2D_Luzec_SSR.m` | [run_2d_luzec_ssr/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/run_2d_luzec_ssr/case.toml) | `2d_luzec_ssr` | runnable |
 | `slope_stability_2D_Franz_dam_SSR.m` | [run_2d_franz_dam_ssr/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/run_2d_franz_dam_ssr/case.toml) | `2d_franz_dam_ssr` | runnable, direct SSR selectable with `continuation.method = "direct"` |

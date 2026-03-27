@@ -13,7 +13,8 @@ from .report_benchmark_suite import generate_suite_readme
 
 def _is_benchmark_case(config_path: Path) -> bool:
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    return bool(data.get("benchmark"))
+    benchmark = dict(data.get("benchmark", {}))
+    return bool(benchmark) and bool(benchmark.get("suite", False))
 
 
 def main() -> None:

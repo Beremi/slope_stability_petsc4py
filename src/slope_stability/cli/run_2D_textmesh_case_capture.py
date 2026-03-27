@@ -12,7 +12,9 @@ import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 
+from slope_stability.cli.assembly_policy import use_lightweight_mpi_elastic_path, use_owned_tangent_path
 from slope_stability.constitutive import ConstitutiveOperator
+from slope_stability.cli.progress import make_progress_logger
 from slope_stability.continuation import LL_indirect_continuation, SSR_direct_continuation, SSR_indirect_continuation
 from slope_stability.fem import (
     assemble_owned_elastic_rows_for_comm,
@@ -35,7 +37,7 @@ from slope_stability.mesh import (
 )
 from slope_stability.nonlinear.newton import _destroy_petsc_mat, _prefers_full_system_operator, _setup_linear_system, _solve_linear_system
 from slope_stability.seepage import heter_conduct, seepage_problem_2d
-from slope_stability.utils import extract_submatrix_free, local_csr_to_petsc_aij_matrix, owned_block_range, q_to_free_indices
+from slope_stability.utils import extract_submatrix_free, full_field_from_free_values, local_csr_to_petsc_aij_matrix, owned_block_range, q_to_free_indices
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -44,17 +46,7 @@ def _ensure_dir(path: Path) -> Path:
 
 
 def _make_progress_logger(progress_dir: Path):
-    progress_jsonl = progress_dir / "progress.jsonl"
-    progress_latest = progress_dir / "progress_latest.json"
-
-    def _write(event: dict) -> None:
-        payload = {"timestamp": np.datetime64("now").astype(str), **event}
-        with progress_jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload) + "\n")
-            handle.flush()
-        progress_latest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-    return _write
+    return make_progress_logger(progress_dir)
 
 
 def _collector_snapshot(solver) -> dict:
@@ -134,6 +126,7 @@ def run_capture(
     d_omega_ini_scale: float = 1.0 / 30.0,
     d_t_min: float = 1e-3,
     omega_max_stop: float = 7.0e7,
+    continuation_predictor: str = "secant",
     step_max: int = 100,
     it_newt_max: int = 50,
     it_damp_max: int = 10,
@@ -251,32 +244,57 @@ def run_capture(
         materials,
     )
 
-    elastic_rows = assemble_owned_elastic_rows_for_comm(
-        coord,
-        elem,
-        q_mask,
-        material_identifier,
-        materials,
-        PETSc.COMM_WORLD,
-        elem_type=elem_type,
+    use_owned_mpi_tangent_path = use_owned_tangent_path(
+        solver_type=solver_type,
+        mpi_distribute_by_nodes=mpi_distribute_by_nodes,
     )
-    global_size = int(coord.shape[0] * coord.shape[1])
-    K_elast = local_csr_to_petsc_aij_matrix(
-        elastic_rows.local_matrix,
-        global_shape=(global_size, global_size),
-        comm=PETSc.COMM_WORLD,
-        block_size=coord.shape[0],
+    use_lightweight_mpi_path = use_lightweight_mpi_elastic_path(
+        solver_type=solver_type,
+        mpi_distribute_by_nodes=mpi_distribute_by_nodes,
+        constitutive_mode=constitutive_mode,
     )
-    rhs_parts = MPI.COMM_WORLD.allgather(np.asarray(elastic_rows.local_rhs, dtype=np.float64))
-    f_V = np.concatenate(rhs_parts).reshape(coord.shape[0], coord.shape[1], order="F")
-    if seepage_payload:
-        grad_p = seepage_payload["grad_p"]
-        f_V_int = np.vstack((-grad_p[0, :], -grad_p[1, :] - gamma))
-        f_asm = assemble_strain_operator(coord, elem, elem_type, dim=2)
-        f_V = vector_volume(f_asm, f_V_int)
+    B = None
+    weight = np.zeros(n_int, dtype=np.float64)
+    elastic_rows = None
+
+    if use_lightweight_mpi_path:
+        elastic_rows = assemble_owned_elastic_rows_for_comm(
+            coord,
+            elem,
+            q_mask,
+            material_identifier,
+            materials,
+            PETSc.COMM_WORLD,
+            elem_type=elem_type,
+        )
+        global_size = int(coord.shape[0] * coord.shape[1])
+        K_elast = local_csr_to_petsc_aij_matrix(
+            elastic_rows.local_matrix,
+            global_shape=(global_size, global_size),
+            comm=PETSc.COMM_WORLD,
+            block_size=coord.shape[0],
+        )
+        rhs_parts = MPI.COMM_WORLD.allgather(np.asarray(elastic_rows.local_rhs, dtype=np.float64))
+        f_V = np.concatenate(rhs_parts).reshape(coord.shape[0], coord.shape[1], order="F")
+        if seepage_payload:
+            grad_p = seepage_payload["grad_p"]
+            f_V_int = np.vstack((-grad_p[0, :], -grad_p[1, :] - gamma))
+            f_asm = assemble_strain_operator(coord, elem, elem_type, dim=2)
+            f_V = vector_volume(f_asm, f_V_int)
+    else:
+        assembly = assemble_strain_operator(coord, elem, elem_type, dim=2)
+        from slope_stability.fem.assembly import build_elastic_stiffness_matrix
+
+        K_elast, weight, B = build_elastic_stiffness_matrix(assembly, shear, lame, bulk)
+        if seepage_payload:
+            grad_p = seepage_payload["grad_p"]
+            f_V_int = np.vstack((-grad_p[0, :], -grad_p[1, :] - gamma))
+        else:
+            f_V_int = np.vstack((np.zeros(assembly.n_int, dtype=np.float64), -gamma.astype(np.float64)))
+        f_V = vector_volume(assembly, f_V_int, weight)
 
     const_builder = ConstitutiveOperator(
-        B=None,
+        B=B,
         c0=c0,
         phi=phi,
         psi=psi,
@@ -284,33 +302,35 @@ def run_capture(
         shear=shear,
         bulk=bulk,
         lame=lame,
-        WEIGHT=np.zeros(n_int, dtype=np.float64),
+        WEIGHT=weight,
         n_strain=3,
         n_int=n_int,
         dim=2,
         q_mask=q_mask,
     )
 
-    row0, row1 = owned_block_range(coord.shape[1], coord.shape[0], PETSc.COMM_WORLD)
-    tangent_pattern = prepare_owned_tangent_pattern(
-        coord,
-        elem,
-        q_mask,
-        material_identifier,
-        materials,
-        (row0 // coord.shape[0], row1 // coord.shape[0]),
-        elem_type=elem_type,
-        include_unique=(str(constitutive_mode).lower() != "overlap"),
-        include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
-        elastic_rows=elastic_rows,
-    )
-    const_builder.set_owned_tangent_pattern(
-        tangent_pattern,
-        use_compiled=True,
-        tangent_kernel=tangent_kernel,
-        constitutive_mode=constitutive_mode,
-        use_compiled_constitutive=True,
-    )
+    if use_owned_mpi_tangent_path:
+        row0, row1 = owned_block_range(coord.shape[1], coord.shape[0], PETSc.COMM_WORLD)
+        needs_legacy_scatter = str(tangent_kernel).lower() == "legacy" or int(coord.shape[0]) != 3
+        tangent_pattern = prepare_owned_tangent_pattern(
+            coord,
+            elem,
+            q_mask,
+            material_identifier,
+            materials,
+            (row0 // coord.shape[0], row1 // coord.shape[0]),
+            elem_type=elem_type,
+            include_unique=(str(constitutive_mode).lower() != "overlap"),
+            include_legacy_scatter=needs_legacy_scatter,
+            elastic_rows=elastic_rows,
+        )
+        const_builder.set_owned_tangent_pattern(
+            tangent_pattern,
+            use_compiled=False,
+            tangent_kernel=tangent_kernel,
+            constitutive_mode=constitutive_mode,
+            use_compiled_constitutive=False,
+        )
 
     preconditioner_options = {
         "threads": 16,
@@ -396,6 +416,7 @@ def run_capture(
             f_V,
             const_builder,
             linear_system_solver.copy(),
+            continuation_predictor=str(continuation_predictor),
         )
         step_u = np.empty((0, 2, 0), dtype=np.float64)
     elif analysis_key == "ssr":
@@ -458,8 +479,7 @@ def run_capture(
             "init_linear_preconditioner_time": float(init_delta["preconditioner_time"]),
             "init_linear_orthogonalization_time": float(init_delta["orthogonalization_time"]),
         }
-        U_elast = np.zeros_like(f_V)
-        U_elast.reshape(-1, order="F")[free_idx] = np.asarray(U_elast_free, dtype=np.float64)
+        U_elast = full_field_from_free_values(np.asarray(U_elast_free, dtype=np.float64), free_idx, f_V.shape)
         linear_system_solver.expand_deflation_basis(np.asarray(U_elast_free, dtype=np.float64))
         omega_el = float(np.dot(f_free, np.asarray(U_elast_free, dtype=np.float64)))
         U_elast = U_elast * float(d_omega_ini_scale)

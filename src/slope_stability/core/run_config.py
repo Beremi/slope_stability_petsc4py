@@ -71,6 +71,8 @@ class NewtonConfig:
 @dataclass(frozen=True)
 class ContinuationConfig:
     method: str = "indirect"
+    predictor: str = "secant"
+    omega_step_controller: str = "legacy"
     lambda_init: float = 1.0
     d_lambda_init: float = 0.1
     d_lambda_min: float = 1e-3
@@ -80,6 +82,17 @@ class ContinuationConfig:
     step_max: int = 100
     d_omega_ini_scale: float = 0.2
     d_t_min: float = 1e-3
+    omega_no_increase_newton_threshold: int | None = None
+    omega_half_newton_threshold: int | None = None
+    omega_target_newton_iterations: float | None = None
+    omega_adapt_min_scale: float | None = None
+    omega_adapt_max_scale: float | None = None
+    omega_hard_newton_threshold: int | None = None
+    omega_hard_linear_threshold: int | None = None
+    omega_efficiency_floor: float | None = None
+    omega_efficiency_drop_ratio: float | None = None
+    omega_efficiency_window: int = 3
+    omega_hard_shrink_scale: float | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +150,7 @@ class LinearSolverConfig:
 class SeepageConfig:
     linear_tolerance: float = 1e-10
     linear_max_iter: int = 500
+    nonlinear_max_iter: int = 50
     water_unit_weight: float = 9.81
     conductivity: tuple[float, ...] = ()
     extra: dict[str, TomlValue] = field(default_factory=dict)
@@ -262,6 +276,8 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
     )
     continuation = ContinuationConfig(
         method=str(continuation_data.get("method", "indirect")),
+        predictor=str(continuation_data.get("predictor", "secant")),
+        omega_step_controller=str(continuation_data.get("omega_step_controller", "legacy")),
         lambda_init=float(continuation_data.get("lambda_init", 1.0)),
         d_lambda_init=float(continuation_data.get("d_lambda_init", 0.1)),
         d_lambda_min=float(continuation_data.get("d_lambda_min", 1e-3)),
@@ -271,6 +287,51 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         step_max=int(continuation_data.get("step_max", 100)),
         d_omega_ini_scale=float(continuation_data.get("d_omega_ini_scale", 0.2)),
         d_t_min=float(continuation_data.get("d_t_min", 1e-3)),
+        omega_no_increase_newton_threshold=(
+            None
+            if continuation_data.get("omega_no_increase_newton_threshold") is None
+            else int(continuation_data.get("omega_no_increase_newton_threshold"))
+        ),
+        omega_half_newton_threshold=(
+            None
+            if continuation_data.get("omega_half_newton_threshold") is None
+            else int(continuation_data.get("omega_half_newton_threshold"))
+        ),
+        omega_target_newton_iterations=(
+            None
+            if continuation_data.get("omega_target_newton_iterations") is None
+            else float(continuation_data.get("omega_target_newton_iterations"))
+        ),
+        omega_adapt_min_scale=(
+            None if continuation_data.get("omega_adapt_min_scale") is None else float(continuation_data.get("omega_adapt_min_scale"))
+        ),
+        omega_adapt_max_scale=(
+            None if continuation_data.get("omega_adapt_max_scale") is None else float(continuation_data.get("omega_adapt_max_scale"))
+        ),
+        omega_hard_newton_threshold=(
+            None
+            if continuation_data.get("omega_hard_newton_threshold") is None
+            else int(continuation_data.get("omega_hard_newton_threshold"))
+        ),
+        omega_hard_linear_threshold=(
+            None
+            if continuation_data.get("omega_hard_linear_threshold") is None
+            else int(continuation_data.get("omega_hard_linear_threshold"))
+        ),
+        omega_efficiency_floor=(
+            None if continuation_data.get("omega_efficiency_floor") is None else float(continuation_data.get("omega_efficiency_floor"))
+        ),
+        omega_efficiency_drop_ratio=(
+            None
+            if continuation_data.get("omega_efficiency_drop_ratio") is None
+            else float(continuation_data.get("omega_efficiency_drop_ratio"))
+        ),
+        omega_efficiency_window=int(continuation_data.get("omega_efficiency_window", 3)),
+        omega_hard_shrink_scale=(
+            None
+            if continuation_data.get("omega_hard_shrink_scale") is None
+            else float(continuation_data.get("omega_hard_shrink_scale"))
+        ),
     )
     newton = NewtonConfig(
         it_max=int(newton_data.get("it_max", 200)),
@@ -447,11 +508,16 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
     seepage = SeepageConfig(
         linear_tolerance=float(seepage_data.get("linear_tolerance", 1e-10)),
         linear_max_iter=int(seepage_data.get("linear_max_iter", 500)),
+        nonlinear_max_iter=int(seepage_data.get("nonlinear_max_iter", 50)),
         water_unit_weight=float(seepage_data.get("water_unit_weight", 9.81)),
         conductivity=tuple(conductivity),
         extra=_resolve_section_paths(
             config_path,
-            {k: v for k, v in seepage_data.items() if k not in {"linear_tolerance", "linear_max_iter", "water_unit_weight", "conductivity"}},
+            {
+                k: v
+                for k, v in seepage_data.items()
+                if k not in {"linear_tolerance", "linear_max_iter", "nonlinear_max_iter", "water_unit_weight", "conductivity"}
+            },
         ),
     )
     export = ExportConfig(

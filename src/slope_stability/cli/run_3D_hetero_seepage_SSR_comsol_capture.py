@@ -13,6 +13,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 from slope_stability.core.elements import validate_supported_elem_type
+from slope_stability.cli.progress import make_progress_logger
 from slope_stability.constitutive import ConstitutiveOperator
 from slope_stability.continuation import SSR_indirect_continuation
 from slope_stability.fem import (
@@ -39,17 +40,7 @@ def _ensure_dir(path: Path) -> Path:
 
 
 def _make_progress_logger(progress_dir: Path):
-    progress_jsonl = progress_dir / "progress.jsonl"
-    progress_latest = progress_dir / "progress_latest.json"
-
-    def _write(event: dict) -> None:
-        payload = {"timestamp": np.datetime64("now").astype(str), **event}
-        with progress_jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload) + "\n")
-            handle.flush()
-        progress_latest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-    return _write
+    return make_progress_logger(progress_dir)
 
 
 def run_capture(
@@ -63,6 +54,7 @@ def run_capture(
     d_lambda_min: float = 1e-5,
     d_lambda_diff_scaled_min: float = 0.005,
     omega_max_stop: float = 3.407e8,
+    continuation_predictor: str = "secant",
     step_max: int = 100,
     it_newt_max: int = 50,
     it_damp_max: int = 10,
@@ -311,6 +303,7 @@ def run_capture(
         const_builder,
         linear_system_solver.copy(),
         progress_callback=progress_callback,
+        continuation_predictor=str(continuation_predictor),
     )
     runtime = perf_counter() - t0
     mpi_comm = PETSc.COMM_WORLD.tompi4py()
@@ -360,6 +353,7 @@ def run_capture(
     }
 
     if rank == 0:
+        seepage_pw_reordered = np.asarray(pw, dtype=np.float64)[np.asarray(reordered.permutation, dtype=np.int64)]
         np.savez_compressed(
             data_dir / "petsc_run.npz",
             U=U,
@@ -368,6 +362,7 @@ def run_capture(
             Umax_hist=Umax_hist,
             step_U=step_u,
             seepage_pw=pw,
+            seepage_pw_reordered=seepage_pw_reordered,
             seepage_grad_p=grad_p,
             seepage_mater_sat=mater_sat,
             **{"stats_" + key: np.asarray(value) for key, value in stats.items() if key != "step_U"},

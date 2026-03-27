@@ -58,6 +58,7 @@ def run_capture(
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE",
     linear_tolerance: float = 1.0e-10,
     linear_max_iter: int = 300,
+    nonlinear_max_iter: int = 50,
 ) -> dict[str, object]:
     comm = PETSc.COMM_WORLD
     rank = int(comm.getRank())
@@ -138,7 +139,7 @@ def run_capture(
         conduct0,
         elem_type=elem_type,
         linear_system_solver=solver,
-        it_max=50,
+        it_max=nonlinear_max_iter,
         tol=1.0e-10,
     )
     runtime = perf_counter() - t0
@@ -190,6 +191,7 @@ def run_capture(
             "k": k.tolist(),
             "linear_tolerance": linear_tolerance,
             "linear_max_iter": linear_max_iter,
+            "nonlinear_max_iter": nonlinear_max_iter,
         },
         "timings": {
             "linear": {
@@ -226,6 +228,7 @@ def main() -> None:
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE")
     parser.add_argument("--linear_tolerance", type=float, default=1.0e-10)
     parser.add_argument("--linear_max_iter", type=int, default=300)
+    parser.add_argument("--nonlinear_max_iter", type=int, default=50)
     args = parser.parse_args()
     run_capture(
         out_dir=args.out_dir,
@@ -233,6 +236,7 @@ def main() -> None:
         solver_type=args.solver_type,
         linear_tolerance=args.linear_tolerance,
         linear_max_iter=args.linear_max_iter,
+        nonlinear_max_iter=args.nonlinear_max_iter,
     )
 
 

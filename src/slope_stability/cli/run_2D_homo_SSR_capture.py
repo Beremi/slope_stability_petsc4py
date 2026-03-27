@@ -17,6 +17,7 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
+from slope_stability.cli.assembly_policy import use_lightweight_mpi_elastic_path, use_owned_tangent_path
 from slope_stability.mesh import MaterialSpec, generate_homogeneous_slope_mesh_2d, heterogenous_materials, reorder_mesh_nodes
 from slope_stability.fem import (
     assemble_owned_elastic_rows_for_comm,
@@ -26,11 +27,12 @@ from slope_stability.fem import (
     vector_volume,
 )
 from slope_stability.constitutive import ConstitutiveOperator
+from slope_stability.cli.progress import make_progress_logger
 from slope_stability.continuation import SSR_indirect_continuation
 from slope_stability.continuation import LL_indirect_continuation
 from slope_stability.linear import SolverFactory
 from slope_stability.nonlinear.newton import _destroy_petsc_mat, _prefers_full_system_operator, _setup_linear_system, _solve_linear_system
-from slope_stability.utils import extract_submatrix_free, local_csr_to_petsc_aij_matrix, owned_block_range, q_to_free_indices
+from slope_stability.utils import extract_submatrix_free, full_field_from_free_values, local_csr_to_petsc_aij_matrix, owned_block_range, q_to_free_indices
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -39,17 +41,7 @@ def _ensure_dir(path: Path) -> Path:
 
 
 def _make_progress_logger(progress_dir: Path):
-    progress_jsonl = progress_dir / "progress.jsonl"
-    progress_latest = progress_dir / "progress_latest.json"
-
-    def _write(event: dict) -> None:
-        payload = {"timestamp": np.datetime64("now").astype(str), **event}
-        with progress_jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload) + "\n")
-            handle.flush()
-        progress_latest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-    return _write
+    return make_progress_logger(progress_dir)
 
 
 def _collector_snapshot(solver) -> dict:
@@ -180,6 +172,7 @@ def run_capture(
     d_omega_ini_scale: float = 0.2,
     d_t_min: float = 1e-3,
     omega_max_stop: float = 7.0e7,
+    continuation_predictor: str = "secant",
     step_max: int = 100,
     it_newt_max: int = 50,
     it_damp_max: int = 10,
@@ -240,7 +233,15 @@ def run_capture(
         materials,
     )
 
-    use_lightweight_mpi_path = bool(mpi_distribute_by_nodes and str(constitutive_mode).lower() != "global")
+    use_owned_mpi_tangent_path = use_owned_tangent_path(
+        solver_type=solver_type,
+        mpi_distribute_by_nodes=mpi_distribute_by_nodes,
+    )
+    use_lightweight_mpi_path = use_lightweight_mpi_elastic_path(
+        solver_type=solver_type,
+        mpi_distribute_by_nodes=mpi_distribute_by_nodes,
+        constitutive_mode=constitutive_mode,
+    )
     B = None
     weight = np.zeros(n_int, dtype=np.float64)
     elastic_rows = None
@@ -288,8 +289,9 @@ def run_capture(
         q_mask=q_mask,
     )
 
-    if mpi_distribute_by_nodes:
+    if use_owned_mpi_tangent_path:
         row0, row1 = owned_block_range(coord.shape[1], coord.shape[0], PETSc.COMM_WORLD)
+        needs_legacy_scatter = str(tangent_kernel).lower() == "legacy" or int(coord.shape[0]) != 3
         tangent_pattern = prepare_owned_tangent_pattern(
             coord,
             elem,
@@ -299,7 +301,7 @@ def run_capture(
             (row0 // coord.shape[0], row1 // coord.shape[0]),
             elem_type=elem_type,
             include_unique=(str(constitutive_mode).lower() != "overlap"),
-            include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
+            include_legacy_scatter=needs_legacy_scatter,
             elastic_rows=elastic_rows if use_lightweight_mpi_path else None,
         )
         const_builder.set_owned_tangent_pattern(
@@ -403,6 +405,7 @@ def run_capture(
             const_builder,
             linear_system_solver.copy(),
             progress_callback=progress_callback,
+            continuation_predictor=str(continuation_predictor),
         )
     else:
         free_idx = q_to_free_indices(q_mask)
@@ -447,8 +450,7 @@ def run_capture(
             "init_linear_orthogonalization_time": float(init_delta["orthogonalization_time"]),
         }
 
-        U_elast = np.zeros_like(f_V)
-        U_elast.reshape(-1, order="F")[free_idx] = np.asarray(U_elast_free, dtype=np.float64)
+        U_elast = full_field_from_free_values(np.asarray(U_elast_free, dtype=np.float64), free_idx, f_V.shape)
         linear_system_solver.expand_deflation_basis(np.asarray(U_elast_free, dtype=np.float64))
         omega_el = float(np.dot(f_free, np.asarray(U_elast_free, dtype=np.float64)))
         U_elast = U_elast * float(d_omega_ini_scale)

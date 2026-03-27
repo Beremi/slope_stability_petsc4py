@@ -5,7 +5,7 @@
 The current production baseline was reused and not rerun:
 
 - Summary: `artifacts/p2_p4_compare_rank8_final_memfix/summary.json`
-- Narrative report: `benchmarks/3d_hetero_ssr_default/report_p2_vs_p4_rank8_final_memfix.md`
+- Narrative report: `benchmarks/3d_hetero_ssr_default/archive/report_p2_vs_p4_rank8_final_memfix.md`
 
 Those remain the reference full trajectories.
 

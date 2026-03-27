@@ -18,6 +18,7 @@ bin/
 
 # Local-only working trees
 artifacts/
+benchmarks/*/artifacts/
 archives/
 tests_local/
 slope_stability_matlab/

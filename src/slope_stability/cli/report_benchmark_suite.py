@@ -23,7 +23,8 @@ def _case_dirs(suite_dir: Path) -> tuple[list[Path], list[Path]]:
     runnable_case_dirs: list[Path] = []
     for path in sorted(p for p in suite_dir.iterdir() if p.is_dir() and (p / "case.toml").exists()):
         config = _load_toml(path / "case.toml")
-        if config.get("benchmark"):
+        benchmark = dict(config.get("benchmark", {}))
+        if benchmark.get("suite", False):
             benchmark_case_dirs.append(path)
         else:
             runnable_case_dirs.append(path)
@@ -194,7 +195,7 @@ Each case folder contains at least:
 - `run.sh`
 - `README.md`
 
-The MATLAB-parity benchmark suite is the subset with a `[benchmark]` section in `case.toml`.
+The canonical MATLAB-parity benchmark suite is the subset with `[benchmark].suite = true` in `case.toml`.
 
 Run the full parity suite:
 
