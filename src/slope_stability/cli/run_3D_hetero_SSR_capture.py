@@ -11,9 +11,6 @@ from time import perf_counter
 import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
-from scipy import sparse
-from scipy.optimize import minimize_scalar
-from scipy.sparse import linalg as sparse_linalg
 
 import matplotlib
 matplotlib.use("Agg", force=True)
@@ -45,11 +42,9 @@ from slope_stability.continuation import indirect as indirect_module
 from slope_stability.continuation import LL_indirect_continuation, SSR_indirect_continuation
 from slope_stability.nonlinear.newton import (
     _destroy_petsc_mat,
-    _is_builder_cached_matrix,
     _prefers_full_system_operator,
     _setup_linear_system,
     _solve_linear_system,
-    newton_ind_ssr,
 )
 from slope_stability.problem_assets import load_material_rows_for_path
 from slope_stability.utils import (
@@ -109,14 +104,6 @@ def _collector_delta(before: dict, after: dict) -> dict:
     }
 
 
-def _retrospective_predictor_specs() -> tuple[tuple[str, int], ...]:
-    return (
-        ("secant", 2),
-        ("two_step_quadratic", 3),
-        ("three_step_cubic", 4),
-    )
-
-
 def _nan_last(values: np.ndarray) -> float:
     arr = np.asarray(values, dtype=np.float64)
     return float(arr[-1]) if arr.size else np.nan
@@ -145,167 +132,6 @@ def _stats_value_to_npz(value):
             return np.asarray(value, dtype=object)
         return np.asarray(value)
     return np.asarray(value)
-
-
-def _lagrange_coefficients(xs: np.ndarray, xt: float) -> np.ndarray:
-    coeff = np.ones(xs.size, dtype=np.float64)
-    for j in range(xs.size):
-        for k in range(xs.size):
-            if j != k:
-                coeff[j] *= (xt - xs[k]) / (xs[j] - xs[k])
-    return coeff
-
-
-def _retrospective_predict_vector(
-    method: str,
-    omega_hist: np.ndarray,
-    U_flat: np.ndarray,
-    state_idx: int,
-) -> np.ndarray:
-    if method == "secant":
-        omega0 = float(omega_hist[state_idx - 2])
-        omega1 = float(omega_hist[state_idx - 1])
-        scale = (float(omega_hist[state_idx]) - omega1) / (omega1 - omega0)
-        u0 = U_flat[state_idx - 2]
-        u1 = U_flat[state_idx - 1]
-        return u1 + scale * (u1 - u0)
-    if method == "two_step_quadratic":
-        xs = np.asarray(omega_hist[state_idx - 3 : state_idx], dtype=np.float64)
-        coeff = _lagrange_coefficients(xs, float(omega_hist[state_idx]))
-        return coeff @ U_flat[state_idx - 3 : state_idx]
-    if method == "three_step_cubic":
-        xs = np.asarray(omega_hist[state_idx - 4 : state_idx], dtype=np.float64)
-        coeff = _lagrange_coefficients(xs, float(omega_hist[state_idx]))
-        return coeff @ U_flat[state_idx - 4 : state_idx]
-    raise ValueError(f"Unsupported retrospective predictor {method!r}")
-
-
-def _retrospective_predict_scalar(
-    method: str,
-    omega_hist: np.ndarray,
-    value_hist: np.ndarray,
-    state_idx: int,
-) -> float:
-    if method == "secant":
-        omega0 = float(omega_hist[state_idx - 2])
-        omega1 = float(omega_hist[state_idx - 1])
-        scale = (float(omega_hist[state_idx]) - omega1) / (omega1 - omega0)
-        return float(value_hist[state_idx - 1] + scale * (value_hist[state_idx - 1] - value_hist[state_idx - 2]))
-    if method == "two_step_quadratic":
-        xs = np.asarray(omega_hist[state_idx - 3 : state_idx], dtype=np.float64)
-        coeff = _lagrange_coefficients(xs, float(omega_hist[state_idx]))
-        return float(np.dot(coeff, value_hist[state_idx - 3 : state_idx]))
-    if method == "three_step_cubic":
-        xs = np.asarray(omega_hist[state_idx - 4 : state_idx], dtype=np.float64)
-        coeff = _lagrange_coefficients(xs, float(omega_hist[state_idx]))
-        return float(np.dot(coeff, value_hist[state_idx - 4 : state_idx]))
-    raise ValueError(f"Unsupported retrospective predictor {method!r}")
-
-
-def _compute_retrospective_predictor_export(
-    *,
-    step_u: np.ndarray,
-    omega_hist: np.ndarray,
-    lambda_hist: np.ndarray,
-    step_index: np.ndarray,
-    step_omega: np.ndarray,
-    step_lambda: np.ndarray,
-) -> tuple[dict[str, np.ndarray], dict[str, object]]:
-    if step_u.ndim != 3 or step_u.shape[0] == 0:
-        return {}, {
-            "available": False,
-            "reason": "step_U_unavailable",
-            "methods": {},
-        }
-
-    state_count = int(step_u.shape[0])
-    cont_count = int(step_index.size)
-    expected_state_count = cont_count + 2
-    if state_count != expected_state_count:
-        return {}, {
-            "available": False,
-            "reason": "state_count_mismatch",
-            "state_count": state_count,
-            "expected_state_count": expected_state_count,
-            "methods": {},
-        }
-
-    U_flat = np.asarray(step_u, dtype=np.float64).reshape(state_count, -1)
-    omega_hist = np.asarray(omega_hist, dtype=np.float64)
-    lambda_hist = np.asarray(lambda_hist, dtype=np.float64)
-    step_index = np.asarray(step_index, dtype=np.int64)
-    step_omega = np.asarray(step_omega, dtype=np.float64)
-    step_lambda = np.asarray(step_lambda, dtype=np.float64)
-
-    arrays: dict[str, np.ndarray] = {}
-    summary: dict[str, object] = {
-        "available": True,
-        "state_count": state_count,
-        "continuation_state_count": cont_count,
-        "methods": {},
-    }
-
-    for method, min_state_index in _retrospective_predictor_specs():
-        u_l2_abs = np.full(cont_count, np.nan, dtype=np.float64)
-        u_l2_rel = np.full(cont_count, np.nan, dtype=np.float64)
-        u_increment_rel = np.full(cont_count, np.nan, dtype=np.float64)
-        u_max_node_abs = np.full(cont_count, np.nan, dtype=np.float64)
-        lambda_pred = np.full(cont_count, np.nan, dtype=np.float64)
-        lambda_abs_err = np.full(cont_count, np.nan, dtype=np.float64)
-
-        for local_idx in range(cont_count):
-            state_idx = local_idx + 2
-            if state_idx < min_state_index:
-                continue
-            predicted = _retrospective_predict_vector(method, omega_hist, U_flat, state_idx)
-            truth = U_flat[state_idx]
-            previous = U_flat[state_idx - 1]
-            diff = predicted - truth
-            l2_abs = float(np.linalg.norm(diff))
-            truth_norm = max(float(np.linalg.norm(truth)), 1.0e-30)
-            increment_norm = max(float(np.linalg.norm(truth - previous)), 1.0e-30)
-            diff_vec = diff.reshape(step_u.shape[1], -1)
-
-            u_l2_abs[local_idx] = l2_abs
-            u_l2_rel[local_idx] = l2_abs / truth_norm
-            u_increment_rel[local_idx] = l2_abs / increment_norm
-            u_max_node_abs[local_idx] = float(np.linalg.norm(diff_vec, axis=0).max())
-            lambda_pred[local_idx] = _retrospective_predict_scalar(method, omega_hist, lambda_hist, state_idx)
-            lambda_abs_err[local_idx] = abs(lambda_pred[local_idx] - float(lambda_hist[state_idx]))
-
-        prefix = f"retrospective_predictor_{method}"
-        arrays[f"{prefix}_u_l2_abs"] = u_l2_abs
-        arrays[f"{prefix}_u_l2_rel"] = u_l2_rel
-        arrays[f"{prefix}_u_increment_rel"] = u_increment_rel
-        arrays[f"{prefix}_u_max_node_abs"] = u_max_node_abs
-        arrays[f"{prefix}_lambda_pred"] = lambda_pred
-        arrays[f"{prefix}_lambda_abs_err"] = lambda_abs_err
-
-        finite_mask = np.isfinite(u_l2_rel)
-        targets = int(np.count_nonzero(finite_mask))
-        if targets == 0:
-            method_summary = {
-                "targets": 0,
-                "min_state_index": min_state_index,
-            }
-        else:
-            method_summary = {
-                "targets": targets,
-                "min_state_index": min_state_index,
-                "mean_u_l2_rel": float(np.nanmean(u_l2_rel)),
-                "max_u_l2_rel": float(np.nanmax(u_l2_rel)),
-                "mean_u_increment_rel": float(np.nanmean(u_increment_rel)),
-                "max_u_increment_rel": float(np.nanmax(u_increment_rel)),
-                "mean_u_l2_abs": float(np.nanmean(u_l2_abs)),
-                "max_u_l2_abs": float(np.nanmax(u_l2_abs)),
-                "mean_u_max_node_abs": float(np.nanmean(u_max_node_abs)),
-                "max_u_max_node_abs": float(np.nanmax(u_max_node_abs)),
-                "mean_lambda_abs_err": float(np.nanmean(lambda_abs_err)),
-                "max_lambda_abs_err": float(np.nanmax(lambda_abs_err)),
-            }
-        summary["methods"][method] = method_summary
-
-    return arrays, summary
 
 
 def _predictor_info_defaults() -> dict[str, object]:
@@ -337,807 +163,6 @@ def _rescale_to_target_omega(U: np.ndarray, omega_target: float, f: np.ndarray, 
     if abs(denom) <= 1.0e-30:
         return U_arr.copy()
     return U_arr * (float(omega_target) / denom)
-
-
-def _pmg_transfer_to_global_csr(transfer) -> sparse.csr_matrix:
-    return sparse.csr_matrix(
-        (
-            np.asarray(transfer.coo_data, dtype=np.float64),
-            (
-                np.asarray(transfer.coo_rows, dtype=np.int64),
-                np.asarray(transfer.coo_cols, dtype=np.int64),
-            ),
-        ),
-        shape=tuple(int(v) for v in transfer.global_shape),
-        dtype=np.float64,
-    ).tocsr()
-
-
-def _build_owned_problem(
-    *,
-    mesh_path: Path,
-    elem_type: str,
-    mesh_boundary_type: int,
-    node_ordering: str,
-    reorder_parts: int | None,
-    material_rows: list[list[float]] | None,
-    davis_type: str,
-    constitutive_mode: str,
-    tangent_kernel: str,
-    comm=None,
-) -> dict[str, object]:
-    if comm is None:
-        comm = PETSc.COMM_WORLD
-    mat_props = np.asarray(material_rows, dtype=np.float64)
-    materials = [
-        MaterialSpec(
-            c0=float(row[0]),
-            phi=float(row[1]),
-            psi=float(row[2]),
-            young=float(row[3]),
-            poisson=float(row[4]),
-            gamma_sat=float(row[5]),
-            gamma_unsat=float(row[6]),
-        )
-        for row in mat_props
-    ]
-    mesh = load_mesh_from_file(mesh_path, boundary_type=int(mesh_boundary_type), elem_type=str(elem_type))
-    reordered = reorder_mesh_nodes(
-        mesh.coord,
-        mesh.elem,
-        mesh.surf,
-        mesh.q_mask,
-        strategy=node_ordering,
-        n_parts=reorder_parts if str(node_ordering).lower() == "block_metis" else None,
-    )
-    coord = np.asarray(reordered.coord, dtype=np.float64)
-    elem = np.asarray(reordered.elem, dtype=np.int64)
-    surf = np.asarray(reordered.surf, dtype=np.int64)
-    q_mask = np.asarray(reordered.q_mask, dtype=bool)
-    material_identifier = np.asarray(mesh.material, dtype=np.int64).ravel()
-
-    elastic_rows = assemble_owned_elastic_rows_for_comm(
-        coord,
-        elem,
-        q_mask,
-        material_identifier,
-        materials,
-        comm,
-        elem_type=str(elem_type),
-    )
-    n_q = int(quadrature_volume_3d(elem_type)[0].shape[1])
-    n_int = int(elem.shape[1] * n_q)
-    c0, phi, psi, shear, bulk, lame, gamma = heterogenous_materials(
-        material_identifier,
-        np.ones(n_int, dtype=bool),
-        n_q,
-        materials,
-    )
-    global_size = int(coord.shape[0] * coord.shape[1])
-    if int(comm.getSize()) == 1:
-        K_elast = to_petsc_aij_matrix(
-            elastic_rows.local_matrix,
-            comm=comm,
-            block_size=coord.shape[0],
-        )
-        rhs_parts = [np.asarray(elastic_rows.local_rhs, dtype=np.float64)]
-    else:
-        K_elast = local_csr_to_petsc_aij_matrix(
-            elastic_rows.local_matrix,
-            global_shape=(global_size, global_size),
-            comm=comm,
-            block_size=coord.shape[0],
-        )
-        mpi_comm = comm.tompi4py() if hasattr(comm, "tompi4py") else comm
-        rhs_parts = mpi_comm.allgather(np.asarray(elastic_rows.local_rhs, dtype=np.float64))
-    f_V = np.concatenate(rhs_parts).reshape(coord.shape[0], coord.shape[1], order="F")
-    const_builder = ConstitutiveOperator(
-        B=None,
-        c0=c0,
-        phi=phi,
-        psi=psi,
-        Davis_type=str(davis_type),
-        shear=shear,
-        bulk=bulk,
-        lame=lame,
-        WEIGHT=np.zeros(n_int, dtype=np.float64),
-        n_strain=6,
-        n_int=n_int,
-        dim=3,
-        q_mask=q_mask,
-    )
-    row0, row1 = owned_block_range(coord.shape[1], coord.shape[0], comm)
-    tangent_pattern = prepare_owned_tangent_pattern(
-        coord,
-        elem,
-        q_mask,
-        material_identifier,
-        materials,
-        (row0 // coord.shape[0], row1 // coord.shape[0]),
-        elem_type=elem_type,
-        include_unique=(str(constitutive_mode).lower() != "overlap"),
-        include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
-        include_overlap_B=(str(tangent_kernel).lower() == "legacy"),
-        elastic_rows=elastic_rows,
-    )
-    const_builder.set_owned_tangent_pattern(
-        tangent_pattern,
-        use_compiled=True,
-        tangent_kernel=tangent_kernel,
-        constitutive_mode=constitutive_mode,
-        use_compiled_constitutive=True,
-    )
-    const_builder._owned_comm = comm
-    return {
-        "coord": coord,
-        "elem": elem,
-        "surf": surf,
-        "q_mask": q_mask,
-        "K_elast": K_elast,
-        "f_V": f_V,
-        "const_builder": const_builder,
-        "tangent_pattern": tangent_pattern,
-        "free_idx": q_to_free_indices(q_mask),
-    }
-
-
-def _clone_hypre_preconditioner_options(preconditioner_options: dict[str, object]) -> dict[str, object]:
-    coarse_options = dict(preconditioner_options)
-    coarse_options["pc_backend"] = "hypre"
-    coarse_options.pop("pmg_hierarchy", None)
-    coarse_options.pop("pmg_coarse_mesh_path", None)
-    for key in tuple(coarse_options.keys()):
-        if key.startswith("mg_") or key.startswith("pc_mg_"):
-            coarse_options.pop(key, None)
-    return coarse_options
-
-
-def _solver_basis_snapshot(solver):
-    getter = getattr(solver, "get_deflation_basis_snapshot", None)
-    if callable(getter):
-        return getter()
-    basis = getattr(solver, "deflation_basis", None)
-    if basis is None:
-        return None
-    return np.array(basis, dtype=np.float64, copy=True)
-
-
-def _solver_basis_restore(solver, snapshot) -> None:
-    restore = getattr(solver, "restore_deflation_basis", None)
-    if callable(restore):
-        restore(snapshot)
-        return
-    if hasattr(solver, "deflation_basis"):
-        solver.deflation_basis = np.array(snapshot, dtype=np.float64, copy=True)
-
-
-def _solver_notify_attempt(solver, *, success: bool) -> None:
-    notify = getattr(solver, "notify_continuation_attempt", None)
-    if callable(notify):
-        notify(success=bool(success))
-
-
-def _coarse_free_orthonormal_basis(vectors: list[np.ndarray], *, tol: float = 1.0e-10) -> tuple[np.ndarray | None, float]:
-    if not vectors:
-        return None, np.nan
-    cols = [np.asarray(v, dtype=np.float64).reshape(-1) for v in vectors]
-    raw = np.column_stack(cols)
-    if raw.size == 0:
-        return None, np.nan
-    singular = np.linalg.svd(raw, compute_uv=False)
-    cond = float(singular[0] / singular[-1]) if singular.size and singular[-1] > 0.0 else np.inf
-    qmat, rmat = np.linalg.qr(raw, mode="reduced")
-    diag = np.abs(np.diag(rmat))
-    scale = float(np.max(diag)) if diag.size else 0.0
-    if scale <= 0.0:
-        return None, cond
-    keep = diag > tol * scale
-    if not np.any(keep):
-        return None, cond
-    return np.asarray(qmat[:, keep], dtype=np.float64), cond
-
-
-def _build_p4_l1_coarse_predictor_context(
-    *,
-    mesh_path: Path,
-    mesh_boundary_type: int,
-    node_ordering: str,
-    reorder_parts: int | None,
-    material_rows: list[list[float]],
-    davis_type: str,
-    constitutive_mode: str,
-    tangent_kernel: str,
-    solver_type: str,
-    linear_tolerance: float,
-    linear_max_iter: int,
-    lambda_init: float,
-    d_lambda_init: float,
-    d_lambda_min: float,
-    it_newt_max: int,
-    it_damp_max: int,
-    tol: float,
-    r_min: float,
-    fine_q_mask: np.ndarray,
-    fine_f_V: np.ndarray,
-    fine_constitutive_matrix_builder,
-    pmg_hierarchy,
-    preconditioner_options: dict[str, object],
-) -> dict[str, object]:
-    if pmg_hierarchy is None:
-        return {}
-    level_orders = tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ()))
-    if level_orders != (1, 2, 4):
-        return {}
-
-    p21 = _pmg_transfer_to_global_csr(pmg_hierarchy.prolongation_p21)
-    p42 = _pmg_transfer_to_global_csr(pmg_hierarchy.prolongation_p42)
-    p41 = (p42 @ p21).tocsr()
-    world_comm = MPI.COMM_WORLD
-    world_rank = int(world_comm.Get_rank())
-    is_coarse_root = world_rank == 0
-    coarse_problem = None
-    coarse_solver = None
-    if is_coarse_root:
-        coarse_problem = _build_owned_problem(
-            mesh_path=Path(mesh_path),
-            elem_type="P1",
-            mesh_boundary_type=int(mesh_boundary_type),
-            node_ordering=node_ordering,
-            reorder_parts=reorder_parts,
-            material_rows=[list(map(float, row)) for row in material_rows],
-            davis_type=davis_type,
-            constitutive_mode=constitutive_mode,
-            tangent_kernel=tangent_kernel,
-            comm=PETSc.COMM_SELF,
-        )
-        coarse_preconditioner_options = _clone_hypre_preconditioner_options(preconditioner_options)
-        coarse_solver = SolverFactory.create(
-            "KSPPREONLY_LU",
-            tolerance=float(linear_tolerance),
-            max_iterations=int(linear_max_iter),
-            deflation_basis_tolerance=1e-3,
-            verbose=False,
-            q_mask=coarse_problem["q_mask"],
-            coord=coarse_problem["coord"],
-            preconditioner_options=coarse_preconditioner_options,
-        )
-
-    fine_q_mask = np.asarray(fine_q_mask, dtype=bool)
-    fine_free_idx = q_to_free_indices(fine_q_mask)
-    fine_shape = tuple(int(v) for v in np.asarray(fine_f_V).shape)
-    if is_coarse_root:
-        coarse_q_mask = np.asarray(coarse_problem["q_mask"], dtype=bool)
-        coarse_free_idx = np.asarray(coarse_problem["free_idx"], dtype=np.int64)
-        coarse_shape = tuple(int(v) for v in np.asarray(coarse_problem["f_V"]).shape)
-        coarse_f_full = flatten_field(np.asarray(coarse_problem["f_V"], dtype=np.float64))
-        coarse_f_free = np.asarray(coarse_f_full[coarse_free_idx], dtype=np.float64)
-        coarse_norm_f = max(float(np.linalg.norm(coarse_f_free)), 1.0)
-    else:
-        coarse_q_mask = None
-        coarse_free_idx = None
-        coarse_shape = None
-        coarse_f_full = None
-        coarse_f_free = None
-        coarse_norm_f = np.nan
-    coarse_state = {
-        "initialized": False,
-        "init_error": None,
-        "U_hist": [],
-        "omega_hist": [],
-        "lambda_hist": [],
-        "pending": None,
-    }
-
-    def _project_fine_full_to_coarse_full(U_fine: np.ndarray) -> np.ndarray:
-        fine_free = np.asarray(flatten_field(U_fine)[fine_free_idx], dtype=np.float64)
-        coarse_free = np.asarray(
-            sparse_linalg.lsmr(
-                p41,
-                fine_free,
-                atol=1.0e-12,
-                btol=1.0e-12,
-                maxiter=200,
-            )[0],
-            dtype=np.float64,
-        ).reshape(-1)
-        return full_field_from_free_values(coarse_free, coarse_free_idx, coarse_shape)
-
-    def _project_increment_to_coarse_free(dU_fine: np.ndarray) -> np.ndarray:
-        fine_free = np.asarray(flatten_field(dU_fine)[fine_free_idx], dtype=np.float64)
-        return np.asarray(
-            sparse_linalg.lsmr(
-                p41,
-                fine_free,
-                atol=1.0e-12,
-                btol=1.0e-12,
-                maxiter=200,
-            )[0],
-            dtype=np.float64,
-        ).reshape(-1)
-
-    def _prolongate_coarse_full_to_fine_full(U_coarse: np.ndarray) -> np.ndarray:
-        coarse_free = np.asarray(flatten_field(U_coarse)[coarse_free_idx], dtype=np.float64)
-        fine_free = np.asarray(p41 @ coarse_free, dtype=np.float64).reshape(-1)
-        return full_field_from_free_values(fine_free, fine_free_idx, fine_shape)
-
-    def _coarse_secant_full(*, omega_old: float, omega: float, omega_target: float, U_old: np.ndarray, U: np.ndarray) -> np.ndarray:
-        denom = float(omega - omega_old)
-        if denom == 0.0:
-            return np.asarray(U, dtype=np.float64)
-        return np.asarray(U, dtype=np.float64) + ((float(omega_target) - float(omega)) / denom) * (
-            np.asarray(U, dtype=np.float64) - np.asarray(U_old, dtype=np.float64)
-        )
-
-    def _coarse_secant_lambda(*, omega_old: float, omega: float, omega_target: float, lambda_old: float, lambda_value: float) -> float:
-        denom = float(omega - omega_old)
-        if abs(denom) <= 1.0e-30:
-            return float(lambda_value)
-        alpha = (float(omega_target) - float(omega)) / denom
-        return float(lambda_value + alpha * (float(lambda_value) - float(lambda_old)))
-
-    def _refine_fine_lambda_for_fixed_u(
-        *,
-        U_pred: np.ndarray,
-        omega_old: float,
-        omega_now: float,
-        omega_target: float,
-        lambda_old: float,
-        lambda_now: float,
-        Q: np.ndarray,
-        f: np.ndarray,
-    ) -> tuple[float, float, int]:
-        lambda_center = _coarse_secant_lambda(
-            omega_old=float(omega_old),
-            omega=float(omega_now),
-            omega_target=float(omega_target),
-            lambda_old=float(lambda_old),
-            lambda_value=float(lambda_now),
-        )
-        lam_candidates = np.asarray([float(lambda_old), float(lambda_now), float(lambda_center)], dtype=np.float64)
-        lam_pos = lam_candidates[np.isfinite(lam_candidates) & (lam_candidates > 1.0e-8)]
-        if lam_pos.size == 0:
-            return max(float(lambda_now), 1.0e-6), np.inf, 0
-        lam_lo = max(1.0e-6, 0.5 * float(np.min(lam_pos)))
-        lam_hi = max(lam_lo * 1.01, 2.0 * float(np.max(lam_pos)))
-
-        def _merit(lambda_trial: float) -> float:
-            return float(
-                indirect_module._predictor_residual_penalty_merit(
-                    U=np.asarray(U_pred, dtype=np.float64),
-                    lambda_value=float(lambda_trial),
-                    omega_target=float(omega_target),
-                    Q=np.asarray(Q, dtype=bool),
-                    f=np.asarray(f, dtype=np.float64),
-                    constitutive_matrix_builder=fine_constitutive_matrix_builder,
-                    penalty_weight=0.0,
-                )
-            )
-
-        lambda_star, merit_star, n_eval = indirect_module._bounded_scalar_minimize(
-            _merit,
-            lower=float(lam_lo),
-            upper=float(lam_hi),
-            max_evals=8,
-        )
-        return float(lambda_star), float(merit_star), int(n_eval)
-
-    def _coarse_expand_basis(U_full: np.ndarray) -> None:
-        if coarse_solver is None:
-            return
-        if getattr(coarse_solver, "supports_dynamic_deflation_basis", lambda: True)():
-            coarse_solver.expand_deflation_basis(flatten_field(np.asarray(U_full, dtype=np.float64))[coarse_free_idx])
-
-    def _ensure_coarse_initialized() -> None:
-        if not is_coarse_root:
-            return
-        if coarse_state["initialized"] or coarse_state["init_error"] is not None:
-            return
-        try:
-            U1, U2, omega1, omega2, lambda1, lambda2, _ = indirect_module.init_phase_SSR_indirect_continuation(
-                lambda_init=float(lambda_init),
-                d_lambda_init=float(d_lambda_init),
-                d_lambda_min=float(d_lambda_min),
-                it_newt_max=min(int(it_newt_max), 20),
-                it_damp_max=min(int(it_damp_max), 8),
-                tol=max(float(tol) * 10.0, 1.0e-3),
-                r_min=float(r_min),
-                K_elast=coarse_problem["K_elast"],
-                Q=coarse_problem["q_mask"],
-                f=coarse_problem["f_V"],
-                constitutive_matrix_builder=coarse_problem["const_builder"],
-                linear_system_solver=coarse_solver,
-            )
-            coarse_state["U_hist"] = [np.asarray(U1, dtype=np.float64), np.asarray(U2, dtype=np.float64)]
-            coarse_state["omega_hist"] = [float(omega1), float(omega2)]
-            coarse_state["lambda_hist"] = [float(lambda1), float(lambda2)]
-            coarse_state["initialized"] = True
-            coarse_state["pending"] = None
-        except Exception as exc:
-            coarse_state["init_error"] = repr(exc)
-
-    def _coarse_solve_from_history(
-        *,
-        omega_target: float,
-        U_old: np.ndarray,
-        U_now: np.ndarray,
-        omega_old: float,
-        omega_now: float,
-        lambda_old: float,
-        lambda_now: float,
-    ) -> dict[str, object]:
-        info: dict[str, object] = {
-            "success": False,
-            "wall_time": 0.0,
-            "newton_iterations": np.nan,
-            "residual_end": np.nan,
-            "error": None,
-        }
-        U_ini = _coarse_secant_full(
-            omega_old=float(omega_old),
-            omega=float(omega_now),
-            omega_target=float(omega_target),
-            U_old=np.asarray(U_old, dtype=np.float64),
-            U=np.asarray(U_now, dtype=np.float64),
-        )
-        U_ini = _rescale_to_target_omega(U_ini, float(omega_target), coarse_problem["f_V"], coarse_problem["q_mask"])
-        lambda_ini = _coarse_secant_lambda(
-            omega_old=float(omega_old),
-            omega=float(omega_now),
-            omega_target=float(omega_target),
-            lambda_old=float(lambda_old),
-            lambda_value=float(lambda_now),
-        )
-        basis_before = _solver_basis_snapshot(coarse_solver)
-        reduction_orig = coarse_problem["const_builder"].reduction
-        coarse_lambda_clip_count = {"value": 0}
-
-        def _safe_reduction(lambda_value: float):
-            lam = max(float(lambda_value), 1.0e-6)
-            if lam != float(lambda_value):
-                coarse_lambda_clip_count["value"] += 1
-            return reduction_orig(lam)
-
-        coarse_problem["const_builder"].reduction = _safe_reduction
-        solve_t0 = perf_counter()
-        try:
-            U_sol, lambda_sol, flag, it_used, history = newton_ind_ssr(
-                U_ini,
-                float(omega_target),
-                float(lambda_ini),
-                min(int(it_newt_max), 20),
-                min(int(it_damp_max), 8),
-                max(float(tol) * 10.0, 1.0e-3),
-                float(r_min),
-                coarse_problem["K_elast"],
-                coarse_problem["q_mask"],
-                coarse_problem["f_V"],
-                coarse_problem["const_builder"],
-                coarse_solver,
-            )
-        finally:
-            coarse_problem["const_builder"].reduction = reduction_orig
-        info["wall_time"] = float(perf_counter() - solve_t0)
-        info["newton_iterations"] = float(it_used)
-        if history["residual"].size:
-            info["residual_end"] = float(history["residual"][-1])
-        info["lambda_clip_count"] = float(coarse_lambda_clip_count["value"])
-        _solver_notify_attempt(coarse_solver, success=(flag == 0))
-        if flag == 0:
-            _coarse_expand_basis(U_sol)
-            info["success"] = True
-            info["U"] = np.asarray(U_sol, dtype=np.float64)
-            info["lambda"] = float(lambda_sol)
-            info["omega"] = float(omega_target)
-        else:
-            _solver_basis_restore(coarse_solver, basis_before)
-            info["error"] = "coarse_solution_newton_failed"
-        return info
-
-    def _coarse_commit_pending_if_matching(fine_omega_hist: tuple[float, ...]) -> None:
-        pending = coarse_state.get("pending")
-        if pending is None:
-            return
-        coarse_len = len(coarse_state["omega_hist"])
-        if coarse_len >= len(fine_omega_hist):
-            return
-        next_target = float(fine_omega_hist[coarse_len])
-        if abs(float(pending["omega"]) - next_target) > max(1.0e-6 * max(abs(next_target), 1.0), 1.0e-8):
-            return
-        coarse_state["U_hist"].append(np.asarray(pending["U"], dtype=np.float64))
-        coarse_state["omega_hist"].append(float(pending["omega"]))
-        coarse_state["lambda_hist"].append(float(pending["lambda"]))
-        coarse_state["pending"] = None
-
-    def _coarse_sync_to_fine_history(fine_omega_hist: tuple[float, ...]) -> dict[str, float]:
-        _ensure_coarse_initialized()
-        if coarse_state["init_error"] is not None:
-            raise RuntimeError(str(coarse_state["init_error"]))
-        _coarse_commit_pending_if_matching(fine_omega_hist)
-        accum = {"wall_time": 0.0, "newton_iterations": 0.0, "residual_end": np.nan}
-        while len(coarse_state["omega_hist"]) < len(fine_omega_hist):
-            coarse_len = len(coarse_state["omega_hist"])
-            target = float(fine_omega_hist[coarse_len])
-            result = _coarse_solve_from_history(
-                omega_target=target,
-                U_old=np.asarray(coarse_state["U_hist"][-2], dtype=np.float64),
-                U_now=np.asarray(coarse_state["U_hist"][-1], dtype=np.float64),
-                omega_old=float(coarse_state["omega_hist"][-2]),
-                omega_now=float(coarse_state["omega_hist"][-1]),
-                lambda_old=float(coarse_state["lambda_hist"][-2]),
-                lambda_now=float(coarse_state["lambda_hist"][-1]),
-            )
-            accum["wall_time"] += float(result["wall_time"])
-            accum["newton_iterations"] += float(result["newton_iterations"])
-            if np.isfinite(float(result["residual_end"])):
-                accum["residual_end"] = float(result["residual_end"])
-            if not bool(result["success"]):
-                raise RuntimeError(str(result.get("error") or "coarse_history_sync_failed"))
-            coarse_state["U_hist"].append(np.asarray(result["U"], dtype=np.float64))
-            coarse_state["omega_hist"].append(float(result["omega"]))
-            coarse_state["lambda_hist"].append(float(result["lambda"]))
-        return accum
-
-    def _coarse_solution_predictor(**kwargs):
-        payload = None
-        if is_coarse_root:
-            info = _predictor_info_defaults()
-            t0 = perf_counter()
-            try:
-                lambda_ini = float(kwargs["lambda_value"])
-                fine_omega_hist = tuple(float(v) for v in kwargs.get("predictor_omega_hist", ()))
-                sync = _coarse_sync_to_fine_history(fine_omega_hist)
-                info["coarse_solve_wall_time"] = float(sync["wall_time"])
-                info["coarse_newton_iterations"] = float(sync["newton_iterations"])
-                if np.isfinite(float(sync["residual_end"])):
-                    info["coarse_residual_end"] = float(sync["residual_end"])
-
-                coarse_result = _coarse_solve_from_history(
-                    omega_target=float(kwargs["omega_target"]),
-                    U_old=np.asarray(coarse_state["U_hist"][-2], dtype=np.float64),
-                    U_now=np.asarray(coarse_state["U_hist"][-1], dtype=np.float64),
-                    omega_old=float(coarse_state["omega_hist"][-2]),
-                    omega_now=float(coarse_state["omega_hist"][-1]),
-                    lambda_old=float(coarse_state["lambda_hist"][-2]),
-                    lambda_now=float(coarse_state["lambda_hist"][-1]),
-                )
-                info["coarse_solve_wall_time"] += float(coarse_result["wall_time"])
-                info["coarse_newton_iterations"] += float(coarse_result["newton_iterations"])
-                if np.isfinite(float(coarse_result["residual_end"])):
-                    info["coarse_residual_end"] = float(coarse_result["residual_end"])
-                if not bool(coarse_result["success"]):
-                    info["fallback_used"] = True
-                    info["fallback_error"] = str(coarse_result.get("error") or "coarse_solution_newton_failed")
-                    U_fallback, lambda_sec, _ = indirect_module._secant_predictor(
-                        omega_old=float(kwargs["omega_old"]),
-                        omega=float(kwargs["omega"]),
-                        omega_target=float(kwargs["omega_target"]),
-                        U_old=np.asarray(kwargs["U_old"], dtype=np.float64),
-                        U=np.asarray(kwargs["U"], dtype=np.float64),
-                        lambda_value=lambda_ini,
-                    )
-                    info["predictor_wall_time"] = float(perf_counter() - t0)
-                    payload = (U_fallback, lambda_sec, "coarse_p1_solution_fallback_secant", info)
-                else:
-                    coarse_state["pending"] = {
-                        "U": np.asarray(coarse_result["U"], dtype=np.float64),
-                        "omega": float(coarse_result["omega"]),
-                        "lambda": float(coarse_result["lambda"]),
-                    }
-                    U_pred = _prolongate_coarse_full_to_fine_full(np.asarray(coarse_result["U"], dtype=np.float64))
-                    U_pred = _rescale_to_target_omega(
-                        U_pred,
-                        float(kwargs["omega_target"]),
-                        np.asarray(kwargs["f"], dtype=np.float64),
-                        np.asarray(kwargs["Q"], dtype=bool),
-                    )
-                    info["projected_delta_lambda"] = float(coarse_result["lambda"] - lambda_ini)
-                    info["predictor_wall_time"] = float(perf_counter() - t0)
-                    payload = (U_pred, float(lambda_ini), "coarse_p1_solution", info)
-            except Exception as exc:
-                info["predictor_wall_time"] = float(perf_counter() - t0)
-                info["fallback_used"] = True
-                info["fallback_error"] = repr(exc)
-                U_sec, lambda_ini, _ = indirect_module._secant_predictor(
-                    omega_old=float(kwargs["omega_old"]),
-                    omega=float(kwargs["omega"]),
-                    omega_target=float(kwargs["omega_target"]),
-                    U_old=np.asarray(kwargs["U_old"], dtype=np.float64),
-                    U=np.asarray(kwargs["U"], dtype=np.float64),
-                    lambda_value=float(kwargs["lambda_value"]),
-                )
-                payload = (U_sec, lambda_ini, "coarse_p1_solution_fallback_secant", info)
-        U_pred, lambda_pred, kind, info = world_comm.bcast(payload, root=0)
-        return np.asarray(U_pred, dtype=np.float64), float(lambda_pred), str(kind), dict(info)
-
-    def _coarse_reduced_newton_predictor(**kwargs):
-        payload = None
-        if is_coarse_root:
-            info = _predictor_info_defaults()
-            t0 = perf_counter()
-            try:
-                basis_free_raw = [
-                    _project_increment_to_coarse_free(np.asarray(dU, dtype=np.float64))
-                    for dU in kwargs.get("continuation_increment_hist", ())
-                ]
-                basis_free, basis_cond = _coarse_free_orthonormal_basis(basis_free_raw)
-                info["basis_dim"] = float(0 if basis_free is None else basis_free.shape[1])
-                info["basis_condition"] = float(basis_cond)
-                if basis_free is None or basis_free.shape[1] == 0:
-                    info["fallback_used"] = True
-                    info["fallback_error"] = "empty_reduced_basis"
-                    U_pred, lambda_pred, kind, coarse_info = _coarse_solution_predictor(**kwargs)
-                    coarse_info.update(info)
-                    coarse_info["fallback_used"] = True
-                    coarse_info["fallback_error"] = "empty_reduced_basis"
-                    payload = (U_pred, lambda_pred, "coarse_p1_reduced_newton_fallback_solution", coarse_info)
-                else:
-                    omega_old = float(kwargs["omega_old"])
-                    omega = float(kwargs["omega"])
-                    omega_target = float(kwargs["omega_target"])
-                    U_old_coarse = _project_fine_full_to_coarse_full(np.asarray(kwargs["U_old"], dtype=np.float64))
-                    U_coarse = _project_fine_full_to_coarse_full(np.asarray(kwargs["U"], dtype=np.float64))
-                    U_it = _coarse_secant_full(
-                        omega_old=omega_old,
-                        omega=omega,
-                        omega_target=omega_target,
-                        U_old=U_old_coarse,
-                        U=U_coarse,
-                    )
-                    U_it = _rescale_to_target_omega(
-                        U_it,
-                        omega_target,
-                        coarse_problem["f_V"],
-                        coarse_problem["q_mask"],
-                    )
-                    lambda_it = float(kwargs["lambda_value"])
-                    tol_projected = 1.0e-2
-                    tol_omega = 1.0e-2
-                    gmres_total = 0
-                    converged = False
-                    reduced_iter = 0
-
-                    for reduced_iter in range(1, 11):
-                        coarse_problem["const_builder"].reduction(max(float(lambda_it), 1.0e-6))
-                        K_tangent = None
-                        K_free = None
-                        try:
-                            if hasattr(coarse_problem["const_builder"], "build_F_K_tangent_all_free") and callable(
-                                coarse_problem["const_builder"].build_F_K_tangent_all_free
-                            ):
-                                F_free, K_free = coarse_problem["const_builder"].build_F_K_tangent_all_free(float(lambda_it), U_it)
-                                F_free = np.asarray(F_free, dtype=np.float64).reshape(-1)
-                                eps = max(float(kwargs.get("tol", 1.0e-4)) / 1000.0, 1.0e-12)
-                                F_eps = np.asarray(
-                                    coarse_problem["const_builder"].build_F_all_free(float(lambda_it) + eps, U_it),
-                                    dtype=np.float64,
-                                ).reshape(-1)
-                            else:
-                                F_full, K_tangent = coarse_problem["const_builder"].build_F_K_tangent_all(float(lambda_it), U_it)
-                                F_free = np.asarray(flatten_field(F_full)[coarse_free_idx], dtype=np.float64)
-                                K_free = extract_submatrix_free(K_tangent, coarse_free_idx)
-                                eps = max(float(kwargs.get("tol", 1.0e-4)) / 1000.0, 1.0e-12)
-                                F_eps_full = coarse_problem["const_builder"].build_F_all(float(lambda_it) + eps, U_it)
-                                F_eps = np.asarray(flatten_field(F_eps_full)[coarse_free_idx], dtype=np.float64)
-                            residual_free = coarse_f_free - F_free
-                            U_free = np.asarray(flatten_field(U_it)[coarse_free_idx], dtype=np.float64)
-                            omega_err = float(np.dot(coarse_f_free, U_free) - omega_target)
-                            projected_res = np.asarray(basis_free.T @ residual_free, dtype=np.float64)
-                            projected_rel = float(np.linalg.norm(projected_res) / coarse_norm_f)
-                            omega_rel = abs(float(omega_err)) / max(abs(float(omega_target)), 1.0)
-                            info["reduced_projected_residual"] = float(projected_rel)
-                            info["reduced_omega_residual"] = float(omega_rel)
-                            if projected_rel <= tol_projected and omega_rel <= tol_omega:
-                                converged = True
-                                break
-
-                            basis_dim = int(basis_free.shape[1])
-                            wtf = np.asarray(basis_free.T @ coarse_f_free, dtype=np.float64)
-                            rhs = np.concatenate([projected_res, np.asarray([-omega_err], dtype=np.float64)])
-
-                            def _reduced_matvec(x_vec: np.ndarray) -> np.ndarray:
-                                x_arr = np.asarray(x_vec, dtype=np.float64).reshape(-1)
-                                coeff = x_arr[:basis_dim]
-                                d_lambda = float(x_arr[basis_dim])
-                                basis_combination = np.asarray(basis_free @ coeff, dtype=np.float64)
-                                k_times = np.asarray(matvec_to_numpy(K_free, basis_combination), dtype=np.float64).reshape(-1)
-                                top = -(basis_free.T @ k_times) + wtf * d_lambda
-                                bottom = np.asarray([float(np.dot(coarse_f_free, basis_combination))], dtype=np.float64)
-                                return np.concatenate([top, bottom])
-
-                            iteration_counter = {"value": 0}
-
-                            def _gmres_callback(_unused) -> None:
-                                iteration_counter["value"] += 1
-
-                            linop = sparse_linalg.LinearOperator(
-                                shape=(basis_dim + 1, basis_dim + 1),
-                                matvec=_reduced_matvec,
-                                dtype=np.float64,
-                            )
-                            delta_red, gmres_info = sparse_linalg.gmres(
-                                linop,
-                                rhs,
-                                restart=basis_dim + 1,
-                                rtol=1.0e-10,
-                                atol=0.0,
-                                maxiter=max(20, 2 * (basis_dim + 1)),
-                                callback=_gmres_callback,
-                                callback_type="pr_norm",
-                            )
-                            gmres_total += int(iteration_counter["value"])
-                            if gmres_info not in (0, None):
-                                raise RuntimeError(f"reduced_gmres_failed:{gmres_info}")
-
-                            coeff = np.asarray(delta_red[:basis_dim], dtype=np.float64)
-                            d_lambda = float(delta_red[basis_dim])
-                            dU_free = np.asarray(basis_free @ coeff, dtype=np.float64)
-                            dU_full = full_field_from_free_values(dU_free, coarse_free_idx, coarse_shape)
-                            U_it = np.asarray(U_it, dtype=np.float64) + dU_full
-                            lambda_it = float(lambda_it + d_lambda)
-                        finally:
-                            if K_free is not None and K_free is not K_tangent and not _is_builder_cached_matrix(K_free, coarse_problem["const_builder"]):
-                                _destroy_petsc_mat(K_free)
-                            if K_tangent is not None and not _is_builder_cached_matrix(K_tangent, coarse_problem["const_builder"]):
-                                _destroy_petsc_mat(K_tangent)
-
-                    info["reduced_newton_iterations"] = float(reduced_iter)
-                    info["reduced_gmres_iterations"] = float(gmres_total)
-                    if not converged:
-                        info["fallback_used"] = True
-                        info["fallback_error"] = "reduced_newton_not_converged"
-                        U_pred, lambda_pred, _kind, coarse_info = _coarse_solution_predictor(**kwargs)
-                        coarse_info.update(info)
-                        coarse_info["fallback_used"] = True
-                        coarse_info["fallback_error"] = "reduced_newton_not_converged"
-                        payload = (U_pred, lambda_pred, "coarse_p1_reduced_newton_fallback_solution", coarse_info)
-                    else:
-                        U_pred = _prolongate_coarse_full_to_fine_full(U_it)
-                        U_pred = _rescale_to_target_omega(
-                            U_pred,
-                            float(kwargs["omega_target"]),
-                            np.asarray(kwargs["f"], dtype=np.float64),
-                            np.asarray(kwargs["Q"], dtype=bool),
-                        )
-                        info["predictor_wall_time"] = float(perf_counter() - t0)
-                        payload = (U_pred, float(kwargs["lambda_value"]), "coarse_p1_reduced_newton", info)
-            except Exception as exc:
-                info["fallback_used"] = True
-                info["fallback_error"] = repr(exc)
-                U_pred, lambda_pred, _kind, coarse_info = _coarse_solution_predictor(**kwargs)
-                coarse_info.update(info)
-                coarse_info["fallback_used"] = True
-                coarse_info["fallback_error"] = repr(exc)
-                payload = (U_pred, lambda_pred, "coarse_p1_reduced_newton_fallback_solution", coarse_info)
-        U_pred, lambda_pred, kind, info = world_comm.bcast(payload, root=0)
-        return np.asarray(U_pred, dtype=np.float64), float(lambda_pred), str(kind), dict(info)
-
-    def _cleanup() -> None:
-        if not is_coarse_root:
-            return
-        try:
-            close_solver = getattr(coarse_solver, "close", None)
-            if callable(close_solver):
-                close_solver()
-            else:
-                release = getattr(coarse_solver, "release_iteration_resources", None)
-                if callable(release):
-                    release()
-        except Exception:
-            pass
-        try:
-            coarse_problem["const_builder"].release_petsc_caches()
-        except Exception:
-            pass
-        try:
-            _destroy_petsc_mat(coarse_problem["K_elast"])
-        except Exception:
-            pass
-
-    return {
-        "coarse_p1_solution": _coarse_solution_predictor,
-        "coarse_p1_reduced_newton": _coarse_reduced_newton_predictor,
-        "cleanup": _cleanup,
-    }
 
 
 def _surface_faces_by_width(surf: np.ndarray) -> np.ndarray:
@@ -1467,6 +492,7 @@ def run_capture(
     d_t_min: float = 1e-3,
     omega_max_stop: float = 1.20e7,
     continuation_predictor: str = "secant",
+    omega_step_controller: str = "legacy",
     omega_no_increase_newton_threshold: int | None = None,
     omega_half_newton_threshold: int | None = None,
     omega_target_newton_iterations: float | None = None,
@@ -1929,39 +955,6 @@ def run_capture(
     analysis_key = str(analysis).lower()
     if analysis_key not in {"ssr", "ll"}:
         raise ValueError(f"Unsupported analysis {analysis!r}.")
-    predictor_context: dict[str, object] | None = None
-    if analysis_key == "ssr":
-        predictor_mode = str(continuation_predictor).strip().lower()
-        if predictor_mode in {"coarse_p1_solution", "coarse_p1_reduced_newton"}:
-            if effective_pc_backend != "pmg_shell" or str(elem_type).upper() != "P4" or pmg_coarse_mesh_path is not None:
-                raise ValueError(
-                    f"{predictor_mode} currently requires same-mesh P4(L1) with pc_backend='pmg_shell'."
-                )
-            predictor_context = _build_p4_l1_coarse_predictor_context(
-                mesh_path=mesh_path,
-                mesh_boundary_type=int(mesh_boundary_type),
-                node_ordering=str(node_ordering),
-                reorder_parts=partition_count,
-                material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
-                davis_type=str(davis_type),
-                constitutive_mode=str(constitutive_mode),
-                tangent_kernel=str(tangent_kernel),
-                solver_type=str(solver_type),
-                linear_tolerance=float(linear_tolerance),
-                linear_max_iter=int(linear_max_iter),
-                lambda_init=float(lambda_init),
-                d_lambda_init=float(d_lambda_init),
-                d_lambda_min=float(d_lambda_min),
-                it_newt_max=int(it_newt_max),
-                it_damp_max=int(it_damp_max),
-                tol=float(tol),
-                r_min=float(r_min),
-                fine_q_mask=q_mask,
-                fine_f_V=f_V,
-                fine_constitutive_matrix_builder=constitutive_matrix_builder,
-                pmg_hierarchy=pmg_hierarchy,
-                preconditioner_options=preconditioner_options,
-            )
 
     params = {
         "analysis": analysis_key,
@@ -1974,6 +967,7 @@ def run_capture(
         "d_t_min": float(d_t_min),
         "omega_max_stop": float(omega_max_stop),
         "continuation_predictor": str(continuation_predictor),
+        "omega_step_controller": str(omega_step_controller),
         "continuation_predictor_switch_ordinal": (
             None if continuation_predictor_switch_ordinal is None else int(continuation_predictor_switch_ordinal)
         ),
@@ -2114,6 +1108,7 @@ def run_capture(
             progress_callback=progress_callback,
             store_step_u=bool(store_step_u),
             continuation_predictor=str(continuation_predictor),
+            omega_step_controller=str(omega_step_controller),
             step_guess_diagnostics=step_guess_diagnostics,
             omega_no_increase_newton_threshold=omega_no_increase_newton_threshold,
             omega_half_newton_threshold=omega_half_newton_threshold,
@@ -2126,7 +1121,6 @@ def run_capture(
             omega_efficiency_drop_ratio=omega_efficiency_drop_ratio,
             omega_efficiency_window=omega_efficiency_window,
             omega_hard_shrink_scale=omega_hard_shrink_scale,
-            predictor_context=predictor_context,
             continuation_predictor_switch_ordinal=continuation_predictor_switch_ordinal,
             continuation_predictor_switch_to=continuation_predictor_switch_to,
             continuation_predictor_window_size=continuation_predictor_window_size,
@@ -2339,14 +1333,6 @@ def run_capture(
     }
 
     step_u = np.asarray(stats.pop("step_U"), dtype=np.float64) if isinstance(stats.get("step_U", None), list) else np.empty((0, 3, 0), dtype=np.float64)
-    retrospective_predictor_arrays, retrospective_predictor_summary = _compute_retrospective_predictor_export(
-        step_u=step_u,
-        omega_hist=np.asarray(omega_hist3, dtype=np.float64),
-        lambda_hist=np.asarray(lambda_hist3, dtype=np.float64),
-        step_index=np.asarray(stats.get("step_index", []), dtype=np.int64),
-        step_omega=np.asarray(stats.get("step_omega", []), dtype=np.float64),
-        step_lambda=np.asarray(stats.get("step_lambda", []), dtype=np.float64),
-    )
 
     run_payload = {
         "run_info": {
@@ -2374,7 +1360,6 @@ def run_capture(
             "continuation_total_wall_time": float(stats.get("total_wall_time", runtime)),
         },
         "predictor_diagnostics": predictor_summary,
-        "retrospective_predictor_export": retrospective_predictor_summary,
         "owned_tangent_pattern": {
             "stats_max": tangent_pattern_stats_max,
             "stats_sum": tangent_pattern_stats_sum,
@@ -2397,7 +1382,6 @@ def run_capture(
             Umax_hist=Umax_hist3,
             step_U=step_u,
             init_meta=np.array([1]),
-            **retrospective_predictor_arrays,
             **{
                 "stats_" + key: _stats_value_to_npz(value) for key, value in stats.items() if key != "step_U"
             },
@@ -2442,13 +1426,6 @@ def run_capture(
             ),
         )
 
-    cleanup_predictor = None if predictor_context is None else predictor_context.get("cleanup")
-    if callable(cleanup_predictor):
-        try:
-            cleanup_predictor()
-        except Exception:
-            pass
-
     return {
         "output": str(out_dir),
         "npz": str(data_dir / "petsc_run.npz"),
@@ -2489,18 +1466,13 @@ def main() -> None:
         default="secant",
         choices=[
             "secant",
-            "two_step",
-            "reduced_all_prev",
             "reduced_newton_all_prev",
             "reduced_newton_affine_all_prev",
             "reduced_newton_window",
             "reduced_newton_increment_power",
-            "secant_energy_alpha",
-            "three_param_penalty",
-            "coarse_p1_solution",
-            "coarse_p1_reduced_newton",
         ],
     )
+    parser.add_argument("--omega_step_controller", type=str, default="legacy", choices=["legacy", "adaptive"])
     parser.add_argument("--continuation_predictor_switch_ordinal", type=int, default=None)
     parser.add_argument(
         "--continuation_predictor_switch_to",
@@ -2508,16 +1480,10 @@ def main() -> None:
         default=None,
         choices=[
             "secant",
-            "two_step",
-            "reduced_all_prev",
             "reduced_newton_all_prev",
             "reduced_newton_affine_all_prev",
             "reduced_newton_window",
             "reduced_newton_increment_power",
-            "secant_energy_alpha",
-            "three_param_penalty",
-            "coarse_p1_solution",
-            "coarse_p1_reduced_newton",
         ],
     )
     parser.add_argument("--continuation_predictor_window_size", type=int, default=None)
@@ -2656,6 +1622,7 @@ def main() -> None:
         d_t_min=args.d_t_min,
         omega_max_stop=args.omega_max_stop,
         continuation_predictor=args.continuation_predictor,
+        omega_step_controller=args.omega_step_controller,
         continuation_predictor_switch_ordinal=args.continuation_predictor_switch_ordinal,
         continuation_predictor_switch_to=args.continuation_predictor_switch_to,
         continuation_predictor_window_size=args.continuation_predictor_window_size,

@@ -8,6 +8,10 @@ from mpi4py import MPI
 from ..utils import q_to_free_indices
 
 
+def _is_invalid_lambda_trial(exc: Exception) -> bool:
+    return isinstance(exc, ValueError) and "Reduction parameter lambda must be positive" in str(exc)
+
+
 def _flat(value: np.ndarray) -> np.ndarray:
     return np.asarray(value, dtype=np.float64).reshape(-1, order="F")
 
@@ -164,21 +168,39 @@ def damping_alg5(
     q_mask = np.asarray(q_mask, dtype=bool)
 
     alpha = 1.0
+    last_evaluated_alpha: float | None = None
 
     for _ in range(int(it_damp_max)):
         U_alpha = U_it + alpha * d_U
         lambda_alpha = lambda_it + alpha * d_l
+        if lambda_alpha <= 0.0:
+            alpha *= 0.5
+            if alpha <= 0.0:
+                return 0.0
+            continue
         build_F_all_free_local = getattr(constitutive_matrix_builder, "build_F_all_free_local", None)
         build_F_all_free = getattr(constitutive_matrix_builder, "build_F_all_free", None)
-        if f_local_free is not None and callable(build_F_all_free_local):
-            F_alpha_local_free = np.asarray(build_F_all_free_local(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
-            crit_alpha = _dist_norm_local(F_alpha_local_free - np.asarray(f_local_free, dtype=np.float64).reshape(-1), comm)
-        elif f_free is not None and callable(build_F_all_free):
-            F_alpha_free = np.asarray(build_F_all_free(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
-            crit_alpha = float(np.linalg.norm(F_alpha_free - np.asarray(f_free, dtype=np.float64).reshape(-1)))
-        else:
-            F_alpha = constitutive_matrix_builder.build_F_all(lambda_alpha, U_alpha)
-            crit_alpha = _norm(F_alpha - f, q_mask=q_mask)
+        try:
+            if f_local_free is not None and callable(build_F_all_free_local):
+                F_alpha_local_free = np.asarray(build_F_all_free_local(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
+                crit_alpha = _dist_norm_local(
+                    F_alpha_local_free - np.asarray(f_local_free, dtype=np.float64).reshape(-1),
+                    comm,
+                )
+            elif f_free is not None and callable(build_F_all_free):
+                F_alpha_free = np.asarray(build_F_all_free(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
+                crit_alpha = float(np.linalg.norm(F_alpha_free - np.asarray(f_free, dtype=np.float64).reshape(-1)))
+            else:
+                F_alpha = constitutive_matrix_builder.build_F_all(lambda_alpha, U_alpha)
+                crit_alpha = _norm(F_alpha - f, q_mask=q_mask)
+        except Exception as exc:  # pragma: no cover - defensive for constitutive backends
+            if not _is_invalid_lambda_trial(exc):
+                raise
+            alpha *= 0.5
+            if alpha <= 0.0:
+                return 0.0
+            continue
+        last_evaluated_alpha = float(alpha)
 
         if crit_alpha < criterion:
             break
@@ -187,4 +209,6 @@ def damping_alg5(
         if alpha <= 0.0:
             return 0.0
 
-    return float(alpha)
+    if last_evaluated_alpha is None:
+        return 0.0
+    return float(alpha if alpha == last_evaluated_alpha else last_evaluated_alpha)

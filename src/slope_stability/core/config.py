@@ -64,6 +64,7 @@ class NewtonConfig:
 class ContinuationConfig:
     method: str = "indirect"
     predictor: str = "secant"
+    omega_step_controller: str = "legacy"
     lambda_init: float = 1.0
     d_lambda_init: float = 0.1
     d_lambda_min: float = 1e-3
@@ -159,6 +160,8 @@ class Run3DSSRConfig:
             raise NotImplementedError("Only 3D P1/P2/P4 runs are wired into the current config runner.")
         if self.continuation.method.lower() != "indirect":
             raise NotImplementedError("The config runner currently targets indirect 3D SSR continuation only.")
+        if self.continuation.omega_step_controller.lower() not in {"legacy", "adaptive"}:
+            raise ValueError("The continuation omega_step_controller must be 'legacy' or 'adaptive'.")
         if not self.material_rows():
             raise ValueError("At least one material must be provided in [[materials]].")
         return self
@@ -174,6 +177,7 @@ class Run3DSSRConfig:
             "d_lambda_diff_scaled_min": self.continuation.d_lambda_diff_scaled_min,
             "omega_max_stop": self.continuation.omega_max,
             "continuation_predictor": self.continuation.predictor,
+            "omega_step_controller": self.continuation.omega_step_controller,
             "omega_no_increase_newton_threshold": self.continuation.omega_no_increase_newton_threshold,
             "omega_half_newton_threshold": self.continuation.omega_half_newton_threshold,
             "omega_target_newton_iterations": self.continuation.omega_target_newton_iterations,
@@ -300,6 +304,7 @@ def load_run_3d_ssr_config(path: str | Path) -> Run3DSSRConfig:
     continuation = ContinuationConfig(
         method=str(continuation_data.get("method", "indirect")),
         predictor=str(continuation_data.get("predictor", "secant")),
+        omega_step_controller=str(continuation_data.get("omega_step_controller", "legacy")),
         lambda_init=float(continuation_data.get("lambda_init", 1.0)),
         d_lambda_init=float(continuation_data.get("d_lambda_init", 0.1)),
         d_lambda_min=float(continuation_data.get("d_lambda_min", 1e-3)),
