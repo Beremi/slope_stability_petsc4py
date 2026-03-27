@@ -1,3 +1,10 @@
+[benchmark]
+title = "3D homogeneous seepage SSR"
+matlab_script = "slope_stability_3D_homo_seepage_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 8
+suite = false
+
 [problem]
 name = "run_3d_homo_seepage_ssr"
 case = "3d_homo_seepage_ssr"
@@ -47,3 +54,6 @@ conductivity = [1.0]
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
+
+[notebook]
+family = "3d_seepage_continuation"

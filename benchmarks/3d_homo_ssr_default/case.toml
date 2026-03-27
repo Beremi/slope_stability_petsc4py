@@ -1,3 +1,10 @@
+[benchmark]
+title = "3D homogeneous SSR default"
+matlab_script = "slope_stability_3D_homo_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 8
+suite = false
+
 [problem]
 name = "3d_homo_ssr_default"
 case = "3d_homo_ssr"
@@ -41,3 +48,11 @@ compiled_outer = false
 recycle_preconditioner = true
 pc_hypre_coarsen_type = "HMIS"
 pc_hypre_interp_type = "ext+i"
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true
+
+[notebook]
+family = "3d_continuation"

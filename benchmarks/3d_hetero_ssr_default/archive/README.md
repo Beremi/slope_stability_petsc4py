@@ -1,8 +1,8 @@
 # Archive
 
-This folder contains exploratory scripts and reports that were added after the
-original `3d_hetero_ssr_default` benchmark was established.
+This folder contains the historical analysis material that no longer belongs in
+the clean benchmark root.
 
-The benchmark root keeps the original runnable case, scaling scripts, and
-baseline reports. Solver investigations and one-off follow-up reports live here
-to keep the main benchmark directory focused on the original benchmark flow.
+The benchmark root now keeps only `README.md`, `case.toml`, `run.sh`,
+`simulation.ipynb`, and `visualisation.ipynb`. Legacy scaling scripts,
+comparison helpers, and follow-up reports live here.

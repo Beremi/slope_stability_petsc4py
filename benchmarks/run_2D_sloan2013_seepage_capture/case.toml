@@ -3,7 +3,12 @@ title = "2D Sloan2013 seepage"
 matlab_script = "run_2D_sloan2013_seepage_capture"
 comparison_kind = "seepage"
 mpi_ranks = 8
+suite = true
 notes = "Current PETSc seepage implementation is scalar; under MPI the benchmark executes on rank 0 only."
+
+[notebook]
+family = "2d_seepage"
+material_palette = "sloan2013"
 
 [problem]
 name = "benchmark_2d_sloan2013_seepage"
@@ -25,6 +30,7 @@ pc_hypre_interp_type = "ext+i"
 [seepage]
 linear_tolerance = 1e-10
 linear_max_iter = 300
+nonlinear_max_iter = 100
 water_unit_weight = 9.81
 conductivity = [1.0, 1.0]
 

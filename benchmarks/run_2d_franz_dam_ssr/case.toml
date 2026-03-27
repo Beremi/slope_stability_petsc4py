@@ -1,3 +1,10 @@
+[benchmark]
+title = "2D Franz dam SSR"
+matlab_script = "slope_stability_2D_Franz_dam_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 1
+suite = false
+
 [problem]
 name = "run_2d_franz_dam_ssr"
 case = "2d_franz_dam_ssr"
@@ -32,7 +39,7 @@ tol = 1e-5
 r_min = 1e-4
 
 [linear_solver]
-solver_type = "DIRECT"
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
 tolerance = 1e-1
 max_iterations = 100
 pc_hypre_coarsen_type = "HMIS"
@@ -49,6 +56,10 @@ conductivity = [1.0e-5, 1.0e-4, 5.0e-5, 5.0e-6, 1.0e-9, 1.0e-4, 2.0e-9, 5.0e-6, 
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
+
+[notebook]
+family = "2d_seepage_continuation"
+material_palette = "franz_dam"
 
 [[materials]]
 name = "zone_1"

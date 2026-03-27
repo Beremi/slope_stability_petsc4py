@@ -1,3 +1,10 @@
+[benchmark]
+title = "2D Luzec SSR"
+matlab_script = "slope_stability_2D_Luzec_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 1
+suite = false
+
 [problem]
 name = "run_2d_luzec_ssr"
 case = "2d_luzec_ssr"
@@ -32,7 +39,7 @@ tol = 1e-4
 r_min = 1e-4
 
 [linear_solver]
-solver_type = "DIRECT"
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
 tolerance = 1e-1
 max_iterations = 100
 pc_hypre_coarsen_type = "HMIS"
@@ -49,6 +56,10 @@ conductivity = [0.000864, 86.4, 0.000864, 0.86, 86.4, 0.86, 0.000864, 0.86]
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
+
+[notebook]
+family = "2d_seepage_continuation"
+material_palette = "luzec"
 
 [[materials]]
 name = "S1"

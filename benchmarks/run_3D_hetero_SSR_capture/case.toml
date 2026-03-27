@@ -3,6 +3,10 @@ title = "3D heterogeneous SSR"
 matlab_script = "run_3D_hetero_SSR_capture"
 comparison_kind = "continuation"
 mpi_ranks = 8
+suite = true
+
+[notebook]
+family = "3d_continuation"
 
 [problem]
 name = "benchmark_3d_hetero_ssr"

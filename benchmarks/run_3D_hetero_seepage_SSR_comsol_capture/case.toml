@@ -3,6 +3,13 @@ title = "3D heterogeneous seepage SSR COMSOL"
 matlab_script = "run_3D_hetero_seepage_SSR_comsol_capture"
 comparison_kind = "continuation"
 mpi_ranks = 8
+suite = true
+
+[notebook]
+family = "3d_seepage_continuation"
+slice_planes_y = [35.0]
+slice_planes_z = [1.0e-16, 21.6506]
+strain_clim_scale_max = 0.25
 
 [problem]
 name = "benchmark_3d_hetero_seepage_ssr_comsol"

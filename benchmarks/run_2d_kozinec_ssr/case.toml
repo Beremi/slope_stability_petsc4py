@@ -1,10 +1,17 @@
+[benchmark]
+title = "2D Kozinec SSR"
+matlab_script = "slope_stability_2D_Kozinec_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 8
+suite = false
+
 [problem]
 name = "run_2d_kozinec_ssr"
 case = "2d_kozinec_ssr"
 analysis = "ssr"
 dimension = 2
 variant = "hetero"
-elem_type = "P4"
+elem_type = "P2"
 davis_type = "B"
 seepage = false
 
@@ -32,7 +39,7 @@ tol = 1e-4
 r_min = 1e-4
 
 [linear_solver]
-solver_type = "DIRECT"
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
 tolerance = 1e-1
 max_iterations = 100
 pc_hypre_coarsen_type = "HMIS"
@@ -43,6 +50,9 @@ recycle_preconditioner = true
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
+
+[notebook]
+family = "2d_continuation"
 
 [[materials]]
 name = "subdomain_1"

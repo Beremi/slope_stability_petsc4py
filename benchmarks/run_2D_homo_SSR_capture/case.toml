@@ -3,6 +3,10 @@ title = "2D homogeneous SSR"
 matlab_script = "run_2D_homo_SSR_capture"
 comparison_kind = "continuation"
 mpi_ranks = 8
+suite = true
+
+[notebook]
+family = "2d_continuation"
 
 [problem]
 name = "benchmark_2d_homo_ssr"

@@ -7,7 +7,12 @@ Each case folder contains at least:
 - `run.sh`
 - `README.md`
 
-The MATLAB-parity benchmark suite is the subset with a `[benchmark]` section in `case.toml`.
+Every benchmark folder carries `[benchmark]` metadata for reporting and notebook generation.
+The canonical MATLAB-parity benchmark suite is the subset with `[benchmark].suite = true`.
+Generated notebooks now come in pairs:
+- `simulation.ipynb` for execution/export
+- `visualisation.ipynb` for post-processing and plots
+Notebook-generated artifacts are stored locally under each benchmark folder in `artifacts/<run_label>/`.
 
 Run the full parity suite:
 
@@ -38,7 +43,7 @@ These folders are part of the unified case registry, but they are not included i
 | `run_2d_franz_dam_ssr` | 2d_franz_dam_ssr | ssr | 2D | P2 | [README](run_2d_franz_dam_ssr/README.md) | [run.sh](run_2d_franz_dam_ssr/run.sh) | [case.toml](run_2d_franz_dam_ssr/case.toml) |
 | `run_2d_homo_ll` | 2d_homo_ssr | ll | 2D | P2 | [README](run_2d_homo_ll/README.md) | [run.sh](run_2d_homo_ll/run.sh) | [case.toml](run_2d_homo_ll/case.toml) |
 | `run_2d_kozinec_ll` | 2d_kozinec_ll | ll | 2D | P2 | [README](run_2d_kozinec_ll/README.md) | [run.sh](run_2d_kozinec_ll/run.sh) | [case.toml](run_2d_kozinec_ll/case.toml) |
-| `run_2d_kozinec_ssr` | 2d_kozinec_ssr | ssr | 2D | P4 | [README](run_2d_kozinec_ssr/README.md) | [run.sh](run_2d_kozinec_ssr/run.sh) | [case.toml](run_2d_kozinec_ssr/case.toml) |
+| `run_2d_kozinec_ssr` | 2d_kozinec_ssr | ssr | 2D | P2 | [README](run_2d_kozinec_ssr/README.md) | [run.sh](run_2d_kozinec_ssr/run.sh) | [case.toml](run_2d_kozinec_ssr/case.toml) |
 | `run_2d_luzec_ssr` | 2d_luzec_ssr | ssr | 2D | P2 | [README](run_2d_luzec_ssr/README.md) | [run.sh](run_2d_luzec_ssr/run.sh) | [case.toml](run_2d_luzec_ssr/case.toml) |
 | `run_3d_hetero_ll` | 3d_hetero_ssr | ll | 3D | P2 | [README](run_3d_hetero_ll/README.md) | [run.sh](run_3d_hetero_ll/run.sh) | [case.toml](run_3d_hetero_ll/case.toml) |
 | `run_3d_homo_ll` | 3d_homo_ssr | ll | 3D | P2 | [README](run_3d_homo_ll/README.md) | [run.sh](run_3d_homo_ll/run.sh) | [case.toml](run_3d_homo_ll/case.toml) |

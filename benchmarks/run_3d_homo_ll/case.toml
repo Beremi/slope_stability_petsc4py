@@ -1,3 +1,10 @@
+[benchmark]
+title = "3D homogeneous LL"
+matlab_script = "slope_stability_3D_homo_LL.m"
+comparison_kind = "continuation"
+mpi_ranks = 8
+suite = false
+
 [problem]
 name = "run_3d_homo_ll"
 case = "3d_homo_ssr"
@@ -41,3 +48,6 @@ recycle_preconditioner = true
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
+
+[notebook]
+family = "3d_continuation"

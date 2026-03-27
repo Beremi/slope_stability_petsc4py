@@ -1,3 +1,10 @@
+[benchmark]
+title = "3D heterogeneous LL"
+matlab_script = "slope_stability_3D_hetero_LL.m"
+comparison_kind = "continuation"
+mpi_ranks = 8
+suite = false
+
 [problem]
 name = "run_3d_hetero_ll"
 case = "3d_hetero_ssr"
@@ -41,3 +48,9 @@ recycle_preconditioner = true
 write_custom_debug_bundle = true
 write_history_json = true
 write_solution_vtu = true
+
+[notebook]
+family = "3d_continuation"
+slice_planes_y = [35.0]
+slice_planes_z = [43.30127019, 64.95190529]
+strain_clim_scale_max = 0.25

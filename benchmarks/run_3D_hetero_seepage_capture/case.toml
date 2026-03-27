@@ -3,7 +3,11 @@ title = "3D heterogeneous seepage"
 matlab_script = "run_3D_hetero_seepage_capture"
 comparison_kind = "seepage"
 mpi_ranks = 8
+suite = true
 notes = "Current PETSc seepage implementation is scalar; under MPI the benchmark executes on rank 0 only."
+
+[notebook]
+family = "3d_seepage"
 
 [problem]
 name = "benchmark_3d_hetero_seepage"
