@@ -56,6 +56,10 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "omega_max_stop": cfg.continuation.omega_max,
             "continuation_predictor": cfg.continuation.predictor,
             "omega_step_controller": cfg.continuation.omega_step_controller,
+            "continuation_secant_correction_mode": cfg.continuation.secant_correction_mode,
+            "continuation_first_newton_warm_start_mode": cfg.continuation.first_newton_warm_start_mode,
+            "continuation_secant_correction_mode": cfg.continuation.secant_correction_mode,
+            "continuation_first_newton_warm_start_mode": cfg.continuation.first_newton_warm_start_mode,
             "omega_no_increase_newton_threshold": cfg.continuation.omega_no_increase_newton_threshold,
             "omega_half_newton_threshold": cfg.continuation.omega_half_newton_threshold,
             "omega_target_newton_iterations": cfg.continuation.omega_target_newton_iterations,
@@ -67,6 +71,8 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "omega_efficiency_drop_ratio": cfg.continuation.omega_efficiency_drop_ratio,
             "omega_efficiency_window": cfg.continuation.omega_efficiency_window,
             "omega_hard_shrink_scale": cfg.continuation.omega_hard_shrink_scale,
+            "step_length_cap_mode": cfg.continuation.step_length_cap_mode,
+            "step_length_cap_factor": cfg.continuation.step_length_cap_factor,
             "step_max": cfg.continuation.step_max,
             "it_newt_max": cfg.newton.it_max,
             "it_damp_max": cfg.newton.it_damp_max,
@@ -115,6 +121,10 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "omega_max_stop": cfg.continuation.omega_max,
             "continuation_predictor": cfg.continuation.predictor,
             "omega_step_controller": cfg.continuation.omega_step_controller,
+            "continuation_secant_correction_mode": cfg.continuation.secant_correction_mode,
+            "continuation_first_newton_warm_start_mode": cfg.continuation.first_newton_warm_start_mode,
+            "continuation_secant_correction_mode": cfg.continuation.secant_correction_mode,
+            "continuation_first_newton_warm_start_mode": cfg.continuation.first_newton_warm_start_mode,
             "omega_no_increase_newton_threshold": cfg.continuation.omega_no_increase_newton_threshold,
             "omega_half_newton_threshold": cfg.continuation.omega_half_newton_threshold,
             "omega_target_newton_iterations": cfg.continuation.omega_target_newton_iterations,
@@ -126,6 +136,8 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "omega_efficiency_drop_ratio": cfg.continuation.omega_efficiency_drop_ratio,
             "omega_efficiency_window": cfg.continuation.omega_efficiency_window,
             "omega_hard_shrink_scale": cfg.continuation.omega_hard_shrink_scale,
+            "step_length_cap_mode": cfg.continuation.step_length_cap_mode,
+            "step_length_cap_factor": cfg.continuation.step_length_cap_factor,
             "step_max": cfg.continuation.step_max,
             "it_newt_max": cfg.newton.it_max,
             "it_damp_max": cfg.newton.it_damp_max,
@@ -175,11 +187,21 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "omega_efficiency_drop_ratio": cfg.continuation.omega_efficiency_drop_ratio,
             "omega_efficiency_window": cfg.continuation.omega_efficiency_window,
             "omega_hard_shrink_scale": cfg.continuation.omega_hard_shrink_scale,
+            "step_length_cap_mode": cfg.continuation.step_length_cap_mode,
+            "step_length_cap_factor": cfg.continuation.step_length_cap_factor,
             "step_max": cfg.continuation.step_max,
             "it_newt_max": cfg.newton.it_max,
             "it_damp_max": cfg.newton.it_damp_max,
             "tol": cfg.newton.tol,
             "r_min": cfg.newton.r_min,
+            "newton_stopping_criterion": cfg.newton.stopping_criterion,
+            "newton_stopping_tol": cfg.newton.stopping_tol,
+            "init_newton_stopping_criterion": cfg.continuation.init_newton_stopping_criterion,
+            "init_newton_stopping_tol": cfg.continuation.init_newton_stopping_tol,
+            "fine_newton_stopping_criterion": cfg.continuation.fine_newton_stopping_criterion,
+            "fine_newton_stopping_tol": cfg.continuation.fine_newton_stopping_tol,
+            "fine_switch_mode": cfg.continuation.fine_switch_mode,
+            "fine_switch_distance_factor": cfg.continuation.fine_switch_distance_factor,
             "factor_solver_type": linear.factor_solver_type,
             "pc_backend": linear.pc_backend,
             "preconditioner_matrix_source": linear.preconditioner_matrix_source,
@@ -305,10 +327,25 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
     raise KeyError(f"Unsupported case id {cfg.problem.case!r}")
 
 
-def _build_field_exports(npz_path: Path, n_cells: int) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+def _build_field_exports(
+    npz_path: Path,
+    *,
+    n_cells: int,
+    coord: np.ndarray | None = None,
+    elem: np.ndarray | None = None,
+    elem_type: str | None = None,
+    dim: int | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     with np.load(npz_path, allow_pickle=True) as npz:
         arrays = {name: np.asarray(npz[name]) for name in npz.files}
-    return build_field_exports(arrays, n_cells=n_cells)
+    return build_field_exports(
+        arrays,
+        n_cells=n_cells,
+        coord=coord,
+        elem=elem,
+        elem_type=elem_type,
+        dim=dim,
+    )
 
 
 def _export_outputs(cfg: RunCaseConfig, config_path: Path, output_dir: Path) -> None:
@@ -340,7 +377,11 @@ def _export_outputs(cfg: RunCaseConfig, config_path: Path, output_dir: Path) -> 
         case_mesh = rebuild_case_mesh(cfg, mpi_size=int(PETSc.COMM_WORLD.getSize()))
         point_data, cell_data = _build_field_exports(
             npz_path,
-            sum(block.shape[0] for _, block in case_mesh.cell_blocks),
+            n_cells=sum(block.shape[0] for _, block in case_mesh.cell_blocks),
+            coord=case_mesh.coord,
+            elem=case_mesh.elem,
+            elem_type=cfg.problem.elem_type,
+            dim=case_mesh.dim,
         )
         cell_data = {"material_id": case_mesh.material_id, **cell_data}
         write_vtu(

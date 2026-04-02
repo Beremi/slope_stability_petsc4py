@@ -138,6 +138,8 @@ class _ConsoleProgressRenderer:
             f"rel={_fmt_num(payload.get('rel_residual'))}",
             f"crit={_fmt_num(payload.get('criterion'))}",
         ]
+        if payload.get("accepted_relative_correction_norm") is not None:
+            parts.append(f"du/u={_fmt_num(payload.get('accepted_relative_correction_norm'))}")
 
         alpha = payload.get("alpha")
         if alpha is not None:
@@ -210,6 +212,9 @@ class _ConsoleProgressRenderer:
             parts.append(f"newton={int(newton_total)}")
         if rel is not None:
             parts.append(f"rel={_fmt_num(rel)}")
+        relcorr = payload.get("step_newton_relcorr_end")
+        if relcorr is not None:
+            parts.append(f"du/u={_fmt_num(relcorr)}")
         if lin is not None:
             parts.append(f"lin={int(lin)}")
         parts.append(f"t={_fmt_time(wall)}")

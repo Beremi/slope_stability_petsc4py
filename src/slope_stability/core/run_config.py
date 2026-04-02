@@ -66,6 +66,8 @@ class NewtonConfig:
     it_damp_max: int = 10
     tol: float = 1e-4
     r_min: float = 1e-4
+    stopping_criterion: str = "relative_residual"
+    stopping_tol: float | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,14 @@ class ContinuationConfig:
     omega_efficiency_drop_ratio: float | None = None
     omega_efficiency_window: int = 3
     omega_hard_shrink_scale: float | None = None
+    step_length_cap_mode: str = "none"
+    step_length_cap_factor: float = 1.0
+    init_newton_stopping_criterion: str | None = None
+    init_newton_stopping_tol: float | None = None
+    fine_newton_stopping_criterion: str | None = None
+    fine_newton_stopping_tol: float | None = None
+    fine_switch_mode: str = "none"
+    fine_switch_distance_factor: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -180,10 +190,32 @@ class RunCaseConfig:
     case_data: dict[str, TomlValue] = field(default_factory=dict)
 
     def validate(self) -> "RunCaseConfig":
+        valid_stopping_criteria = {
+            "residual",
+            "rel_residual",
+            "relative_residual",
+            "correction",
+            "rel_correction",
+            "relative_correction",
+            "relative_newton_correction",
+            "delta_lambda",
+            "abs_delta_lambda",
+            "absolute_delta_lambda",
+        }
         if not self.problem.case:
             raise ValueError("[problem].case must be set.")
         if self.problem.analysis.lower() not in {"ssr", "ll", "seepage"}:
             raise ValueError(f"Unsupported analysis {self.problem.analysis!r}.")
+        if str(self.newton.stopping_criterion).strip().lower() not in valid_stopping_criteria:
+            raise ValueError(
+                "The newton stopping_criterion must be relative_residual, relative_correction, or absolute_delta_lambda."
+            )
+        for field_name in ("init_newton_stopping_criterion", "fine_newton_stopping_criterion"):
+            value = getattr(self.continuation, field_name)
+            if value is not None and str(value).strip().lower() not in valid_stopping_criteria:
+                raise ValueError(
+                    f"The continuation {field_name} must be relative_residual, relative_correction, or absolute_delta_lambda."
+                )
         validate_supported_elem_type(self.problem.dimension, self.problem.elem_type)
         if self.problem.analysis.lower() != "seepage" and not self.material_rows():
             raise ValueError("At least one [[materials]] entry is required for non-seepage cases.")
@@ -332,12 +364,40 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
             if continuation_data.get("omega_hard_shrink_scale") is None
             else float(continuation_data.get("omega_hard_shrink_scale"))
         ),
+        step_length_cap_mode=str(continuation_data.get("step_length_cap_mode", "none")),
+        step_length_cap_factor=float(continuation_data.get("step_length_cap_factor", 1.0)),
+        init_newton_stopping_criterion=(
+            None
+            if continuation_data.get("init_newton_stopping_criterion") is None
+            else str(continuation_data.get("init_newton_stopping_criterion"))
+        ),
+        init_newton_stopping_tol=(
+            None
+            if continuation_data.get("init_newton_stopping_tol") is None
+            else float(continuation_data.get("init_newton_stopping_tol"))
+        ),
+        fine_newton_stopping_criterion=(
+            None
+            if continuation_data.get("fine_newton_stopping_criterion") is None
+            else str(continuation_data.get("fine_newton_stopping_criterion"))
+        ),
+        fine_newton_stopping_tol=(
+            None
+            if continuation_data.get("fine_newton_stopping_tol") is None
+            else float(continuation_data.get("fine_newton_stopping_tol"))
+        ),
+        fine_switch_mode=str(continuation_data.get("fine_switch_mode", "none")),
+        fine_switch_distance_factor=float(continuation_data.get("fine_switch_distance_factor", 2.0)),
     )
     newton = NewtonConfig(
         it_max=int(newton_data.get("it_max", 200)),
         it_damp_max=int(newton_data.get("it_damp_max", 10)),
         tol=float(newton_data.get("tol", 1e-4)),
         r_min=float(newton_data.get("r_min", 1e-4)),
+        stopping_criterion=str(newton_data.get("stopping_criterion", "relative_residual")),
+        stopping_tol=(
+            None if newton_data.get("stopping_tol") is None else float(newton_data.get("stopping_tol"))
+        ),
     )
     linear_solver = LinearSolverConfig(
         solver_type=str(linear_data.get("solver_type", "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")),

@@ -139,6 +139,10 @@ def _visualisation_controls_cell():
         RUN_MODE = "reuse"  # change to "auto" only if you want this notebook to fall back to a smoke solve
         EXECUTION_PROFILE = "smoke"
         MPI_RANKS = None
+        JUPYTER_BACKEND_OVERRIDE = None  # set to "client", "trame", "server", "html", or "static"; None uses case.toml
+        SURFACE_SUBDIVISION_OVERRIDE = None  # set to 1, 2, 3, or 4 to trade quality for speed; None uses case.toml default
+        SURFACE_DECIMATE_REDUCTION_OVERRIDE = None  # set e.g. 0.5, 0.75, or 0.9 for a lighter preview mesh
+        BOUNDARY_EDGE_OVERLAY_OVERRIDE = None  # set to True to draw coarse tetra boundary edges over smooth surface colors
         """
     )
 
@@ -211,10 +215,26 @@ def _family_cells(meta: dict[str, object]):
     )
     cells.append(_code_cell("nb.viz_support_status()"))
     if family == "3d_seepage_continuation":
-        cells.append(_code_cell("_ = nb.show_3d_mesh_view(artifacts, ACTIVE_CONFIG)"))
-        cells.append(_code_cell("_ = nb.show_3d_pore_pressure_view(artifacts, ACTIVE_CONFIG)"))
-        cells.append(_code_cell("_ = nb.show_3d_displacement_view(artifacts, ACTIVE_CONFIG)"))
-        cells.append(_code_cell("_ = nb.show_3d_deviatoric_surface_view(artifacts, ACTIVE_CONFIG)"))
+        cells.append(
+            _code_cell(
+                "_ = nb.show_3d_mesh_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
+        cells.append(
+            _code_cell(
+                "_ = nb.show_3d_pore_pressure_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
+        cells.append(
+            _code_cell(
+                "_ = nb.show_3d_displacement_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
+        cells.append(
+            _code_cell(
+                "_ = nb.show_3d_deviatoric_surface_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
         if slice_planes_x or slice_planes_y or slice_planes_z:
             cells.append(
                 _code_cell(
@@ -226,17 +246,34 @@ def _family_cells(meta: dict[str, object]):
                         slice_planes_y={slice_planes_y!r},
                         slice_planes_z={slice_planes_z!r},
                         clim_scale_max={strain_clim_scale_max!r},
+                        jupyter_backend=JUPYTER_BACKEND_OVERRIDE,
                     )
                     """
                 )
             )
         return cells
     if family == "3d_seepage":
-        cells.append(_code_cell("_ = nb.show_3d_pore_pressure_view(artifacts, ACTIVE_CONFIG)"))
-        cells.append(_code_cell("_ = nb.show_3d_saturation_view(artifacts, ACTIVE_CONFIG)"))
+        cells.append(
+            _code_cell(
+                "_ = nb.show_3d_pore_pressure_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
+        cells.append(
+            _code_cell(
+                "_ = nb.show_3d_saturation_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
         return cells
-    cells.append(_code_cell("_ = nb.show_3d_displacement_view(artifacts, ACTIVE_CONFIG)"))
-    cells.append(_code_cell("_ = nb.show_3d_deviatoric_surface_view(artifacts, ACTIVE_CONFIG)"))
+    cells.append(
+        _code_cell(
+            "_ = nb.show_3d_displacement_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+        )
+    )
+    cells.append(
+        _code_cell(
+            "_ = nb.show_3d_deviatoric_surface_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+        )
+    )
     if slice_planes_x or slice_planes_y or slice_planes_z:
         cells.append(
             _code_cell(
@@ -248,6 +285,7 @@ def _family_cells(meta: dict[str, object]):
                     slice_planes_y={slice_planes_y!r},
                     slice_planes_z={slice_planes_z!r},
                     clim_scale_max={strain_clim_scale_max!r},
+                    jupyter_backend=JUPYTER_BACKEND_OVERRIDE,
                 )
                 """
             )

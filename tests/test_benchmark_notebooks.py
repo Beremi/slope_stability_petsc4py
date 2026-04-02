@@ -152,6 +152,103 @@ def test_kozinec_ssr_defaults_to_p2_with_petsc_hypre() -> None:
     assert sections["linear_solver"]["solver_type"] == "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
 
 
+def test_3d_hetero_ssr_default_uses_p4_pmg_defaults() -> None:
+    module = _support()
+
+    sections = module.load_case_sections(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml")
+    metadata = module.load_case_metadata(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml")
+
+    assert sections["problem"]["elem_type"] == "P4"
+    assert sections["continuation"]["omega_max"] == 6.7e6
+    assert sections["continuation"]["init_newton_stopping_criterion"] == "relative_correction"
+    assert sections["continuation"]["init_newton_stopping_tol"] == 1e-3
+    assert sections["newton"]["stopping_criterion"] == "absolute_delta_lambda"
+    assert sections["newton"]["stopping_tol"] == 1e-4
+    assert sections["linear_solver"]["pc_backend"] == "pmg_shell"
+    assert metadata["jupyter_backend"] == "client"
+    assert metadata["nonlinear_surface_subdivision"] == 0
+    assert metadata["surface_decimate_reduction"] == 0.75
+    assert metadata["boundary_edge_overlay"] is False
+
+
+def test_extract_surface_for_display_uses_high_order_subdivision() -> None:
+    module = _support()
+    calls: dict[str, object] = {}
+
+    class DummyDataSet:
+        def extract_surface(self, **kwargs):
+            calls.update(kwargs)
+            return "surface"
+
+    surface = module._extract_surface_for_display(DummyDataSet())  # noqa: SLF001
+
+    assert surface == "surface"
+    assert calls["nonlinear_subdivision"] == 4
+    assert calls["pass_pointid"] is True
+    assert calls["pass_cellid"] is True
+
+
+def test_display_nonlinear_surface_subdivision_reads_notebook_setting() -> None:
+    module = _support()
+
+    subdivision = module._display_nonlinear_surface_subdivision(  # noqa: SLF001
+        BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+    )
+
+    assert subdivision == 0
+
+
+def test_display_nonlinear_surface_subdivision_honors_override() -> None:
+    module = _support()
+
+    subdivision = module._display_nonlinear_surface_subdivision(  # noqa: SLF001
+        BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml",
+        override=3,
+    )
+
+    assert subdivision == 3
+
+
+def test_display_surface_decimate_reduction_reads_notebook_setting_and_honors_override() -> None:
+    module = _support()
+    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+
+    assert module._display_surface_decimate_reduction(case_toml) == 0.75  # noqa: SLF001
+    assert module._display_surface_decimate_reduction(case_toml, override=0.5) == 0.5  # noqa: SLF001
+
+
+def test_display_boundary_edge_overlay_reads_notebook_setting_and_honors_override() -> None:
+    module = _support()
+    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+
+    assert module._display_boundary_edge_overlay(case_toml) is False  # noqa: SLF001
+    assert module._display_boundary_edge_overlay(case_toml, override=True) is True  # noqa: SLF001
+
+
+def test_display_jupyter_backend_reads_notebook_setting_and_honors_override() -> None:
+    module = _support()
+    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+
+    assert module._display_jupyter_backend(case_toml) == "client"  # noqa: SLF001
+    assert module._display_jupyter_backend(case_toml, override="static") == "static"  # noqa: SLF001
+
+
+def test_3d_hetero_ssr_default_visualisation_includes_deviatoric_slices() -> None:
+    source = _notebook_sources(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "visualisation.ipynb")
+
+    assert "show_3d_deviatoric_slices" in source
+    assert 'JUPYTER_BACKEND_OVERRIDE = None' in source
+    assert 'SURFACE_SUBDIVISION_OVERRIDE = None' in source
+    assert 'SURFACE_DECIMATE_REDUCTION_OVERRIDE = None' in source
+    assert 'BOUNDARY_EDGE_OVERLAY_OVERRIDE = None' in source
+    assert "surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE" in source
+    assert "surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE" in source
+    assert "boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE" in source
+    assert "jupyter_backend=JUPYTER_BACKEND_OVERRIDE" in source
+    assert "slice_planes_y=[35.0]" in source
+    assert "slice_planes_z=[43.30127019, 64.95190529]" in source
+
+
 def test_2d_seepage_continuation_cases_default_to_single_rank() -> None:
     for name in ("run_2d_luzec_ssr", "run_2d_franz_dam_ssr"):
         raw = tomllib.loads((BENCHMARKS_DIR / name / "case.toml").read_text(encoding="utf-8"))
@@ -366,7 +463,7 @@ def test_show_3d_deviatoric_surface_view_uses_surface_cell_scalars(monkeypatch) 
     monkeypatch.setattr(module, "_module_available", lambda name: name == "pyvista")
     monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
     monkeypatch.setattr(module, "_new_plotter", lambda pv_mod, title: pv_mod.Plotter(off_screen=True))
-    monkeypatch.setattr(module, "_show_plotter", lambda plotter: plotter.close() or "shown")
+    monkeypatch.setattr(module, "_show_plotter", lambda plotter, *args, **kwargs: plotter.close() or "shown")
     monkeypatch.setattr(pv.Plotter, "add_mesh", wrapped_add_mesh)
 
     result = module.show_3d_deviatoric_surface_view(artifacts, case_toml)
@@ -377,6 +474,34 @@ def test_show_3d_deviatoric_surface_view_uses_surface_cell_scalars(monkeypatch) 
     assert captured["kwargs"]["lighting"] is False
     assert "deviatoric_strain" in captured["mesh"].cell_data
     assert "deviatoric_strain" not in captured["mesh"].point_data
+
+
+def test_show_3d_deviatoric_surface_view_can_overlay_boundary_edges(monkeypatch) -> None:
+    pv = pytest.importorskip("pyvista")
+    pv.OFF_SCREEN = True
+    module = _support()
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "artifacts" / "simulation")
+    case_toml = BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "case.toml"
+    captured: list[dict[str, object]] = []
+    original_add_mesh = pv.Plotter.add_mesh
+
+    def wrapped_add_mesh(self, mesh, *args, **kwargs):
+        captured.append({"mesh": mesh, "kwargs": kwargs})
+        return original_add_mesh(self, mesh, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_module_available", lambda name: name == "pyvista")
+    monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
+    monkeypatch.setattr(module, "_new_plotter", lambda pv_mod, title: pv_mod.Plotter(off_screen=True))
+    monkeypatch.setattr(module, "_show_plotter", lambda plotter, *args, **kwargs: plotter.close() or "shown")
+    monkeypatch.setattr(pv.Plotter, "add_mesh", wrapped_add_mesh)
+
+    result = module.show_3d_deviatoric_surface_view(artifacts, case_toml, boundary_edge_overlay=True)
+
+    assert result == "shown"
+    assert len(captured) == 2
+    assert captured[0]["kwargs"]["scalars"] == "deviatoric_strain"
+    assert "scalars" not in captured[1]["kwargs"]
+    assert captured[1]["kwargs"]["line_width"] == pytest.approx(1.2)
 
 
 def test_surface_parent_elements_and_plotting_face_ids_for_p2_faces() -> None:
@@ -427,7 +552,7 @@ def test_show_3d_deviatoric_slices_uses_single_scalar_bar(monkeypatch) -> None:
     monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
     monkeypatch.setattr(module, "_new_plotter", lambda pv_mod, title: pv_mod.Plotter(off_screen=True))
 
-    def fake_show(plotter):
+    def fake_show(plotter, *args, **kwargs):
         count = len(plotter.scalar_bars)
         plotter.close()
         return count
@@ -442,6 +567,24 @@ def test_show_3d_deviatoric_slices_uses_single_scalar_bar(monkeypatch) -> None:
     )
 
     assert count == 1
+
+
+def test_refine_slice_for_display_subdivides_p4_slice_and_resamples() -> None:
+    pv = pytest.importorskip("pyvista")
+    module = _support()
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "artifacts" / "simulation")
+    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+
+    grid = pv.read(artifacts.vtu_path)
+    slc = grid.slice(
+        normal=(0.0, 0.0, 1.0),
+        origin=(grid.center[0], grid.center[1], 43.30127019),
+        generate_triangles=True,
+    )
+    refined = module._refine_slice_for_display(slc, grid, case_toml=case_toml)  # noqa: SLF001
+
+    assert refined.n_cells > slc.n_cells
+    assert "deviatoric_strain" in refined.point_data
 
 
 def test_show_3d_saturation_view_uses_region_surfaces(monkeypatch) -> None:
@@ -460,7 +603,7 @@ def test_show_3d_saturation_view_uses_region_surfaces(monkeypatch) -> None:
     monkeypatch.setattr(module, "_module_available", lambda name: name == "pyvista")
     monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
     monkeypatch.setattr(module, "_new_plotter", lambda pv_mod, title: pv_mod.Plotter(off_screen=True))
-    monkeypatch.setattr(module, "_show_plotter", lambda plotter: plotter.close() or "shown")
+    monkeypatch.setattr(module, "_show_plotter", lambda plotter, *args, **kwargs: plotter.close() or "shown")
     monkeypatch.setattr(pv.Plotter, "add_mesh", wrapped_add_mesh)
 
     result = module.show_3d_saturation_view(artifacts, case_toml)

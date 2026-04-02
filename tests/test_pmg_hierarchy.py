@@ -7,7 +7,7 @@ import pytest
 from petsc4py import PETSc
 from scipy.sparse import identity
 
-from slope_stability.cli.run_3D_hetero_SSR_capture import _compute_retrospective_predictor_export, run_capture
+from slope_stability.cli.run_3D_hetero_SSR_capture import run_capture
 import slope_stability.cli.run_3D_hetero_SSR_capture as run_capture_mod
 from slope_stability.core.config import ContinuationConfig, LinearSolverConfig, MaterialConfig, Problem3DConfig, Run3DSSRConfig
 from slope_stability.core.simplex_lagrange import tetra_lagrange_node_tuples, tetra_reference_nodes
@@ -20,6 +20,7 @@ from slope_stability.linear.pmg import (
     _cross_mesh_p1_to_p1_prolongation,
     build_3d_mixed_pmg_chain_hierarchy,
     build_3d_mixed_pmg_hierarchy,
+    build_3d_mixed_pmg_hierarchy_with_intermediate_p2,
     build_3d_same_mesh_pmg_hierarchy,
 )
 from slope_stability.linear.solver import PetscMatlabExactDFGMRESSolver, _ManualPMGShellPC
@@ -326,6 +327,28 @@ def test_build_3d_mixed_pmg_hierarchy_smoke_on_real_l1_l2_meshes() -> None:
     assert hierarchy.mid_level.n_nodes == 6795
     assert hierarchy.fine_level.n_nodes == 49797
     assert not np.any(np.diff(hierarchy.prolongation_p21.local_matrix.tocsc().indptr) == 0)
+
+
+def test_build_3d_mixed_pmg_hierarchy_with_intermediate_p2_smoke_on_real_l1_l2_meshes() -> None:
+    hierarchy = build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
+        MESH_PATH_L2,
+        MESH_PATH,
+        node_ordering="block_metis",
+        comm=PETSc.COMM_SELF,
+    )
+
+    levels = hierarchy.levels
+    assert isinstance(hierarchy, GeneralPMGHierarchy)
+    assert [level.order for level in levels] == [1, 1, 2, 4]
+    assert levels[0].elem_type == "P1"
+    assert levels[1].elem_type == "P1"
+    assert levels[2].elem_type == "P2"
+    assert levels[3].elem_type == "P4"
+    assert len(hierarchy.prolongations) == 3
+    assert hierarchy.prolongations[0].global_shape == (levels[1].free_size, levels[0].free_size)
+    assert hierarchy.prolongations[1].global_shape == (levels[2].free_size, levels[1].free_size)
+    assert hierarchy.prolongations[2].global_shape == (levels[3].free_size, levels[2].free_size)
+    assert levels[0].free_size < levels[1].free_size < levels[2].free_size < levels[3].free_size
 
 
 def test_mixed_pmg_shell_vector_hypre_uses_direct_elastic_coarse_operator_on_real_meshes() -> None:
@@ -923,6 +946,29 @@ def test_run_capture_accepts_mixed_p2_pmg_shell_path(monkeypatch: pytest.MonkeyP
         )
 
 
+def test_run_capture_accepts_mixed_p4_with_intermediate_p2_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _sentinel_builder(*args, **kwargs):
+        raise RuntimeError("mixed-pmg-p4-p2-sentinel")
+
+    monkeypatch.setattr(run_capture_mod, "build_3d_mixed_pmg_hierarchy_with_intermediate_p2", _sentinel_builder)
+
+    with pytest.raises(RuntimeError, match="mixed-pmg-p4-p2-sentinel"):
+        run_capture(
+            tmp_path / "pmg_shell_mixed_p4_p2",
+            mesh_path=MESH_PATH_L2,
+            elem_type="P4",
+            pc_backend="pmg_shell",
+            pmg_coarse_mesh_path=MESH_PATH,
+            pmg_fine_hierarchy_mode="p4_p2_intermediate",
+            preconditioner_matrix_source="tangent",
+            node_ordering="block_metis",
+            step_max=1,
+        )
+
+
 def test_build_3d_same_mesh_p2_pmg_hierarchy_smoke_on_real_mesh() -> None:
     hierarchy = build_3d_same_mesh_pmg_hierarchy(
         MESH_PATH,
@@ -955,48 +1001,3 @@ def test_run_capture_accepts_same_mesh_p2_pmg_shell_path(monkeypatch: pytest.Mon
             step_max=1,
         )
 
-
-def test_retrospective_predictor_export_scores_saved_states() -> None:
-    omega_hist = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=np.float64)
-    lambda_hist = omega_hist**2
-    step_u = np.zeros((omega_hist.size, 3, 2), dtype=np.float64)
-    for idx, omega in enumerate(omega_hist):
-        step_u[idx, 0, :] = omega**2 + np.array([0.0, 1.0], dtype=np.float64)
-        step_u[idx, 1, :] = 2.0 * omega + np.array([0.5, -0.5], dtype=np.float64)
-        step_u[idx, 2, :] = -omega + np.array([1.0, -1.0], dtype=np.float64)
-
-    arrays, summary = _compute_retrospective_predictor_export(
-        step_u=step_u,
-        omega_hist=omega_hist,
-        lambda_hist=lambda_hist,
-        step_index=np.array([3, 4, 5], dtype=np.int64),
-        step_omega=omega_hist[2:],
-        step_lambda=lambda_hist[2:],
-    )
-
-    assert summary["available"] is True
-    assert summary["state_count"] == 5
-    assert summary["continuation_state_count"] == 3
-
-    sec_rel = arrays["retrospective_predictor_secant_u_l2_rel"]
-    quad_rel = arrays["retrospective_predictor_two_step_quadratic_u_l2_rel"]
-    cubic_rel = arrays["retrospective_predictor_three_step_cubic_u_l2_rel"]
-    quad_lam = arrays["retrospective_predictor_two_step_quadratic_lambda_abs_err"]
-    cubic_lam = arrays["retrospective_predictor_three_step_cubic_lambda_abs_err"]
-
-    assert np.all(np.isfinite(sec_rel))
-    assert sec_rel[0] > 0.0
-    assert np.isnan(quad_rel[0])
-    assert quad_rel[1] == pytest.approx(0.0, abs=1.0e-12)
-    assert quad_rel[2] == pytest.approx(0.0, abs=1.0e-12)
-    assert np.isnan(cubic_rel[0])
-    assert np.isnan(cubic_rel[1])
-    assert cubic_rel[2] == pytest.approx(0.0, abs=1.0e-12)
-    assert quad_lam[1] == pytest.approx(0.0, abs=1.0e-12)
-    assert quad_lam[2] == pytest.approx(0.0, abs=1.0e-12)
-    assert cubic_lam[2] == pytest.approx(0.0, abs=1.0e-12)
-
-    methods = summary["methods"]
-    assert methods["secant"]["targets"] == 3
-    assert methods["two_step_quadratic"]["targets"] == 2
-    assert methods["three_step_cubic"]["targets"] == 1

@@ -143,6 +143,25 @@ def _collector_delta(before: dict[str, float | int], after: dict[str, float | in
     }
 
 
+def _basis_snapshot(linear_system_solver):
+    getter = getattr(linear_system_solver, "get_deflation_basis_snapshot", None)
+    if callable(getter):
+        return getter()
+    basis = getattr(linear_system_solver, "deflation_basis", None)
+    if basis is None:
+        return None
+    return np.array(basis, dtype=np.float64, copy=True)
+
+
+def _basis_restore(linear_system_solver, snapshot) -> None:
+    restore = getattr(linear_system_solver, "restore_deflation_basis", None)
+    if callable(restore):
+        restore(snapshot)
+        return
+    if hasattr(linear_system_solver, "deflation_basis"):
+        linear_system_solver.deflation_basis = np.array(snapshot, dtype=np.float64, copy=True)
+
+
 def _emit_progress(progress_callback: Callable[[dict], None] | None, *, event: str, **payload) -> None:
     if progress_callback is None:
         return
@@ -239,6 +258,33 @@ def _dist_norm_local(x_local: np.ndarray, comm) -> float:
     return float(np.sqrt(max(_dist_dot_local(x_local, x_local, comm), 0.0)))
 
 
+def _normalize_stopping_criterion(stopping_criterion: str | None) -> str:
+    raw = "relative_residual" if stopping_criterion is None else str(stopping_criterion).strip().lower()
+    aliases = {
+        "residual": "relative_residual",
+        "rel_residual": "relative_residual",
+        "relative_residual": "relative_residual",
+        "correction": "relative_correction",
+        "rel_correction": "relative_correction",
+        "relative_correction": "relative_correction",
+        "relative_newton_correction": "relative_correction",
+        "delta_lambda": "absolute_delta_lambda",
+        "abs_delta_lambda": "absolute_delta_lambda",
+        "absolute_delta_lambda": "absolute_delta_lambda",
+    }
+    mode = aliases.get(raw)
+    if mode is None:
+        raise ValueError(f"Unsupported Newton stopping_criterion {stopping_criterion!r}")
+    return mode
+
+
+def _resolve_stopping_tolerance(tol: float, stopping_tol: float | None) -> float:
+    value = float(tol if stopping_tol is None else stopping_tol)
+    if value < 0.0:
+        raise ValueError("Newton stopping tolerance must be non-negative.")
+    return value
+
+
 def _build_regularized_if_available(constitutive_matrix_builder, *, lam=None, U, r: float):
     if lam is None:
         fn = getattr(constitutive_matrix_builder, "build_F_K_regularized_reduced", None)
@@ -303,6 +349,8 @@ def newton(
     linear_system_solver,
     *,
     progress_callback: Callable[[dict], None] | None = None,
+    stopping_criterion: str = "relative_residual",
+    stopping_tol: float | None = None,
 ):
     """Plain Newton solver for ``F(U) = f``.
 
@@ -321,6 +369,10 @@ def newton(
     norm_f = _free_norm(f, Q)
     if norm_f == 0.0:
         norm_f = 1.0
+    stop_mode = _normalize_stopping_criterion(stopping_criterion)
+    if stop_mode == "absolute_delta_lambda":
+        raise ValueError("Newton stopping_criterion='absolute_delta_lambda' is only supported by newton_ind_ssr.")
+    stop_tol = _resolve_stopping_tolerance(tol, stopping_tol)
 
     it = 0
     flag_N = 0
@@ -343,6 +395,7 @@ def newton(
         F_local = None
         F_free_local = None
         f_free_local = None
+        temporary_basis_snapshot = None
 
         if compute_diffs:
             if use_local_build:
@@ -386,7 +439,7 @@ def newton(
             criterion_abs = float(np.linalg.norm(F_free - f_free))
         criterion = criterion_abs / norm_f
 
-        if compute_diffs and criterion < tol:
+        if compute_diffs and stop_mode == "relative_residual" and criterion < stop_tol:
             _emit_progress(
                 progress_callback,
                 event="newton_iteration",
@@ -401,7 +454,14 @@ def newton(
                 linear_preconditioner_time=0.0,
                 linear_orthogonalization_time=0.0,
                 iteration_wall_time=float(perf_counter() - iter_t0),
-                tolerance=float(tol),
+                tolerance=float(stop_tol),
+                residual_tolerance=float(tol),
+                stop_criterion=str(stop_mode),
+                stop_tolerance=float(stop_tol),
+                stopping_value=float(criterion),
+                iterate_free_norm=float(_free_norm(U_it, Q)),
+                accepted_correction_norm=None,
+                accepted_relative_correction_norm=None,
                 status="converged",
             )
             _cleanup_pre_solve_iteration_mats(
@@ -497,6 +557,14 @@ def newton(
             dU_local_free=_local_owned_free_rows_from_field(dU, constitutive_matrix_builder.owned_tangent_pattern) if use_local_build else None,
             comm=comm,
         )
+        iterate_free_norm = _free_norm(U_it, Q)
+        accepted_correction_norm = float(np.linalg.norm(float(alpha) * _to_free_vector(dU, Q)))
+        accepted_relative_correction_norm = float(accepted_correction_norm / max(iterate_free_norm, 1.0e-30))
+        converged_on_correction = (
+            stop_mode == "relative_correction"
+            and float(alpha) > 0.0
+            and accepted_relative_correction_norm < stop_tol
+        )
 
         _emit_progress(
             progress_callback,
@@ -512,9 +580,20 @@ def newton(
             linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
             linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
             iteration_wall_time=float(perf_counter() - iter_t0),
-            tolerance=float(tol),
-            status="iterate",
+            tolerance=float(stop_tol),
+            residual_tolerance=float(tol),
+            stop_criterion=str(stop_mode),
+            stop_tolerance=float(stop_tol),
+            stopping_value=float(criterion if stop_mode == "relative_residual" else accepted_relative_correction_norm),
+            iterate_free_norm=float(iterate_free_norm),
+            accepted_correction_norm=float(accepted_correction_norm),
+            accepted_relative_correction_norm=float(accepted_relative_correction_norm),
+            status="converged" if converged_on_correction else "iterate",
         )
+
+        if converged_on_correction:
+            U_it = U_it + alpha * dU
+            break
 
         compute_diffs = True
         if alpha < 1e-1:
@@ -556,6 +635,9 @@ def newton_ind_ssr(
     linear_system_solver,
     *,
     progress_callback: Callable[[dict], None] | None = None,
+    first_iteration_extra_basis_free: list[np.ndarray] | None = None,
+    stopping_criterion: str = "relative_residual",
+    stopping_tol: float | None = None,
 ):
     """Nested Newton for ``F_lambda(U)=f`` with additional condition ``f^T U = omega``.
 
@@ -576,18 +658,40 @@ def newton_ind_ssr(
             "lambda": np.array([float(lambda_it)], dtype=np.float64),
             "delta_lambda": np.array([0.0], dtype=np.float64),
             "accepted_delta_lambda": np.array([0.0], dtype=np.float64),
+            "accepted_correction_norm": np.array([0.0], dtype=np.float64),
+            "iterate_free_norm": np.array([0.0], dtype=np.float64),
+            "accepted_relative_correction_norm": np.array([0.0], dtype=np.float64),
             "linear_iterations": np.array([0], dtype=np.int64),
             "linear_solve_time": np.array([0.0], dtype=np.float64),
             "linear_preconditioner_time": np.array([0.0], dtype=np.float64),
             "linear_orthogonalization_time": np.array([0.0], dtype=np.float64),
             "iteration_wall_time": np.array([0.0], dtype=np.float64),
+            "first_iteration_linear_iterations": 0,
+            "first_iteration_linear_solve_time": 0.0,
+            "first_iteration_linear_preconditioner_time": 0.0,
+            "first_iteration_linear_orthogonalization_time": 0.0,
+            "first_iteration_warm_start_active": False,
+            "first_iteration_warm_start_basis_dim": 0,
+            "first_accepted_correction_iteration": 0,
+            "first_accepted_correction_norm": 0.0,
+            "first_accepted_correction_free": np.zeros(0, dtype=np.float64),
+            "stop_criterion": str(_normalize_stopping_criterion(stopping_criterion)),
+            "stop_tolerance": float(_resolve_stopping_tolerance(tol, stopping_tol)),
+            "residual_tolerance": float(tol),
         }
         return U_it, float(lambda_it), 0, 0, history
     f_free = _to_free_vector(f, Q)
+    first_iteration_extra_basis_free = [
+        np.asarray(v, dtype=np.float64).reshape(-1).copy()
+        for v in (first_iteration_extra_basis_free or [])
+        if np.asarray(v, dtype=np.float64).size
+    ]
 
     norm_f = _free_norm(f, Q)
     if norm_f == 0.0:
         norm_f = 1.0
+    stop_mode = _normalize_stopping_criterion(stopping_criterion)
+    stop_tol = _resolve_stopping_tolerance(tol, stopping_tol)
 
     eps = tol / 1000.0
     it = 0
@@ -603,11 +707,23 @@ def newton_ind_ssr(
     lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     delta_lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     accepted_delta_lambda_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    accepted_correction_norm_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    iterate_free_norm_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    accepted_relative_correction_norm_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     linear_iterations_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     linear_solve_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     linear_preconditioner_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     linear_orthogonalization_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     iteration_wall_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    first_iteration_linear_iterations = 0
+    first_iteration_linear_solve_time = 0.0
+    first_iteration_linear_preconditioner_time = 0.0
+    first_iteration_linear_orthogonalization_time = 0.0
+    first_iteration_warm_start_active = False
+    first_iteration_warm_start_basis_dim = 0
+    first_accepted_correction_iteration = 0
+    first_accepted_correction_norm = np.nan
+    first_accepted_correction_free: np.ndarray | None = None
 
     while True:
         it += 1
@@ -670,7 +786,7 @@ def newton_ind_ssr(
         criterion_hist[it - 1] = criterion
         residual_hist[it - 1] = rel_resid
         lambda_hist[it - 1] = float(lambda_it)
-        if compute_diffs and rel_resid < tol and it > 1:
+        if compute_diffs and stop_mode == "relative_residual" and rel_resid < stop_tol and it > 1:
             iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
             _emit_progress(
                 progress_callback,
@@ -690,7 +806,14 @@ def newton_ind_ssr(
                 linear_preconditioner_time=0.0,
                 linear_orthogonalization_time=0.0,
                 iteration_wall_time=float(iteration_wall_hist[it - 1]),
-                tolerance=float(tol),
+                tolerance=float(stop_tol),
+                residual_tolerance=float(tol),
+                stop_criterion=str(stop_mode),
+                stop_tolerance=float(stop_tol),
+                stopping_value=float(rel_resid),
+                iterate_free_norm=float(_free_norm(U_it, Q)),
+                accepted_correction_norm=None,
+                accepted_relative_correction_norm=None,
                 status="converged",
             )
             _cleanup_pre_solve_iteration_mats(
@@ -744,6 +867,17 @@ def newton_ind_ssr(
 
         try:
             if use_full_operator:
+                temporary_basis_snapshot = None
+                if (
+                    it == 1
+                    and first_iteration_extra_basis_free
+                    and getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)()
+                ):
+                    temporary_basis_snapshot = _basis_snapshot(linear_system_solver)
+                    for vec in first_iteration_extra_basis_free:
+                        linear_system_solver.expand_deflation_basis(vec)
+                    first_iteration_warm_start_active = True
+                    first_iteration_warm_start_basis_dim = int(len(first_iteration_extra_basis_free))
                 _setup_linear_system(
                     linear_system_solver,
                     K_r,
@@ -783,6 +917,17 @@ def newton_ind_ssr(
                         free_idx=free_idx,
                     )
             else:
+                temporary_basis_snapshot = None
+                if (
+                    it == 1
+                    and first_iteration_extra_basis_free
+                    and getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)()
+                ):
+                    temporary_basis_snapshot = _basis_snapshot(linear_system_solver)
+                    for vec in first_iteration_extra_basis_free:
+                        linear_system_solver.expand_deflation_basis(vec)
+                    first_iteration_warm_start_active = True
+                    first_iteration_warm_start_basis_dim = int(len(first_iteration_extra_basis_free))
                 K_free = extract_submatrix_free(K_r, free_idx)
                 _setup_linear_system(linear_system_solver, K_free, A_full=K_r, free_idx=free_idx)
                 if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
@@ -796,12 +941,19 @@ def newton_ind_ssr(
                 )
         finally:
             _release_iteration_resources(linear_system_solver)
+            if temporary_basis_snapshot is not None:
+                _basis_restore(linear_system_solver, temporary_basis_snapshot)
             _destroy_petsc_mat(K_free)
             if not _is_builder_cached_matrix(K_tangent, constitutive_matrix_builder):
                 _destroy_petsc_mat(K_tangent)
             if not use_full_operator and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
                 _destroy_petsc_mat(K_r)
         iter_delta = _collector_delta(snap_before_iter, _collector_snapshot(linear_system_solver))
+        if it == 1:
+            first_iteration_linear_iterations = int(iter_delta["iterations"])
+            first_iteration_linear_solve_time = float(iter_delta["solve_time"])
+            first_iteration_linear_preconditioner_time = float(iter_delta["preconditioner_time"])
+            first_iteration_linear_orthogonalization_time = float(iter_delta["orthogonalization_time"])
 
         W = np.zeros(U_it.size, dtype=np.float64)
         V = np.zeros(U_it.size, dtype=np.float64)
@@ -834,11 +986,31 @@ def newton_ind_ssr(
         alpha_hist[it - 1] = alpha
         delta_lambda_hist[it - 1] = float(d_l)
         accepted_delta_lambda_hist[it - 1] = float(alpha * d_l)
+        abs_delta_lambda = float(abs(d_l))
+        iterate_free_norm_hist[it - 1] = _free_norm(U_it, Q)
+        correction_free = np.asarray(alpha * _to_free_vector(d_U, Q), dtype=np.float64).reshape(-1)
+        accepted_correction_norm_hist[it - 1] = float(np.linalg.norm(correction_free))
+        denom_u = max(float(iterate_free_norm_hist[it - 1]), 1.0e-30)
+        accepted_relative_correction_norm_hist[it - 1] = float(accepted_correction_norm_hist[it - 1] / denom_u)
+        converged_on_correction = (
+            stop_mode == "relative_correction"
+            and float(alpha) > 0.0
+            and accepted_relative_correction_norm_hist[it - 1] < stop_tol
+        )
+        converged_on_delta_lambda = (
+            stop_mode == "absolute_delta_lambda"
+            and float(alpha) > 0.0
+            and abs_delta_lambda < stop_tol
+        )
         linear_iterations_hist[it - 1] = int(iter_delta["iterations"])
         linear_solve_hist[it - 1] = float(iter_delta["solve_time"])
         linear_preconditioner_hist[it - 1] = float(iter_delta["preconditioner_time"])
         linear_orthogonalization_hist[it - 1] = float(iter_delta["orthogonalization_time"])
         iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
+        if first_accepted_correction_free is None and float(alpha) > 0.0:
+            first_accepted_correction_iteration = int(it)
+            first_accepted_correction_norm = float(np.linalg.norm(correction_free))
+            first_accepted_correction_free = correction_free
 
         _emit_progress(
             progress_callback,
@@ -858,9 +1030,30 @@ def newton_ind_ssr(
             linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
             linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
             iteration_wall_time=float(iteration_wall_hist[it - 1]),
-            tolerance=float(tol),
-            status="iterate",
+            tolerance=float(stop_tol),
+            residual_tolerance=float(tol),
+            stop_criterion=str(stop_mode),
+            stop_tolerance=float(stop_tol),
+            stopping_value=float(
+                rel_resid
+                if stop_mode == "relative_residual"
+                else abs_delta_lambda
+                if stop_mode == "absolute_delta_lambda"
+                else accepted_relative_correction_norm_hist[it - 1]
+            ),
+            iterate_free_norm=float(iterate_free_norm_hist[it - 1]),
+            accepted_correction_norm=float(accepted_correction_norm_hist[it - 1]),
+            accepted_relative_correction_norm=float(accepted_relative_correction_norm_hist[it - 1]),
+            status="converged" if (converged_on_correction or converged_on_delta_lambda) else "iterate",
         )
+
+        if converged_on_correction or converged_on_delta_lambda:
+            U_it = U_it + alpha * d_U
+            denom = _free_dot(f, U_it, Q)
+            if denom != 0.0:
+                U_it = U_it * (omega / denom)
+            lambda_it = lambda_it + alpha * d_l
+            break
 
         compute_diffs = True
         if alpha < 1e-1:
@@ -901,11 +1094,30 @@ def newton_ind_ssr(
         "lambda": lambda_hist[:it],
         "delta_lambda": delta_lambda_hist[:it],
         "accepted_delta_lambda": accepted_delta_lambda_hist[:it],
+        "accepted_correction_norm": accepted_correction_norm_hist[:it],
+        "iterate_free_norm": iterate_free_norm_hist[:it],
+        "accepted_relative_correction_norm": accepted_relative_correction_norm_hist[:it],
         "linear_iterations": linear_iterations_hist[:it],
         "linear_solve_time": linear_solve_hist[:it],
         "linear_preconditioner_time": linear_preconditioner_hist[:it],
         "linear_orthogonalization_time": linear_orthogonalization_hist[:it],
         "iteration_wall_time": iteration_wall_hist[:it],
+        "first_iteration_linear_iterations": int(first_iteration_linear_iterations),
+        "first_iteration_linear_solve_time": float(first_iteration_linear_solve_time),
+        "first_iteration_linear_preconditioner_time": float(first_iteration_linear_preconditioner_time),
+        "first_iteration_linear_orthogonalization_time": float(first_iteration_linear_orthogonalization_time),
+        "first_iteration_warm_start_active": bool(first_iteration_warm_start_active),
+        "first_iteration_warm_start_basis_dim": int(first_iteration_warm_start_basis_dim),
+        "first_accepted_correction_iteration": int(first_accepted_correction_iteration),
+        "first_accepted_correction_norm": float(first_accepted_correction_norm)
+        if np.isfinite(first_accepted_correction_norm)
+        else np.nan,
+        "first_accepted_correction_free": np.asarray(first_accepted_correction_free, dtype=np.float64).copy()
+        if first_accepted_correction_free is not None
+        else np.zeros(0, dtype=np.float64),
+        "stop_criterion": str(stop_mode),
+        "stop_tolerance": float(stop_tol),
+        "residual_tolerance": float(tol),
     }
     return U_it, float(lambda_it), flag_N, it, history
 

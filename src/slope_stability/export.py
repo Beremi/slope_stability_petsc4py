@@ -31,7 +31,7 @@ def write_debug_bundle_h5(
         meta.create_dataset("progress_jsonl", data=np.bytes_(progress_text))
         arrays = h5.create_group("arrays")
         for key in sorted(npz.files):
-            arrays.create_dataset(key, data=np.asarray(npz[key]))
+            _create_h5_dataset(arrays, key, np.asarray(npz[key]))
     return out_path
 
 
@@ -153,6 +153,14 @@ def _normalize_cell_block(cell_type: str, block: np.ndarray) -> tuple[int, np.nd
             raise ValueError("tetra10 block must have width 10")
         # Internal order: [v0, v1, v2, v3, e01, e12, e02, e13, e23, e03]
         return 24, block[:, [0, 1, 2, 3, 4, 5, 6, 9, 7, 8]]
+    if cell_type == "VTK_LAGRANGE_TRIANGLE":
+        if block.shape[1] != 15:
+            raise ValueError("VTK_LAGRANGE_TRIANGLE block must have width 15")
+        return 69, block
+    if cell_type == "VTK_LAGRANGE_TETRAHEDRON":
+        if block.shape[1] != 35:
+            raise ValueError("VTK_LAGRANGE_TETRAHEDRON block must have width 35")
+        return 71, block
     raise ValueError(f"Unsupported cell_type {cell_type!r}")
 
 
@@ -178,6 +186,15 @@ def _append_data_array(node: ET.Element, name: str | None, values: np.ndarray, n
         data.text = _format_ascii(flat[:, 0])
     else:
         data.text = _format_ascii(flat.reshape(-1))
+
+
+def _create_h5_dataset(group: h5py.Group, name: str, values: np.ndarray) -> None:
+    arr = np.asarray(values)
+    if arr.dtype.kind in {"U", "S", "O"}:
+        text = np.asarray(arr, dtype=str)
+        group.create_dataset(name, data=np.char.encode(text, encoding="utf-8"))
+        return
+    group.create_dataset(name, data=arr)
 
 
 def _format_ascii(values: np.ndarray) -> str:

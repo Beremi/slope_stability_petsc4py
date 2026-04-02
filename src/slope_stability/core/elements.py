@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .simplex_lagrange import tetra_lagrange_node_tuples, triangle_lagrange_node_tuples
+
 
 SUPPORTED_ELEM_TYPES_BY_DIM: dict[int, tuple[str, ...]] = {
     2: ("P1", "P2", "P4"),
@@ -27,6 +29,62 @@ SIMPLEX_NODES_PER_SURFACE: dict[tuple[int, str], int] = {
     (3, "P2"): 6,
     (3, "P4"): 15,
 }
+
+VTK_TRIANGLE_P4_NODE_TUPLES: tuple[tuple[int, int, int], ...] = (
+    (4, 0, 0),
+    (0, 4, 0),
+    (0, 0, 4),
+    (3, 1, 0),
+    (2, 2, 0),
+    (1, 3, 0),
+    (0, 3, 1),
+    (0, 2, 2),
+    (0, 1, 3),
+    (1, 0, 3),
+    (2, 0, 2),
+    (3, 0, 1),
+    (2, 1, 1),
+    (1, 2, 1),
+    (1, 1, 2),
+)
+
+VTK_TETRA_P4_NODE_TUPLES: tuple[tuple[int, int, int, int], ...] = (
+    (4, 0, 0, 0),
+    (0, 4, 0, 0),
+    (0, 0, 4, 0),
+    (0, 0, 0, 4),
+    (3, 1, 0, 0),
+    (2, 2, 0, 0),
+    (1, 3, 0, 0),
+    (0, 3, 1, 0),
+    (0, 2, 2, 0),
+    (0, 1, 3, 0),
+    (1, 0, 3, 0),
+    (2, 0, 2, 0),
+    (3, 0, 1, 0),
+    (3, 0, 0, 1),
+    (2, 0, 0, 2),
+    (1, 0, 0, 3),
+    (0, 3, 0, 1),
+    (0, 2, 0, 2),
+    (0, 1, 0, 3),
+    (0, 0, 3, 1),
+    (0, 0, 2, 2),
+    (0, 0, 1, 3),
+    (2, 1, 0, 1),
+    (1, 2, 0, 1),
+    (1, 1, 0, 2),
+    (0, 1, 2, 1),
+    (0, 1, 1, 2),
+    (0, 2, 1, 1),
+    (2, 0, 1, 1),
+    (1, 0, 1, 2),
+    (1, 0, 2, 1),
+    (2, 1, 1, 0),
+    (1, 1, 2, 0),
+    (1, 2, 1, 0),
+    (1, 1, 1, 1),
+)
 
 
 def normalize_elem_type(elem_type: str) -> str:
@@ -55,14 +113,41 @@ def simplex_vtk_cell_block(dim: int, elem: np.ndarray, elem_type: str | None = N
     elem_key = infer_simplex_elem_type(dim, elem_arr.shape[0]) if elem_type is None else validate_supported_elem_type(dim, elem_type)
 
     if int(dim) == 2:
+        if elem_key == "P4":
+            return "VTK_LAGRANGE_TRIANGLE", _triangle_p4_vtk_block(elem_arr)
         if elem_key == "P2":
             return "triangle6", elem_arr[:6, :].T
         return "triangle", elem_arr[:3, :].T
 
     if int(dim) == 3:
+        if elem_key == "P4":
+            return "VTK_LAGRANGE_TETRAHEDRON", _tetra_p4_vtk_block(elem_arr)
         if elem_key == "P2":
             return "tetra10", elem_arr[:10, :].T
         return "tetra", elem_arr[:4, :].T
 
     raise ValueError(f"Unsupported simplex dimension {dim}.")
 
+
+def _triangle_p4_vtk_block(elem_arr: np.ndarray) -> np.ndarray:
+    if elem_arr.shape[0] != 15:
+        raise ValueError(f"P4 triangle block must have 15 local nodes, got shape {elem_arr.shape}.")
+    perm = _triangle_p4_vtk_permutation()
+    return elem_arr[perm, :].T
+
+
+def _tetra_p4_vtk_block(elem_arr: np.ndarray) -> np.ndarray:
+    if elem_arr.shape[0] != 35:
+        raise ValueError(f"P4 tetra block must have 35 local nodes, got shape {elem_arr.shape}.")
+    perm = _tetra_p4_vtk_permutation()
+    return elem_arr[perm, :].T
+
+
+def _triangle_p4_vtk_permutation() -> np.ndarray:
+    lookup = {node: idx for idx, node in enumerate(triangle_lagrange_node_tuples(4))}
+    return np.asarray([lookup[node] for node in VTK_TRIANGLE_P4_NODE_TUPLES], dtype=np.int64)
+
+
+def _tetra_p4_vtk_permutation() -> np.ndarray:
+    lookup = {node: idx for idx, node in enumerate(tetra_lagrange_node_tuples(4))}
+    return np.asarray([lookup[node] for node in VTK_TETRA_P4_NODE_TUPLES], dtype=np.int64)

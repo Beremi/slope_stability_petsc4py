@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import math
+import os
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+OUT_DIR = Path("artifacts/p4_l1_history_patch_omega6p6e6/report")
+TARGET_OMEGA = 6.6e6
+CASE_SPECS = (
+    {
+        "name": "secant",
+        "label": "Secant Baseline",
+        "progress": Path("artifacts/p4_l1_history_patch_omega6p6e6/secant/data/progress.jsonl"),
+        "baseline": True,
+    },
+    {
+        "name": "secant_correction",
+        "label": "Secant + Mini Correction",
+        "progress": Path("artifacts/p4_l1_history_patch_omega6p6e6/secant_correction/data/progress.jsonl"),
+        "baseline": False,
+    },
+    {
+        "name": "first_newton_warm_start",
+        "label": "Secant + First-Newton Warm Start",
+        "progress": Path("artifacts/p4_l1_history_patch_omega6p6e6/first_newton_warm_start/data/progress.jsonl"),
+        "baseline": False,
+    },
+    {
+        "name": "both",
+        "label": "Secant + Both",
+        "progress": Path("artifacts/p4_l1_history_patch_omega6p6e6/both/data/progress.jsonl"),
+        "baseline": False,
+    },
+)
+
+
+def _ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _relpath(from_path: Path, to_path: Path) -> str:
+    return os.path.relpath(to_path, start=from_path.parent)
+
+
+def _safe_ratio(num: float, denom: float) -> float:
+    if not np.isfinite(num) or not np.isfinite(denom) or abs(denom) <= 1.0e-30:
+        return math.nan
+    return num / denom
+
+
+def _load_progress(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _extract_case(spec: dict[str, object]) -> dict[str, object]:
+    records = _load_progress(Path(spec["progress"]))
+    init_record = next(obj for obj in records if obj.get("event") == "init_complete")
+    step_records = [obj for obj in records if obj.get("event") == "step_accepted"]
+    step_axis = np.asarray([int(obj["accepted_step"]) for obj in step_records], dtype=np.int64)
+    lambda_hist = np.asarray(
+        init_record["lambda_hist"] + [obj["lambda_value"] for obj in step_records], dtype=np.float64
+    )
+    omega_hist = np.asarray(
+        init_record["omega_hist"] + [obj["omega_value"] for obj in step_records], dtype=np.float64
+    )
+    continuation_wall = float(sum(float(obj["step_wall_time"]) for obj in step_records))
+    continuation_newton_total = float(sum(float(obj["step_newton_iterations_total"]) for obj in step_records))
+    continuation_linear_total = float(sum(float(obj["step_linear_iterations"]) for obj in step_records))
+    prefix_runtime = float(step_records[-1]["total_wall_time"]) if step_records else float(init_record["total_wall_time"])
+    init_runtime = float(init_record["total_wall_time"])
+    extra_overhead = prefix_runtime - init_runtime - continuation_wall
+    first_newton_linear_total = float(
+        sum(float(obj.get("first_newton_linear_iterations") or 0.0) for obj in step_records)
+    )
+    first_newton_linear_solve_total = float(
+        sum(float(obj.get("first_newton_linear_solve_time") or 0.0) for obj in step_records)
+    )
+    predictor_wall_total = float(sum(float(obj.get("predictor_wall_time") or 0.0) for obj in step_records))
+    final_lambda = float(step_records[-1]["lambda_value"]) if step_records else float(init_record["lambda_hist"][-1])
+    final_omega = float(step_records[-1]["omega_value"]) if step_records else float(init_record["omega_hist"][-1])
+    reached_target = bool(final_omega >= TARGET_OMEGA)
+    return {
+        "name": str(spec["name"]),
+        "label": str(spec["label"]),
+        "progress_path": Path(spec["progress"]),
+        "baseline": bool(spec["baseline"]),
+        "steps": step_records,
+        "step_axis": step_axis,
+        "lambda_hist": lambda_hist,
+        "omega_hist": omega_hist,
+        "step_wall_time": np.asarray([float(obj["step_wall_time"]) for obj in step_records], dtype=np.float64),
+        "step_newton_total": np.asarray(
+            [float(obj["step_newton_iterations_total"]) for obj in step_records], dtype=np.float64
+        ),
+        "step_linear_total": np.asarray([float(obj["step_linear_iterations"]) for obj in step_records], dtype=np.float64),
+        "step_predictor_wall_time": np.asarray(
+            [
+                float(obj.get("predictor_wall_time", math.nan))
+                if obj.get("predictor_wall_time") is not None
+                else math.nan
+                for obj in step_records
+            ],
+            dtype=np.float64,
+        ),
+        "step_first_newton_linear_iterations": np.asarray(
+            [
+                float(obj.get("first_newton_linear_iterations", math.nan))
+                if obj.get("first_newton_linear_iterations") is not None
+                else math.nan
+                for obj in step_records
+            ],
+            dtype=np.float64,
+        ),
+        "step_first_newton_linear_solve_time": np.asarray(
+            [
+                float(obj.get("first_newton_linear_solve_time", math.nan))
+                if obj.get("first_newton_linear_solve_time") is not None
+                else math.nan
+                for obj in step_records
+            ],
+            dtype=np.float64,
+        ),
+        "cumulative_total_wall": np.asarray([float(obj["total_wall_time"]) for obj in step_records], dtype=np.float64),
+        "prefix_runtime": prefix_runtime,
+        "init_runtime": init_runtime,
+        "continuation_wall": continuation_wall,
+        "extra_overhead": extra_overhead,
+        "continuation_newton_total": continuation_newton_total,
+        "continuation_linear_total": continuation_linear_total,
+        "first_newton_linear_total": first_newton_linear_total,
+        "first_newton_linear_solve_total": first_newton_linear_solve_total,
+        "predictor_wall_total": predictor_wall_total,
+        "final_lambda": final_lambda,
+        "final_omega": final_omega,
+        "accepted_steps": int(step_records[-1]["accepted_step"]) if step_records else 2,
+        "reached_target": reached_target,
+    }
+
+
+def _plot_metric(*, cases: list[dict[str, object]], out_path: Path, key: str, ylabel: str, title: str) -> None:
+    fig = plt.figure(figsize=(8, 6), dpi=180)
+    for case in cases:
+        if case["step_axis"].size == 0:
+            continue
+        plt.plot(case["step_axis"], case[key], marker="o", linewidth=1.6, label=str(case["label"]))
+    plt.xlabel("Accepted Continuation Step")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def _plot_lambda_omega(*, cases: list[dict[str, object]], out_path: Path) -> None:
+    fig = plt.figure(figsize=(8, 6), dpi=180)
+    for case in cases:
+        plt.plot(case["omega_hist"], case["lambda_hist"], marker="o", linewidth=1.6, label=str(case["label"]))
+    plt.axvline(TARGET_OMEGA, color="black", linestyle="--", linewidth=1.0, alpha=0.5)
+    plt.xlabel(r"$\omega$")
+    plt.ylabel(r"$\lambda$")
+    plt.title(r"P4(L1) Half-Step Runs to $\omega = 6.6\times 10^6$")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def main() -> None:
+    out_dir = _ensure_dir(OUT_DIR)
+    plots_dir = _ensure_dir(out_dir / "plots")
+
+    cases = [_extract_case(spec) for spec in CASE_SPECS if Path(spec["progress"]).exists()]
+    baseline = next(case for case in cases if case["baseline"])
+
+    lambda_omega_plot = plots_dir / "lambda_omega.png"
+    step_wall_plot = plots_dir / "step_wall_time.png"
+    step_newton_plot = plots_dir / "step_newton_iterations.png"
+    step_linear_plot = plots_dir / "step_linear_iterations.png"
+    predictor_wall_plot = plots_dir / "predictor_wall_time.png"
+    first_newton_linear_plot = plots_dir / "first_newton_linear_iterations.png"
+    first_newton_solve_plot = plots_dir / "first_newton_linear_solve_time.png"
+    cumulative_wall_plot = plots_dir / "cumulative_total_wall.png"
+
+    _plot_lambda_omega(cases=cases, out_path=lambda_omega_plot)
+    _plot_metric(cases=cases, out_path=step_wall_plot, key="step_wall_time", ylabel="Wall Time [s]", title="Accepted-Step Wall Time")
+    _plot_metric(cases=cases, out_path=step_newton_plot, key="step_newton_total", ylabel="Newton Iterations", title="Accepted-Step Newton Iterations")
+    _plot_metric(cases=cases, out_path=step_linear_plot, key="step_linear_total", ylabel="Linear Iterations", title="Accepted-Step Linear Iterations")
+    _plot_metric(cases=cases, out_path=predictor_wall_plot, key="step_predictor_wall_time", ylabel="Predictor Wall [s]", title="Accepted-Step Predictor Wall Time")
+    _plot_metric(cases=cases, out_path=first_newton_linear_plot, key="step_first_newton_linear_iterations", ylabel="Linear Iterations", title="First-Newton-Only Linear Iterations")
+    _plot_metric(cases=cases, out_path=first_newton_solve_plot, key="step_first_newton_linear_solve_time", ylabel="Linear Solve Time [s]", title="First-Newton-Only Linear Solve Time")
+    _plot_metric(cases=cases, out_path=cumulative_wall_plot, key="cumulative_total_wall", ylabel="Cumulative Total Wall Time [s]", title="Cumulative Runtime")
+
+    summary_payload = {
+        case["name"]: {
+            "accepted_steps": case["accepted_steps"],
+            "reached_target": case["reached_target"],
+            "prefix_runtime": case["prefix_runtime"],
+            "init_runtime": case["init_runtime"],
+            "continuation_wall": case["continuation_wall"],
+            "extra_overhead": case["extra_overhead"],
+            "continuation_newton_total": case["continuation_newton_total"],
+            "continuation_linear_total": case["continuation_linear_total"],
+            "first_newton_linear_total": case["first_newton_linear_total"],
+            "first_newton_linear_solve_total": case["first_newton_linear_solve_total"],
+            "predictor_wall_total": case["predictor_wall_total"],
+            "final_lambda": case["final_lambda"],
+            "final_omega": case["final_omega"],
+            "speedup_vs_baseline": _safe_ratio(baseline["prefix_runtime"], case["prefix_runtime"]) if case is not baseline else 1.0,
+        }
+        for case in cases
+    }
+    winner = None
+    completed_candidates = [
+        case for case in cases if case is not baseline and case["reached_target"] and baseline["reached_target"] and case["prefix_runtime"] < baseline["prefix_runtime"]
+    ]
+    if completed_candidates:
+        winner_case = min(completed_candidates, key=lambda case: case["prefix_runtime"])
+        winner = {"name": str(winner_case["name"])}
+    summary_payload["winner"] = winner
+    (out_dir / "summary.json").write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+
+    table_lines = [
+        "| Case | Reached 6.6e6 | Accepted Steps | Runtime [s] | Init [s] | Continuation [s] | Extra Overhead [s] | Newton | Linear | First-Newton Linear | Predictor Wall [s] | Final lambda | Final omega | Speedup vs Secant |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for case in cases:
+        stats = summary_payload[case["name"]]
+        table_lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(case["label"]),
+                    "yes" if bool(stats["reached_target"]) else "no",
+                    f"{int(stats['accepted_steps'])}",
+                    f"{stats['prefix_runtime']:.3f}",
+                    f"{stats['init_runtime']:.3f}",
+                    f"{stats['continuation_wall']:.3f}",
+                    f"{stats['extra_overhead']:.3f}",
+                    f"{stats['continuation_newton_total']:.0f}",
+                    f"{stats['continuation_linear_total']:.0f}",
+                    f"{stats['first_newton_linear_total']:.0f}",
+                    f"{stats['predictor_wall_total']:.3f}",
+                    f"{stats['final_lambda']:.9f}",
+                    f"{stats['final_omega']:.6e}",
+                    f"{stats['speedup_vs_baseline']:.3f}x",
+                ]
+            )
+            + " |"
+        )
+
+    readme_path = out_dir / "README.md"
+    lines = [
+        "# P4(L1) History Patch Comparison at Fixed Omega 6.6e6",
+        "",
+        f"Target continuation endpoint: `omega_max_stop = {TARGET_OMEGA:.1f}`.",
+        "",
+        "## Summary",
+        "",
+        *table_lines,
+        "",
+        "## Plots",
+        "",
+        f"- ![lambda-omega]({_relpath(readme_path, lambda_omega_plot)})",
+        f"- ![step wall]({_relpath(readme_path, step_wall_plot)})",
+        f"- ![step newton]({_relpath(readme_path, step_newton_plot)})",
+        f"- ![step linear]({_relpath(readme_path, step_linear_plot)})",
+        f"- ![predictor wall]({_relpath(readme_path, predictor_wall_plot)})",
+        f"- ![first newton linear]({_relpath(readme_path, first_newton_linear_plot)})",
+        f"- ![first newton solve]({_relpath(readme_path, first_newton_solve_plot)})",
+        f"- ![cumulative wall]({_relpath(readme_path, cumulative_wall_plot)})",
+        "",
+        "## Notes",
+        "",
+        "- All cases use half-step startup: `lambda_init = 1.0`, `d_lambda_init = 0.05`.",
+        "- All cases use the same fixed target `omega_max_stop = 6.6e6`.",
+        "- The baseline is plain secant with both history patches disabled.",
+    ]
+    readme_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()

@@ -771,6 +771,120 @@ def build_3d_mixed_pmg_hierarchy(
     )
 
 
+def _prune_general_hierarchy(
+    levels: list[PMGLevel],
+    prolongations: list[PMGTransfer],
+    *,
+    comm,
+) -> tuple[list[PMGLevel], list[PMGTransfer]]:
+    if hasattr(comm, "tompi4py"):
+        mpi_comm = comm.tompi4py()
+    else:
+        mpi_comm = comm
+
+    active_fine_mask: np.ndarray | None = None
+    for transfer_idx in range(len(prolongations) - 1, -1, -1):
+        fine_level = levels[transfer_idx + 1]
+        if active_fine_mask is not None and not bool(np.all(active_fine_mask)):
+            fine_level = _prune_level_to_active_free(fine_level, active_fine_mask)
+            levels[transfer_idx + 1] = fine_level
+            prolongations[transfer_idx] = _prune_transfer_rows(
+                prolongations[transfer_idx],
+                active_fine_mask,
+                fine_level=fine_level,
+            )
+
+        local_active = np.diff(prolongations[transfer_idx].local_matrix.tocsc().indptr).astype(np.int32) > 0
+        active_coarse_mask = np.asarray(
+            mpi_comm.allreduce(local_active.astype(np.int32), op=MPI.SUM) > 0,
+            dtype=bool,
+        )
+        if not bool(np.all(active_coarse_mask)):
+            coarse_level = _prune_level_to_active_free(levels[transfer_idx], active_coarse_mask)
+            levels[transfer_idx] = coarse_level
+            prolongations[transfer_idx] = _prune_transfer_columns(
+                prolongations[transfer_idx],
+                active_coarse_mask,
+                coarse_level=coarse_level,
+            )
+            if transfer_idx > 0:
+                prolongations[transfer_idx - 1] = _prune_transfer_rows(
+                    prolongations[transfer_idx - 1],
+                    active_coarse_mask,
+                    fine_level=coarse_level,
+                )
+            active_fine_mask = np.ones(coarse_level.free_size, dtype=bool)
+        else:
+            active_fine_mask = np.asarray(active_coarse_mask, dtype=bool)
+    return levels, prolongations
+
+
+def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
+    fine_mesh_path: str | Path,
+    coarse_mesh_path: str | Path,
+    *,
+    boundary_type: int = 0,
+    node_ordering: str = "original",
+    reorder_parts: int | None = None,
+    material_rows: list[list[float]] | None = None,
+    comm,
+) -> GeneralPMGHierarchy:
+    """Build `P1(L1) -> P1(L2) -> P2(L2) -> P4(L2)` for mixed-shell PMG."""
+
+    fine_mesh_path = Path(fine_mesh_path).resolve()
+    coarse_mesh_path = Path(coarse_mesh_path).resolve()
+    materials = _materials_from_rows(material_rows, mesh_path=fine_mesh_path)
+
+    levels = [
+        _build_level(
+            mesh_path=coarse_mesh_path,
+            elem_type="P1",
+            node_ordering=node_ordering,
+            reorder_parts=reorder_parts,
+            boundary_type=boundary_type,
+            comm=comm,
+        ),
+        _build_level(
+            mesh_path=fine_mesh_path,
+            elem_type="P1",
+            node_ordering=node_ordering,
+            reorder_parts=reorder_parts,
+            boundary_type=boundary_type,
+            comm=comm,
+        ),
+        _build_level(
+            mesh_path=fine_mesh_path,
+            elem_type="P2",
+            node_ordering=node_ordering,
+            reorder_parts=reorder_parts,
+            boundary_type=boundary_type,
+            comm=comm,
+        ),
+        _build_level(
+            mesh_path=fine_mesh_path,
+            elem_type="P4",
+            node_ordering=node_ordering,
+            reorder_parts=reorder_parts,
+            boundary_type=boundary_type,
+            comm=comm,
+        ),
+    ]
+
+    prolongations = [
+        _cross_mesh_p1_to_p1_prolongation(levels[0], levels[1]),
+        _adjacent_level_prolongation(levels[1], levels[2], coarse_order=1, fine_order=2),
+        _adjacent_level_prolongation(levels[2], levels[3], coarse_order=2, fine_order=4),
+    ]
+    levels, prolongations = _prune_general_hierarchy(levels, prolongations, comm=comm)
+    return GeneralPMGHierarchy(
+        levels_tuple=tuple(levels),
+        prolongations_tuple=tuple(prolongations),
+        materials=materials,
+        mesh_path=fine_mesh_path,
+        node_ordering=str(node_ordering),
+    )
+
+
 def build_3d_mixed_pmg_chain_hierarchy(
     fine_mesh_path: str | Path,
     coarse_mesh_paths: list[str | Path] | tuple[str | Path, ...],
@@ -826,45 +940,7 @@ def build_3d_mixed_pmg_chain_hierarchy(
         )
     )
 
-    if hasattr(comm, "tompi4py"):
-        mpi_comm = comm.tompi4py()
-    else:
-        mpi_comm = comm
-
-    active_fine_mask: np.ndarray | None = None
-    for transfer_idx in range(len(prolongations) - 1, -1, -1):
-        fine_level = levels[transfer_idx + 1]
-        if active_fine_mask is not None and not bool(np.all(active_fine_mask)):
-            fine_level = _prune_level_to_active_free(fine_level, active_fine_mask)
-            levels[transfer_idx + 1] = fine_level
-            prolongations[transfer_idx] = _prune_transfer_rows(
-                prolongations[transfer_idx],
-                active_fine_mask,
-                fine_level=fine_level,
-            )
-
-        local_active = np.diff(prolongations[transfer_idx].local_matrix.tocsc().indptr).astype(np.int32) > 0
-        active_coarse_mask = np.asarray(
-            mpi_comm.allreduce(local_active.astype(np.int32), op=MPI.SUM) > 0,
-            dtype=bool,
-        )
-        if not bool(np.all(active_coarse_mask)):
-            coarse_level = _prune_level_to_active_free(levels[transfer_idx], active_coarse_mask)
-            levels[transfer_idx] = coarse_level
-            prolongations[transfer_idx] = _prune_transfer_columns(
-                prolongations[transfer_idx],
-                active_coarse_mask,
-                coarse_level=coarse_level,
-            )
-            if transfer_idx > 0:
-                prolongations[transfer_idx - 1] = _prune_transfer_rows(
-                    prolongations[transfer_idx - 1],
-                    active_coarse_mask,
-                    fine_level=coarse_level,
-                )
-            active_fine_mask = np.ones(coarse_level.free_size, dtype=bool)
-        else:
-            active_fine_mask = np.asarray(active_coarse_mask, dtype=bool)
+    levels, prolongations = _prune_general_hierarchy(levels, prolongations, comm=comm)
 
     return GeneralPMGHierarchy(
         levels_tuple=tuple(levels),

@@ -43,3 +43,20 @@ def test_petsc_solver_copy_shares_basis_until_clone_changes_it() -> None:
     assert clone.deflation_basis is not solver.deflation_basis
     assert solver.deflation_basis.shape == (q_mask.size, 1)
     assert clone.deflation_basis.shape == (q_mask.size, 2)
+
+
+def test_petsc_solver_zero_max_deflation_disables_recycling_and_orthogonalization() -> None:
+    q_mask = np.array([[True, False, True], [True, True, False]], dtype=bool)
+    solver = PetscKSPFGMRESSolver(
+        pc_type="HYPRE",
+        q_mask=q_mask,
+        coord=np.zeros((2, 3), dtype=np.float64),
+        preconditioner_options={"max_deflation_basis_vectors": 0},
+    )
+
+    free_size = int(np.count_nonzero(q_mask))
+    solver.expand_deflation_basis(np.arange(free_size, dtype=np.float64))
+
+    assert solver.supports_dynamic_deflation_basis() is False
+    assert solver.supports_a_orthogonalization() is False
+    assert solver.deflation_basis.shape == (q_mask.size, 0)

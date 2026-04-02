@@ -158,6 +158,10 @@ def load_case_metadata(case_toml: Path) -> dict[str, Any]:
         "comparison_kind": str(benchmark.get("comparison_kind", "")).lower(),
         "mpi_ranks": int(benchmark.get("mpi_ranks", 8)),
         "family": str(notebook.get("family", "")),
+        "jupyter_backend": str(notebook.get("jupyter_backend", "trame")),
+        "nonlinear_surface_subdivision": int(notebook.get("nonlinear_surface_subdivision", 4)),
+        "surface_decimate_reduction": float(notebook.get("surface_decimate_reduction", 0.0)),
+        "boundary_edge_overlay": bool(notebook.get("boundary_edge_overlay", False)),
     }
 
 
@@ -792,37 +796,71 @@ def plot_2d_deviatoric_strain(artifacts: RunArtifacts, case_toml: Path):
     return fig
 
 
-def show_3d_mesh_view(artifacts: RunArtifacts, case_toml: Path):
+def show_3d_mesh_view(
+    artifacts: RunArtifacts,
+    case_toml: Path,
+    *,
+    surface_subdivision: int | None = None,
+    surface_decimate_reduction: float | None = None,
+    jupyter_backend: str | None = None,
+):
     if not _module_available("pyvista"):
         return viz_support_message()
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
-    surface = grid.extract_surface(algorithm="dataset_surface")
+    subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
+    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+    surface = _decimate_display_mesh(surface, reduction=reduction)
+    surface = _optimize_display_mesh(surface)
     plotter = _new_plotter(pv, title="Mesh outline")
     plotter.add_mesh(surface, color="white", show_edges=True, edge_color="#2a62d0")
     _apply_matlab_camera(plotter)
-    return _show_plotter(plotter)
+    return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
 
-def show_3d_pore_pressure_view(artifacts: RunArtifacts, case_toml: Path):
+def show_3d_pore_pressure_view(
+    artifacts: RunArtifacts,
+    case_toml: Path,
+    *,
+    surface_subdivision: int | None = None,
+    surface_decimate_reduction: float | None = None,
+    boundary_edge_overlay: bool | None = None,
+    jupyter_backend: str | None = None,
+):
     if not _module_available("pyvista"):
         return viz_support_message()
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
     grid.point_data["pore_pressure"] = _pore_pressure_field(artifacts, case_toml)
-    surface = grid.extract_surface(algorithm="dataset_surface")
+    subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
+    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+    surface = _decimate_display_mesh(surface, reduction=reduction)
+    surface = _optimize_display_mesh(surface, keep_point_arrays=("pore_pressure",))
     plotter = _new_plotter(pv, title="Pore pressure [kPa]")
     plotter.add_mesh(surface, scalars="pore_pressure", cmap=PARULA_EQUIV, show_edges=False)
+    if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
+        _add_boundary_edge_overlay(plotter, grid)
     _apply_matlab_camera(plotter)
-    return _show_plotter(plotter)
+    return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
 
-def show_3d_saturation_view(artifacts: RunArtifacts, case_toml: Path):
+def show_3d_saturation_view(
+    artifacts: RunArtifacts,
+    case_toml: Path,
+    *,
+    surface_subdivision: int | None = None,
+    surface_decimate_reduction: float | None = None,
+    jupyter_backend: str | None = None,
+):
     if not _module_available("pyvista"):
         return viz_support_message()
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
     saturation = _saturation_field(artifacts, n_cells=int(grid.n_cells))
+    subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
+    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
     plotter = _new_plotter(pv, title="Saturation")
     legend_entries: list[list[str]] = []
     value_labels = {0.0: "unsaturated", 1.0: "saturated"}
@@ -831,7 +869,9 @@ def show_3d_saturation_view(artifacts: RunArtifacts, case_toml: Path):
         if cell_ids.size == 0:
             continue
         region = grid.extract_cells(cell_ids)
-        surface = region.extract_surface(pass_cellid=True, algorithm="dataset_surface")
+        surface = _extract_surface_for_display(region, nonlinear_subdivision=subdivision)
+        surface = _decimate_display_mesh(surface, reduction=reduction)
+        surface = _optimize_display_mesh(surface)
         if surface.n_cells == 0:
             continue
         color = SATURATION_PALETTE.get(int(round(value)), (0.8, 0.8, 0.8))
@@ -849,10 +889,19 @@ def show_3d_saturation_view(artifacts: RunArtifacts, case_toml: Path):
         return "No saturation field available for 3D rendering."
     plotter.add_legend(legend_entries, bcolor="white", face="rectangle")
     _apply_matlab_camera(plotter)
-    return _show_plotter(plotter)
+    return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
 
-def show_3d_displacement_view(artifacts: RunArtifacts, case_toml: Path, *, warp_scale: float | None = None):
+def show_3d_displacement_view(
+    artifacts: RunArtifacts,
+    case_toml: Path,
+    *,
+    warp_scale: float | None = None,
+    surface_subdivision: int | None = None,
+    surface_decimate_reduction: float | None = None,
+    boundary_edge_overlay: bool | None = None,
+    jupyter_backend: str | None = None,
+):
     if not _module_available("pyvista"):
         return viz_support_message()
     pv = _import_pyvista()
@@ -860,17 +909,74 @@ def show_3d_displacement_view(artifacts: RunArtifacts, case_toml: Path, *, warp_
     displacement = np.asarray(artifacts.npz["U"], dtype=np.float64)
     case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
     scale = matlab_warp_scale(case_mesh.coord, displacement) if warp_scale is None else float(warp_scale)
-    surface = grid.extract_surface(algorithm="dataset_surface").warp_by_vector("displacement", factor=scale)
+    subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
+    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    surface = _extract_surface_for_display(
+        grid,
+        nonlinear_subdivision=subdivision,
+    )
+    surface = _decimate_display_mesh(surface, reduction=reduction)
+    surface = _optimize_display_mesh(surface, keep_point_arrays=("displacement", "displacement_magnitude"))
+    surface = surface.warp_by_vector("displacement", factor=scale)
+    surface = _optimize_display_mesh(surface, keep_point_arrays=("displacement", "displacement_magnitude"))
     plotter = _new_plotter(pv, title=f"Displacement magnitude (warp scale = {scale:.4g})")
     plotter.add_mesh(surface, scalars="displacement_magnitude", cmap=PARULA_EQUIV, show_edges=False)
+    if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
+        _add_boundary_edge_overlay(plotter, grid, warp_vector_name="displacement", warp_factor=scale)
     _apply_matlab_camera(plotter)
-    return _show_plotter(plotter)
+    return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
 
-def show_3d_deviatoric_surface_view(artifacts: RunArtifacts, case_toml: Path):
+def show_3d_deviatoric_surface_view(
+    artifacts: RunArtifacts,
+    case_toml: Path,
+    *,
+    surface_subdivision: int | None = None,
+    surface_decimate_reduction: float | None = None,
+    boundary_edge_overlay: bool | None = None,
+    jupyter_backend: str | None = None,
+):
     if not _module_available("pyvista"):
         return viz_support_message()
     pv = _import_pyvista()
+    grid = pv.read(artifacts.vtu_path)
+    subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
+    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    if "deviatoric_strain" in grid.point_data:
+        surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+        surface = _decimate_display_mesh(surface, reduction=reduction)
+        surface = _optimize_display_mesh(surface, keep_point_arrays=("deviatoric_strain",))
+        plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
+        plotter.add_mesh(
+            surface,
+            scalars="deviatoric_strain",
+            cmap="jet",
+            preference="point",
+            show_edges=False,
+            lighting=False,
+        )
+        if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
+            _add_boundary_edge_overlay(plotter, grid)
+        _apply_matlab_camera(plotter)
+        return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
+    if "deviatoric_strain" in grid.cell_data:
+        surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+        surface = _decimate_display_mesh(surface, reduction=reduction)
+        surface = _optimize_display_mesh(surface, keep_cell_arrays=("deviatoric_strain",))
+        plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
+        plotter.add_mesh(
+            surface,
+            scalars="deviatoric_strain",
+            cmap="jet",
+            preference="cell",
+            show_edges=False,
+            lighting=False,
+        )
+        if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
+            _add_boundary_edge_overlay(plotter, grid)
+        _apply_matlab_camera(plotter)
+        return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
+
     cfg = _load_runtime_config(case_toml)
     case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
     if case_mesh.surf is None:
@@ -898,8 +1004,10 @@ def show_3d_deviatoric_surface_view(artifacts: RunArtifacts, case_toml: Path):
         show_edges=False,
         lighting=False,
     )
+    if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
+        _add_boundary_edge_overlay(plotter, grid)
     _apply_matlab_camera(plotter)
-    return _show_plotter(plotter)
+    return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
 
 def show_3d_deviatoric_slices(
@@ -910,6 +1018,7 @@ def show_3d_deviatoric_slices(
     slice_planes_y: list[float] | None = None,
     slice_planes_z: list[float] | None = None,
     clim_scale_max: float | None = None,
+    jupyter_backend: str | None = None,
 ):
     if not _module_available("pyvista"):
         return viz_support_message()
@@ -922,19 +1031,27 @@ def show_3d_deviatoric_slices(
         return "No MATLAB slice planes are configured for this benchmark."
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
-    cfg = _load_runtime_config(case_toml)
-    case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
-    displacement = np.asarray(artifacts.npz["U"], dtype=np.float64)
-    values = compute_element_deviatoric_strain(
-        case_mesh.coord,
-        case_mesh.elem,
-        cfg.problem.elem_type,
-        displacement,
-        dim=3,
-    )
-    grid.cell_data["deviatoric_strain"] = values
-    point_grid = grid.cell_data_to_point_data(pass_cell_data=True)
-    point_grid.point_data["deviatoric_strain"] = np.asarray(point_grid.point_data["deviatoric_strain"])
+    if "deviatoric_strain" in grid.point_data:
+        point_grid = grid
+        values = np.asarray(grid.point_data["deviatoric_strain"], dtype=np.float64)
+    elif "deviatoric_strain" in grid.cell_data:
+        point_grid = grid.cell_data_to_point_data(pass_cell_data=True)
+        point_grid.point_data["deviatoric_strain"] = np.asarray(point_grid.point_data["deviatoric_strain"])
+        values = np.asarray(grid.cell_data["deviatoric_strain"], dtype=np.float64)
+    else:
+        cfg = _load_runtime_config(case_toml)
+        case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
+        displacement = np.asarray(artifacts.npz["U"], dtype=np.float64)
+        values = compute_element_deviatoric_strain(
+            case_mesh.coord,
+            case_mesh.elem,
+            cfg.problem.elem_type,
+            displacement,
+            dim=3,
+        )
+        grid.cell_data["deviatoric_strain"] = values
+        point_grid = grid.cell_data_to_point_data(pass_cell_data=True)
+        point_grid.point_data["deviatoric_strain"] = np.asarray(point_grid.point_data["deviatoric_strain"])
     clim = (float(np.min(values)), float(np.max(values)))
     if clim_scale_max is not None:
         clim = (clim[0], max(clim[0], float(clim_scale_max) * clim[1]))
@@ -945,9 +1062,11 @@ def show_3d_deviatoric_slices(
         for value in planes:
             origin = list(point_grid.center)
             origin[{"x": 0, "y": 1, "z": 2}[axis]] = float(value)
-            slc = point_grid.slice(normal=normal, origin=origin)
+            slc = point_grid.slice(normal=normal, origin=origin, generate_triangles=True)
             if slc.n_points == 0:
                 continue
+            slc = _refine_slice_for_display(slc, point_grid, case_toml=case_toml)
+            slc = _optimize_display_mesh(slc, keep_point_arrays=("deviatoric_strain",))
             plotter.add_mesh(
                 slc,
                 scalars="deviatoric_strain",
@@ -959,7 +1078,7 @@ def show_3d_deviatoric_slices(
             )
             first = False
     _apply_matlab_camera(plotter)
-    return _show_plotter(plotter)
+    return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
 
 def compute_element_deviatoric_strain(
@@ -978,6 +1097,129 @@ def compute_element_deviatoric_strain(
     dev_norm = deviatoric_strain_norm(strain, dim=dim)
     n_q = max(dev_norm.size // elem.shape[1], 1)
     return np.mean(dev_norm.reshape(n_q, elem.shape[1], order="F"), axis=0)
+
+
+def _extract_surface_for_display(dataset, *, nonlinear_subdivision: int = 4):
+    kwargs = {
+        "pass_pointid": True,
+        "pass_cellid": True,
+        "algorithm": "dataset_surface",
+    }
+    if nonlinear_subdivision is not None:
+        kwargs["nonlinear_subdivision"] = int(nonlinear_subdivision)
+    return dataset.extract_surface(**kwargs)
+
+
+def _slice_refinement_levels(case_toml: Path) -> int:
+    return 1 if _elem_type(case_toml) == "P4" else 0
+
+
+def _refine_slice_for_display(dataset, source_grid, *, case_toml: Path):
+    levels = _slice_refinement_levels(case_toml)
+    if levels <= 0 or getattr(dataset, "n_cells", 0) == 0:
+        return dataset
+    refined = dataset
+    for _ in range(levels):
+        refined = refined.subdivide(1, subfilter="linear")
+    for name in list(getattr(refined, "point_data", {}).keys()):
+        del refined.point_data[name]
+    for name in list(getattr(refined, "cell_data", {}).keys()):
+        del refined.cell_data[name]
+    return refined.sample(source_grid)
+
+
+def _add_boundary_edge_overlay(
+    plotter,
+    dataset,
+    *,
+    warp_vector_name: str | None = None,
+    warp_factor: float = 1.0,
+    color: str = "#1f1f1f",
+    line_width: float = 1.2,
+):
+    edge_surface = _extract_surface_for_display(dataset, nonlinear_subdivision=0)
+    keep_arrays = (warp_vector_name,) if warp_vector_name is not None else ()
+    edge_surface = _optimize_display_mesh(edge_surface, keep_point_arrays=keep_arrays)
+    if warp_vector_name is not None and warp_vector_name in edge_surface.point_data:
+        edge_surface = edge_surface.warp_by_vector(warp_vector_name, factor=float(warp_factor))
+        edge_surface = _optimize_display_mesh(edge_surface)
+    edge_lines = edge_surface.extract_all_edges()
+    edge_lines = _optimize_display_mesh(edge_lines)
+    if edge_lines.n_cells > 0:
+        plotter.add_mesh(
+            edge_lines,
+            color=color,
+            line_width=line_width,
+            lighting=False,
+        )
+
+
+def _decimate_display_mesh(dataset, *, reduction: float | None = None):
+    if reduction is None:
+        return dataset
+    value = float(reduction)
+    if value <= 0.0 or dataset.n_cells == 0:
+        return dataset
+    value = min(value, 0.99)
+    triangulated = dataset.triangulate()
+    return triangulated.decimate_pro(value)
+
+
+def _optimize_display_mesh(
+    dataset,
+    *,
+    keep_point_arrays: tuple[str, ...] = (),
+    keep_cell_arrays: tuple[str, ...] = (),
+):
+    if hasattr(dataset, "points"):
+        dataset.points = np.asarray(dataset.points, dtype=np.float32)
+    for name in list(getattr(dataset, "point_data", {}).keys()):
+        if name not in keep_point_arrays:
+            del dataset.point_data[name]
+            continue
+        arr = np.asarray(dataset.point_data[name])
+        if np.issubdtype(arr.dtype, np.floating):
+            dataset.point_data[name] = arr.astype(np.float32, copy=False)
+        elif np.issubdtype(arr.dtype, np.integer):
+            dataset.point_data[name] = arr.astype(np.int32, copy=False)
+    for name in list(getattr(dataset, "cell_data", {}).keys()):
+        if name not in keep_cell_arrays:
+            del dataset.cell_data[name]
+            continue
+        arr = np.asarray(dataset.cell_data[name])
+        if np.issubdtype(arr.dtype, np.floating):
+            dataset.cell_data[name] = arr.astype(np.float32, copy=False)
+        elif np.issubdtype(arr.dtype, np.integer):
+            dataset.cell_data[name] = arr.astype(np.int32, copy=False)
+    return dataset
+
+
+def _display_nonlinear_surface_subdivision(case_toml: Path, *, override: int | None = None) -> int:
+    if override is not None:
+        return max(0, int(override))
+    metadata = load_case_metadata(case_toml)
+    return max(0, int(metadata.get("nonlinear_surface_subdivision", 4)))
+
+
+def _display_boundary_edge_overlay(case_toml: Path, *, override: bool | None = None) -> bool:
+    if override is not None:
+        return bool(override)
+    metadata = load_case_metadata(case_toml)
+    return bool(metadata.get("boundary_edge_overlay", False))
+
+
+def _display_surface_decimate_reduction(case_toml: Path, *, override: float | None = None) -> float:
+    if override is not None:
+        return min(max(float(override), 0.0), 0.99)
+    metadata = load_case_metadata(case_toml)
+    return min(max(float(metadata.get("surface_decimate_reduction", 0.0)), 0.0), 0.99)
+
+
+def _display_jupyter_backend(case_toml: Path, *, override: str | None = None) -> str:
+    if override is not None:
+        return str(override)
+    metadata = load_case_metadata(case_toml)
+    return str(metadata.get("jupyter_backend", "trame"))
 
 
 def deviatoric_strain_norm(strain: np.ndarray, *, dim: int) -> np.ndarray:
@@ -1318,8 +1560,12 @@ def _new_plotter(pv, *, title: str):
     return plotter
 
 
-def _show_plotter(plotter):
-    backend = "trame" if _module_available("ipywidgets") and _module_available("trame") else "static"
+def _show_plotter(plotter, case_toml: Path | None = None, *, jupyter_backend: str | None = None):
+    backend = jupyter_backend
+    if backend is None and case_toml is not None:
+        backend = _display_jupyter_backend(case_toml)
+    if backend is None:
+        backend = "trame" if _module_available("ipywidgets") and _module_available("trame") else "static"
     return plotter.show(jupyter_backend=backend)
 
 

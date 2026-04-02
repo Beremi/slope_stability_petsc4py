@@ -1130,6 +1130,10 @@ class DeflatedFGMRESSolver:
                 "basis_cols": int(self.deflation_basis.shape[1]) if self.deflation_basis.ndim == 2 else 0,
                 "rhs_norm": float(np.linalg.norm(rhs)),
                 "true_residual_history": np.asarray(res_hist, dtype=np.float64).tolist(),
+                "reported_residual_final": float(np.asarray(res_hist, dtype=np.float64).reshape(-1)[-1]) if np.asarray(res_hist).size else None,
+                "hit_max_iterations": bool(int(nit) >= int(self.max_iterations)),
+                "converged": bool(np.asarray(res_hist, dtype=np.float64).size and float(np.asarray(res_hist, dtype=np.float64).reshape(-1)[-1]) <= float(self.tolerance)),
+                "converged_reason": None,
             }
         if self.verbose:
             print(f"{nit}|", end="")
@@ -1499,10 +1503,10 @@ class PetscKSPFGMRESSolver:
             self._preconditioner_rebuild_requested = True
 
     def supports_dynamic_deflation_basis(self) -> bool:
-        return self._pc_backend != "pmg"
+        return self._pc_backend != "pmg" and not self._deflation_basis_disabled()
 
     def supports_a_orthogonalization(self) -> bool:
-        return self._pc_backend != "pmg"
+        return self._pc_backend != "pmg" and not self._deflation_basis_disabled()
 
     def get_preconditioner_diagnostics(self) -> dict[str, object]:
         diagnostics = self._preconditioner_diagnostics.as_dict()
@@ -2010,7 +2014,11 @@ class PetscKSPFGMRESSolver:
             value = int(raw)
         except Exception:
             return None
-        return value if value > 0 else None
+        return value if value >= 0 else None
+
+    def _deflation_basis_disabled(self) -> bool:
+        max_cols = self._max_deflation_basis_vectors()
+        return max_cols == 0
 
     def _expand_to_full_space(self, vectors: np.ndarray) -> np.ndarray:
         vec = np.asarray(vectors, dtype=np.float64)
@@ -2267,6 +2275,10 @@ class PetscKSPFGMRESSolver:
                 "reported_residual_history": list(reported_history),
                 "true_residual_history": list(true_history),
                 "true_residual_final": float(np.linalg.norm(resid) / rhs_norm),
+                "reported_residual_final": float(reported_history[-1]) if reported_history else None,
+                "hit_max_iterations": bool(int(nit) >= int(self.max_iterations)),
+                "converged": bool(int(self._ksp.getConvergedReason()) > 0),
+                "converged_reason": int(self._ksp.getConvergedReason()),
             }
             self._ksp.cancelMonitor()
         if self.verbose:
@@ -2280,6 +2292,9 @@ class PetscKSPFGMRESSolver:
         if v.size == 0:
             return
         v = self._expand_to_full_space(v)
+        if self._deflation_basis_disabled():
+            self.deflation_basis = np.empty((v.shape[0], 0), dtype=np.float64)
+            return
         if self.deflation_basis.size == 0:
             self.deflation_basis = np.asarray(v, dtype=np.float64)
         else:
@@ -2627,6 +2642,10 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
                 "reported_residual_history": list(reported_history),
                 "true_residual_history": list(true_history),
                 "true_residual_final": float(np.linalg.norm(resid) / rhs_norm),
+                "reported_residual_final": float(reported_history[-1]) if reported_history else None,
+                "hit_max_iterations": bool(int(nit) >= int(self.max_iterations)),
+                "converged": bool(int(self._ksp.getConvergedReason()) > 0),
+                "converged_reason": int(self._ksp.getConvergedReason()),
             }
             self._ksp.cancelMonitor()
         if self.verbose:
@@ -3082,6 +3101,10 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
                 "reported_residual_history": list(reported_history),
                 "true_residual_history": list(true_history),
                 "true_residual_final": float(np.linalg.norm(resid) / rhs_norm),
+                "reported_residual_final": float(reported_history[-1]) if reported_history else None,
+                "hit_max_iterations": bool(int(nit) >= int(self.max_iterations)),
+                "converged": bool(int(self._ksp.getConvergedReason()) > 0),
+                "converged_reason": int(self._ksp.getConvergedReason()),
             }
             self._ksp.cancelMonitor()
         if self.verbose:
@@ -3534,6 +3557,10 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
                 "reported_residual_history": np.asarray(res_hist, dtype=np.float64).tolist(),
                 "true_residual_history": np.asarray(res_hist, dtype=np.float64).tolist(),
                 "true_residual_final": float(np.linalg.norm(resid) / rhs_norm),
+                "reported_residual_final": float(np.asarray(res_hist, dtype=np.float64).reshape(-1)[-1]) if np.asarray(res_hist).size else None,
+                "hit_max_iterations": bool(int(nit) >= int(self.max_iterations)),
+                "converged": bool(float(np.linalg.norm(resid) / rhs_norm) <= float(self.tolerance)),
+                "converged_reason": None,
                 "timings": {k: float(v) for k, v in timing_stats.items()},
             }
         if self.verbose:

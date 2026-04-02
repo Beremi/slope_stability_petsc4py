@@ -34,6 +34,7 @@ from slope_stability.fem.distributed_tangent import prepare_bddc_subdomain_patte
 from slope_stability.linear import SolverFactory
 from slope_stability.linear.pmg import (
     build_3d_mixed_pmg_hierarchy,
+    build_3d_mixed_pmg_hierarchy_with_intermediate_p2,
     build_3d_pmg_hierarchy,
     build_3d_same_mesh_pmg_hierarchy,
 )
@@ -504,6 +505,14 @@ def run_capture(
     omega_efficiency_drop_ratio: float | None = None,
     omega_efficiency_window: int = 3,
     omega_hard_shrink_scale: float | None = None,
+    step_length_cap_mode: str = "none",
+    step_length_cap_factor: float = 1.0,
+    init_newton_stopping_criterion: str | None = None,
+    init_newton_stopping_tol: float | None = None,
+    fine_newton_stopping_criterion: str | None = None,
+    fine_newton_stopping_tol: float | None = None,
+    fine_switch_mode: str = "none",
+    fine_switch_distance_factor: float = 2.0,
     continuation_predictor_switch_ordinal: int | None = None,
     continuation_predictor_switch_to: str | None = None,
     continuation_predictor_window_size: int | None = None,
@@ -514,17 +523,30 @@ def run_capture(
     continuation_predictor_reduced_tolerance: float | None = None,
     continuation_predictor_power_order: int | None = None,
     continuation_predictor_power_init: str | None = None,
+    continuation_secant_correction_mode: str = "none",
+    continuation_first_newton_warm_start_mode: str = "none",
+    continuation_mode: str = "classic",
+    streaming_micro_target_length: float = 0.15,
+    streaming_micro_min_length: float = 0.05,
+    streaming_micro_max_length: float = 0.30,
+    streaming_move_relres_threshold: float = 5.0e-3,
+    streaming_alpha_advance_threshold: float = 0.5,
+    streaming_micro_max_corrections: int = 40,
+    streaming_basis_max_vectors: int = 8,
     step_max: int = 100,
     it_newt_max: int = 200,
     it_damp_max: int = 10,
     tol: float = 1e-4,
     r_min: float = 1e-4,
+    newton_stopping_criterion: str = "relative_residual",
+    newton_stopping_tol: float | None = None,
     linear_tolerance: float = 1e-1,
     linear_max_iter: int = 100,
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     factor_solver_type: str | None = None,
     pc_backend: str | None = "hypre",
     pmg_coarse_mesh_path: Path | None = None,
+    pmg_fine_hierarchy_mode: str = "default",
     preconditioner_matrix_source: str = "tangent",
     preconditioner_matrix_policy: str = "current",
     preconditioner_rebuild_policy: str = "every_newton",
@@ -640,6 +662,7 @@ def run_capture(
     partition_count = int(PETSc.COMM_WORLD.getSize()) if str(node_ordering).lower() == "block_metis" else None
     pmg_hierarchy = None
     if effective_pc_backend in {"pmg", "pmg_shell"}:
+        fine_hierarchy_mode = str(pmg_fine_hierarchy_mode).strip().lower()
         if pmg_coarse_mesh_path is None:
             if effective_pc_backend == "pmg_shell" and str(elem_type).upper() == "P2":
                 pmg_hierarchy = build_3d_same_mesh_pmg_hierarchy(
@@ -661,16 +684,29 @@ def run_capture(
                     comm=PETSc.COMM_WORLD,
                 )
         else:
-            pmg_hierarchy = build_3d_mixed_pmg_hierarchy(
-                mesh_path,
-                pmg_coarse_mesh_path,
-                fine_elem_type=elem_type,
-                boundary_type=int(mesh_boundary_type),
-                node_ordering=node_ordering,
-                reorder_parts=partition_count,
-                material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
-                comm=PETSc.COMM_WORLD,
-            )
+            if fine_hierarchy_mode == "p4_p2_intermediate":
+                if str(elem_type).upper() != "P4":
+                    raise ValueError("pmg_fine_hierarchy_mode='p4_p2_intermediate' requires elem_type='P4'.")
+                pmg_hierarchy = build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
+                    mesh_path,
+                    pmg_coarse_mesh_path,
+                    boundary_type=int(mesh_boundary_type),
+                    node_ordering=node_ordering,
+                    reorder_parts=partition_count,
+                    material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
+                    comm=PETSc.COMM_WORLD,
+                )
+            else:
+                pmg_hierarchy = build_3d_mixed_pmg_hierarchy(
+                    mesh_path,
+                    pmg_coarse_mesh_path,
+                    fine_elem_type=elem_type,
+                    boundary_type=int(mesh_boundary_type),
+                    node_ordering=node_ordering,
+                    reorder_parts=partition_count,
+                    material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
+                    comm=PETSc.COMM_WORLD,
+                )
         coord = pmg_hierarchy.fine_level.coord.astype(np.float64)
         elem = pmg_hierarchy.fine_level.elem.astype(np.int64)
         surf = pmg_hierarchy.fine_level.surf.astype(np.int64)
@@ -813,6 +849,7 @@ def run_capture(
         "factor_solver_type": factor_solver_type,
         "pc_backend": effective_pc_backend,
         "pmg_coarse_mesh_path": None if pmg_coarse_mesh_path is None else str(pmg_coarse_mesh_path),
+        "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "preconditioner_matrix_source": str(preconditioner_matrix_source),
         "preconditioner_matrix_policy": preconditioner_matrix_policy,
         "preconditioner_rebuild_policy": preconditioner_rebuild_policy,
@@ -992,6 +1029,16 @@ def run_capture(
         "continuation_predictor_power_init": (
             None if continuation_predictor_power_init is None else str(continuation_predictor_power_init)
         ),
+        "continuation_secant_correction_mode": str(continuation_secant_correction_mode),
+        "continuation_first_newton_warm_start_mode": str(continuation_first_newton_warm_start_mode),
+        "continuation_mode": str(continuation_mode),
+        "streaming_micro_target_length": float(streaming_micro_target_length),
+        "streaming_micro_min_length": float(streaming_micro_min_length),
+        "streaming_micro_max_length": float(streaming_micro_max_length),
+        "streaming_move_relres_threshold": float(streaming_move_relres_threshold),
+        "streaming_alpha_advance_threshold": float(streaming_alpha_advance_threshold),
+        "streaming_micro_max_corrections": int(streaming_micro_max_corrections),
+        "streaming_basis_max_vectors": int(streaming_basis_max_vectors),
         "omega_no_increase_newton_threshold": (
             None if omega_no_increase_newton_threshold is None else int(omega_no_increase_newton_threshold)
         ),
@@ -1017,13 +1064,34 @@ def run_capture(
         "omega_hard_shrink_scale": (
             None if omega_hard_shrink_scale is None else float(omega_hard_shrink_scale)
         ),
+        "step_length_cap_mode": str(step_length_cap_mode),
+        "step_length_cap_factor": float(step_length_cap_factor),
+        "init_newton_stopping_criterion": (
+            None if init_newton_stopping_criterion is None else str(init_newton_stopping_criterion)
+        ),
+        "init_newton_stopping_tol": (
+            None if init_newton_stopping_tol is None else float(init_newton_stopping_tol)
+        ),
+        "fine_newton_stopping_criterion": (
+            None if fine_newton_stopping_criterion is None else str(fine_newton_stopping_criterion)
+        ),
+        "fine_newton_stopping_tol": (
+            None if fine_newton_stopping_tol is None else float(fine_newton_stopping_tol)
+        ),
+        "fine_switch_mode": str(fine_switch_mode),
+        "fine_switch_distance_factor": float(fine_switch_distance_factor),
         "step_max": int(step_max),
         "it_newt_max": int(it_newt_max),
         "it_damp_max": int(it_damp_max),
         "tol": float(tol),
         "r_min": float(r_min),
+        "newton_stopping_criterion": str(newton_stopping_criterion),
+        "newton_stopping_tol": (
+            None if newton_stopping_tol is None else float(newton_stopping_tol)
+        ),
         "factor_solver_type": factor_solver_type,
         "pc_backend": effective_pc_backend,
+        "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "preconditioner_matrix_source": str(preconditioner_matrix_source),
         "preconditioner_matrix_policy": str(preconditioner_matrix_policy),
         "preconditioner_rebuild_policy": str(preconditioner_rebuild_policy),
@@ -1121,6 +1189,16 @@ def run_capture(
             omega_efficiency_drop_ratio=omega_efficiency_drop_ratio,
             omega_efficiency_window=omega_efficiency_window,
             omega_hard_shrink_scale=omega_hard_shrink_scale,
+            step_length_cap_mode=str(step_length_cap_mode),
+            step_length_cap_factor=float(step_length_cap_factor),
+            newton_stopping_criterion=str(newton_stopping_criterion),
+            newton_stopping_tol=newton_stopping_tol,
+            init_newton_stopping_criterion=init_newton_stopping_criterion,
+            init_newton_stopping_tol=init_newton_stopping_tol,
+            fine_newton_stopping_criterion=fine_newton_stopping_criterion,
+            fine_newton_stopping_tol=fine_newton_stopping_tol,
+            fine_switch_mode=str(fine_switch_mode),
+            fine_switch_distance_factor=float(fine_switch_distance_factor),
             continuation_predictor_switch_ordinal=continuation_predictor_switch_ordinal,
             continuation_predictor_switch_to=continuation_predictor_switch_to,
             continuation_predictor_window_size=continuation_predictor_window_size,
@@ -1131,6 +1209,16 @@ def run_capture(
             continuation_predictor_reduced_tolerance=continuation_predictor_reduced_tolerance,
             continuation_predictor_power_order=continuation_predictor_power_order,
             continuation_predictor_power_init=continuation_predictor_power_init,
+            continuation_secant_correction_mode=str(continuation_secant_correction_mode),
+            continuation_first_newton_warm_start_mode=str(continuation_first_newton_warm_start_mode),
+            continuation_mode=str(continuation_mode),
+            streaming_micro_target_length=float(streaming_micro_target_length),
+            streaming_micro_min_length=float(streaming_micro_min_length),
+            streaming_micro_max_length=float(streaming_micro_max_length),
+            streaming_move_relres_threshold=float(streaming_move_relres_threshold),
+            streaming_alpha_advance_threshold=float(streaming_alpha_advance_threshold),
+            streaming_micro_max_corrections=int(streaming_micro_max_corrections),
+            streaming_basis_max_vectors=int(streaming_basis_max_vectors),
         )
     else:
         free_idx = q_to_free_indices(q_mask)
@@ -1289,6 +1377,23 @@ def run_capture(
     step_predictor_state_coefficients = list(stats.get("step_predictor_state_coefficients", []))
     step_predictor_state_coefficients_ref = list(stats.get("step_predictor_state_coefficients_ref", []))
     step_predictor_state_coefficient_sum = np.asarray(stats.get("step_predictor_state_coefficient_sum", []), dtype=np.float64)
+    step_secant_correction_active = np.asarray(stats.get("step_secant_correction_active", []), dtype=bool)
+    step_secant_correction_basis_dim = np.asarray(stats.get("step_secant_correction_basis_dim", []), dtype=np.float64)
+    step_secant_correction_trust_clipped = np.asarray(stats.get("step_secant_correction_trust_region_clipped", []), dtype=bool)
+    step_secant_correction_predicted_decrease = np.asarray(
+        stats.get("step_secant_correction_predicted_residual_decrease", []), dtype=np.float64
+    )
+    step_first_newton_warm_start_active = np.asarray(stats.get("step_first_newton_warm_start_active", []), dtype=bool)
+    step_first_newton_warm_start_basis_dim = np.asarray(stats.get("step_first_newton_warm_start_basis_dim", []), dtype=np.float64)
+    step_first_newton_linear_iterations = np.asarray(stats.get("step_first_newton_linear_iterations", []), dtype=np.float64)
+    step_first_newton_linear_solve_time = np.asarray(stats.get("step_first_newton_linear_solve_time", []), dtype=np.float64)
+    step_first_newton_linear_preconditioner_time = np.asarray(
+        stats.get("step_first_newton_linear_preconditioner_time", []), dtype=np.float64
+    )
+    step_first_newton_linear_orthogonalization_time = np.asarray(
+        stats.get("step_first_newton_linear_orthogonalization_time", []), dtype=np.float64
+    )
+    step_first_newton_correction_norm = np.asarray(stats.get("step_first_newton_correction_norm", []), dtype=np.float64)
     step_predictor_fallback_used = np.asarray(stats.get("step_predictor_fallback_used", []), dtype=bool)
     step_lambda_guess_abs_error = np.asarray(stats.get("step_lambda_initial_guess_abs_error", []), dtype=np.float64)
     predictor_summary = {
@@ -1327,6 +1432,17 @@ def run_capture(
         if not step_predictor_state_coefficients_ref
         else step_predictor_state_coefficients_ref[-1],
         "step_predictor_state_coefficient_sum_last": _nan_last(step_predictor_state_coefficient_sum),
+        "step_secant_correction_active_count": int(np.count_nonzero(step_secant_correction_active)),
+        "step_secant_correction_basis_dim_last": _nan_last(step_secant_correction_basis_dim),
+        "step_secant_correction_trust_region_clipped_count": int(np.count_nonzero(step_secant_correction_trust_clipped)),
+        "step_secant_correction_predicted_residual_decrease_last": _nan_last(step_secant_correction_predicted_decrease),
+        "step_first_newton_warm_start_active_count": int(np.count_nonzero(step_first_newton_warm_start_active)),
+        "step_first_newton_warm_start_basis_dim_last": _nan_last(step_first_newton_warm_start_basis_dim),
+        "step_first_newton_linear_iterations_total": _nan_sum(step_first_newton_linear_iterations),
+        "step_first_newton_linear_solve_time_total": _nan_sum(step_first_newton_linear_solve_time),
+        "step_first_newton_linear_preconditioner_time_total": _nan_sum(step_first_newton_linear_preconditioner_time),
+        "step_first_newton_linear_orthogonalization_time_total": _nan_sum(step_first_newton_linear_orthogonalization_time),
+        "step_first_newton_correction_norm_last": _nan_last(step_first_newton_correction_norm),
         "step_predictor_fallback_count": int(np.count_nonzero(step_predictor_fallback_used)),
         "step_lambda_initial_guess_abs_error_total": _nan_sum(step_lambda_guess_abs_error),
         "step_lambda_initial_guess_abs_error_last": _nan_last(step_lambda_guess_abs_error),
@@ -1519,6 +1635,31 @@ def main() -> None:
         default=None,
         choices=["secant", "equal_split"],
     )
+    parser.add_argument(
+        "--continuation_secant_correction_mode",
+        type=str,
+        default="none",
+        choices=["none", "orthogonal_increment_ls"],
+    )
+    parser.add_argument(
+        "--continuation_first_newton_warm_start_mode",
+        type=str,
+        default="none",
+        choices=["none", "history_deflation"],
+    )
+    parser.add_argument(
+        "--continuation_mode",
+        type=str,
+        default="classic",
+        choices=["classic", "streaming_microstep"],
+    )
+    parser.add_argument("--streaming_micro_target_length", type=float, default=0.15)
+    parser.add_argument("--streaming_micro_min_length", type=float, default=0.05)
+    parser.add_argument("--streaming_micro_max_length", type=float, default=0.30)
+    parser.add_argument("--streaming_move_relres_threshold", type=float, default=5.0e-3)
+    parser.add_argument("--streaming_alpha_advance_threshold", type=float, default=0.5)
+    parser.add_argument("--streaming_micro_max_corrections", type=int, default=40)
+    parser.add_argument("--streaming_basis_max_vectors", type=int, default=8)
     parser.add_argument("--omega_no_increase_newton_threshold", type=int, default=None)
     parser.add_argument("--omega_half_newton_threshold", type=int, default=None)
     parser.add_argument("--omega_target_newton_iterations", type=float, default=None)
@@ -1530,16 +1671,47 @@ def main() -> None:
     parser.add_argument("--omega_efficiency_drop_ratio", type=float, default=None)
     parser.add_argument("--omega_efficiency_window", type=int, default=3)
     parser.add_argument("--omega_hard_shrink_scale", type=float, default=None)
+    parser.add_argument("--step_length_cap_mode", type=str, default="none", choices=["none", "initial_segment", "history_box"])
+    parser.add_argument("--step_length_cap_factor", type=float, default=1.0)
     parser.add_argument("--it_newt_max", type=int, default=200)
     parser.add_argument("--it_damp_max", type=int, default=10)
     parser.add_argument("--tol", type=float, default=1e-4)
     parser.add_argument("--r_min", type=float, default=1e-4)
+    parser.add_argument(
+        "--newton_stopping_criterion",
+        type=str,
+        default="relative_residual",
+        choices=["relative_residual", "relative_correction", "absolute_delta_lambda"],
+    )
+    parser.add_argument("--newton_stopping_tol", type=float, default=None)
+    parser.add_argument(
+        "--init_newton_stopping_criterion",
+        type=str,
+        default=None,
+        choices=["relative_residual", "relative_correction", "absolute_delta_lambda"],
+    )
+    parser.add_argument("--init_newton_stopping_tol", type=float, default=None)
+    parser.add_argument(
+        "--fine_newton_stopping_criterion",
+        type=str,
+        default=None,
+        choices=["relative_residual", "relative_correction", "absolute_delta_lambda"],
+    )
+    parser.add_argument("--fine_newton_stopping_tol", type=float, default=None)
+    parser.add_argument("--fine_switch_mode", type=str, default="none", choices=["none", "history_box_cumulative_distance"])
+    parser.add_argument("--fine_switch_distance_factor", type=float, default=2.0)
     parser.add_argument("--linear_tolerance", type=float, default=1e-1)
     parser.add_argument("--linear_max_iter", type=int, default=100)
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")
     parser.add_argument("--factor_solver_type", type=str, default=None)
     parser.add_argument("--pc_backend", type=str, default="hypre", choices=["hypre", "gamg", "bddc", "pmg", "pmg_shell"])
     parser.add_argument("--pmg_coarse_mesh_path", type=Path, default=None)
+    parser.add_argument(
+        "--pmg_fine_hierarchy_mode",
+        type=str,
+        default="default",
+        choices=["default", "p4_p2_intermediate"],
+    )
     parser.add_argument(
         "--preconditioner_matrix_source",
         type=str,
@@ -1633,6 +1805,16 @@ def main() -> None:
         continuation_predictor_reduced_tolerance=args.continuation_predictor_reduced_tolerance,
         continuation_predictor_power_order=args.continuation_predictor_power_order,
         continuation_predictor_power_init=args.continuation_predictor_power_init,
+        continuation_secant_correction_mode=args.continuation_secant_correction_mode,
+        continuation_first_newton_warm_start_mode=args.continuation_first_newton_warm_start_mode,
+        continuation_mode=args.continuation_mode,
+        streaming_micro_target_length=args.streaming_micro_target_length,
+        streaming_micro_min_length=args.streaming_micro_min_length,
+        streaming_micro_max_length=args.streaming_micro_max_length,
+        streaming_move_relres_threshold=args.streaming_move_relres_threshold,
+        streaming_alpha_advance_threshold=args.streaming_alpha_advance_threshold,
+        streaming_micro_max_corrections=args.streaming_micro_max_corrections,
+        streaming_basis_max_vectors=args.streaming_basis_max_vectors,
         omega_no_increase_newton_threshold=args.omega_no_increase_newton_threshold,
         omega_half_newton_threshold=args.omega_half_newton_threshold,
         omega_target_newton_iterations=args.omega_target_newton_iterations,
@@ -1644,16 +1826,27 @@ def main() -> None:
         omega_efficiency_drop_ratio=args.omega_efficiency_drop_ratio,
         omega_efficiency_window=args.omega_efficiency_window,
         omega_hard_shrink_scale=args.omega_hard_shrink_scale,
+        step_length_cap_mode=args.step_length_cap_mode,
+        step_length_cap_factor=args.step_length_cap_factor,
         it_newt_max=args.it_newt_max,
         it_damp_max=args.it_damp_max,
         tol=args.tol,
         r_min=args.r_min,
+        newton_stopping_criterion=args.newton_stopping_criterion,
+        newton_stopping_tol=args.newton_stopping_tol,
+        init_newton_stopping_criterion=args.init_newton_stopping_criterion,
+        init_newton_stopping_tol=args.init_newton_stopping_tol,
+        fine_newton_stopping_criterion=args.fine_newton_stopping_criterion,
+        fine_newton_stopping_tol=args.fine_newton_stopping_tol,
+        fine_switch_mode=args.fine_switch_mode,
+        fine_switch_distance_factor=args.fine_switch_distance_factor,
         linear_tolerance=args.linear_tolerance,
         linear_max_iter=args.linear_max_iter,
         solver_type=args.solver_type,
         factor_solver_type=args.factor_solver_type,
         pc_backend=args.pc_backend,
         pmg_coarse_mesh_path=args.pmg_coarse_mesh_path,
+        pmg_fine_hierarchy_mode=args.pmg_fine_hierarchy_mode,
         preconditioner_matrix_source=args.preconditioner_matrix_source,
         preconditioner_matrix_policy=args.preconditioner_matrix_policy,
         preconditioner_rebuild_policy=args.preconditioner_rebuild_policy,
