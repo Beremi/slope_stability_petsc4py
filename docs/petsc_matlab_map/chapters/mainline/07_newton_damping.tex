@@ -1,0 +1,116 @@
+\chapter{Newton Solvers and Damping}
+
+The default 3D PMG benchmark uses the same nonlinear idea as MATLAB:
+\begin{itemize}
+\item build residual and tangent information,
+\item regularize the tangent,
+\item solve for a correction,
+\item line-search the update,
+\item accept or reject the iteration.
+\end{itemize}
+
+What changed is that the current path is now explicitly tied to the reduced
+free-space operator produced by owned-row distributed assembly.
+
+\section{Current Mainline Newton Branch}
+
+For the committed benchmark, the Newton decision tree collapses to one branch:
+\begin{itemize}
+\item the backend is \code{pmg\_shell},
+\item \code{pmg\_shell} enforces
+\code{full\_system\_preconditioner = false},
+\item Newton therefore uses the reduced free operator path,
+\item the owned-row tangent machinery stays underneath the builder,
+\item the full-operator and BDDC-specific branches stay inactive.
+\end{itemize}
+
+This is the cleanest summary of what Newton is actually doing on the default
+parallel PMG route.
+
+\section{Plain Newton On The Mainline Path}
+
+One Newton iteration for the current benchmark is:
+\begin{enumerate}
+\item ask the constitutive builder for the current free-output residual and
+tangent information,
+\item form the regularized operator
+\[
+K_r = r K_{\mathrm{elast}} + (1-r) K_{\mathrm{tangent}},
+\]
+on the owned-row PETSc pattern,
+\item extract or reuse the reduced free-space operator,
+\item solve the correction with the PMG-shell-preconditioned Krylov solver,
+\item run the line search,
+\item update the state and regularization level.
+\end{enumerate}
+
+The nonlinear method is still Newton. The main change is the operator format.
+
+\section{Nested SSR Solve On The Mainline Path}
+
+Because the current benchmark is an indirect SSR solve, the active Newton
+routine is \code{newton\_ind\_ssr(...)}. It still follows the classical MATLAB
+structure:
+\begin{itemize}
+\item build the \(V\) correction associated with the current residual,
+\item build the \(W\) sensitivity direction,
+\item recover \(d_\lambda\) from the work constraint,
+\item combine them into the displacement correction,
+\item damp the coupled update through \code{damping\_alg5(...)}.
+\end{itemize}
+
+What differs from MATLAB is that both \(V\) and \(W\) are solved through the
+same reduced PMG-shell linear-system interface.
+
+\section{Stopping And Damping In The Current Benchmark}
+
+The committed benchmark config uses:
+\begin{itemize}
+\item \code{stopping\_criterion = absolute\_delta\_lambda},
+\item \code{stopping\_tol = 1e-4},
+\item \code{it\_damp\_max = 10},
+\item \code{r\_min = 1e-4}.
+\end{itemize}
+
+So the mainline nonlinear solve is tuned around SSR progress in
+\(\lambda\), not around a pure residual-only stopping rule.
+
+\section{What Newton Receives From The Constitutive Layer}
+
+On the mainline path, Newton primarily sees:
+\begin{itemize}
+\item free-output residual builders,
+\item owned-row tangent refreshes hidden behind the constitutive builder,
+\item cached PETSc regularized matrices on the owned pattern.
+\end{itemize}
+
+This is why the tangent and Newton chapters have to be read together. The
+current Newton branch is inseparable from the owned-row assembly path beneath
+it.
+
+\section{Deflation Basis On The Mainline Path}
+
+The solver-side deflation basis still grows after useful accepted directions,
+just as in MATLAB. On the current mainline path, that means:
+\begin{itemize}
+\item the basis is owned by the PETSc solver object,
+\item continuation and Newton can reuse it across accepted steps,
+\item the default benchmark does \textbf{not} enable temporary first-iteration
+warm-start modes.
+\end{itemize}
+
+\section{Where To Edit}
+
+\begin{itemize}
+\item \petscmod{nonlinear/newton.py} for iteration flow and operator selection,
+\item \petscmod{nonlinear/damping.py} for line-search behavior,
+\item \petscmod{constitutive/problem.py} for the residual and regularized-matrix
+interfaces used by Newton,
+\item \petscmod{linear/solver.py} for backend-specific expectations.
+\end{itemize}
+
+\section{Where The Inactive Newton Branches Went}
+
+Full-system operator mode, local full-operator branches, separate explicit
+preconditioning matrices, and optional warm-start features are moved to
+Appendix~\ref{app:newton}.

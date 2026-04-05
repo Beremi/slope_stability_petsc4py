@@ -1,0 +1,56 @@
+\chapter{Execution Map: Inactive and Alternative Entry Paths}
+\label{app:execution}
+
+This appendix chapter collects runner surfaces and configuration defaults that
+exist in the repository but are not part of the current
+\code{3d\_hetero\_ssr\_default} benchmark path.
+
+\section{Generic Framework Defaults}
+
+If a user relied only on dataclass defaults in
+\petscmod{core/run\_config.py}, the framework-level defaults would be:
+\begin{itemize}
+\item \code{method = indirect},
+\item \code{predictor = secant},
+\item \code{omega\_step\_controller = legacy},
+\item \code{constitutive\_mode = overlap},
+\item \code{tangent\_kernel = rows},
+\item \code{solver\_type = PETSC\_MATLAB\_DFGMRES\_HYPRE\_NULLSPACE},
+\item \code{pc\_backend = hypre}.
+\end{itemize}
+
+That is not the same as the committed benchmark default. The committed 3D
+benchmark overrides the backend to \code{pmg\_shell}.
+
+\section{Other Runner Surfaces}
+
+The repository also contains top-level flows that are not on the current
+mainline path:
+\begin{itemize}
+\item \petscmod{cli/run\_3D\_hetero\_seepage\_capture.py} for standalone
+seepage,
+\item \petscmod{cli/run\_3D\_hetero\_seepage\_SSR\_comsol\_capture.py} for the
+coupled seepage-to-mechanics path,
+\item the limit-load branch launched through
+\code{LL\_indirect\_continuation(...)},
+\item direct SSR entry points exposed through
+\petscmod{continuation/direct.py} and \petscmod{continuation/omega.py}.
+\end{itemize}
+
+These are active code, but they are not what the default 3D PMG benchmark does
+when run from \code{case.toml}.
+
+\section{Why The Split Matters}
+
+Before this restructure, the document described both the mainline path and the
+broader feature surface together. That made it too easy to confuse:
+\begin{itemize}
+\item code that is \emph{supported} with code that is \emph{executed by
+default},
+\item generic configuration defaults with benchmark overrides,
+\item validation/reference paths with production PMG-path assembly.
+\end{itemize}
+
+The main chapters now follow only the committed benchmark. This appendix holds
+the surrounding entry points so they stay documented without interrupting the
+main reading path.

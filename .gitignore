@@ -12,13 +12,25 @@ __pycache__/
 # Local environments and build outputs
 .build/
 .local/
+.vscode/
 .venv/
 .venv_petsc4py/
 bin/
 
 # Local-only working trees
 artifacts/
-benchmarks/*/artifacts/
+!benchmarks/*/artifacts/
+benchmarks/*/artifacts/*
+!benchmarks/*/artifacts/simulation/
+benchmarks/*/artifacts/simulation/*
+!benchmarks/*/artifacts/simulation/generated_case.toml
+!benchmarks/*/artifacts/simulation/data/
+benchmarks/*/artifacts/simulation/data/*
+!benchmarks/*/artifacts/simulation/data/run_info.json
+!benchmarks/*/artifacts/simulation/data/petsc_run.npz
+!benchmarks/*/artifacts/simulation/exports/
+benchmarks/*/artifacts/simulation/exports/*
+!benchmarks/*/artifacts/simulation/exports/final_solution.vtu
 archives/
 tests_local/
 slope_stability_matlab/

@@ -13,6 +13,7 @@ COPTFLAGS=${COPTFLAGS:-"-O3 -march=native -mtune=native"}
 CXXOPTFLAGS=${CXXOPTFLAGS:-"-O3 -march=native -mtune=native"}
 FOPTFLAGS=${FOPTFLAGS:-"-O3 -march=native -mtune=native"}
 INSTALL_PROJECT=${INSTALL_PROJECT:-1}
+PROJECT_EXTRAS=${PROJECT_EXTRAS:-test,cython,partition}
 
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "Missing virtualenv: $VENV_DIR" >&2
@@ -30,7 +31,7 @@ fi
 
 source "$VENV_DIR/bin/activate"
 
-python -m pip install --upgrade pip setuptools wheel packaging cython numpy
+python -m pip install --upgrade pip setuptools wheel packaging cython numpy "cmake>=3.26"
 python -m pip uninstall -y petsc petsc4py || true
 
 cd "$PETSC_SRC_DIR"
@@ -75,7 +76,11 @@ python -m pip install --no-build-isolation --no-deps --force-reinstall "$PETSC_S
 if [[ "$INSTALL_PROJECT" == "1" ]]; then
   (
     cd "$ROOT_DIR"
-    python -m pip install --no-cache-dir -e .[test,cython,partition]
+    PROJECT_TARGET="."
+    if [[ -n "${PROJECT_EXTRAS}" ]]; then
+      PROJECT_TARGET="${PROJECT_TARGET}[${PROJECT_EXTRAS}]"
+    fi
+    python -m pip install --no-cache-dir -e "${PROJECT_TARGET}"
   )
 fi
 

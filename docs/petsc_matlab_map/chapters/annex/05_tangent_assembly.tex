@@ -1,0 +1,68 @@
+\chapter{Tangent Assembly: Inactive and Alternative Paths}
+\label{app:tangent}
+
+This appendix chapter collects tangent paths that remain in the repository but
+are not part of the default parallel PMG benchmark.
+
+\section{Global MATLAB-Style Reference Path}
+
+\code{build\_global\_tangent\_matrix(...)} still assembles the full global
+matrix directly as
+\[
+K = B^T D_S B.
+\]
+
+This is the shortest conceptual bridge to MATLAB and remains valuable for
+serial debugging and parity checks, but it is not the normal PMG-path solve.
+
+\section{Unique-Owner Constitutive Recovery}
+
+The owned tangent pattern can also be prepared with unique-owner support:
+\begin{itemize}
+\item \code{include\_unique = true},
+\item optional gather or neighbor exchange metadata,
+\item mapping arrays that recover overlap-local constitutive data from unique
+owners.
+\end{itemize}
+
+Those structures matter for \code{unique}, \code{unique\_gather}, and
+\code{unique\_exchange} modes. They are inactive in the committed benchmark
+because \code{constitutive\_mode = overlap}.
+
+\section{Legacy Scatter Kernel}
+
+The \code{legacy} kernel is the closer relative of the MATLAB assembly mental
+model:
+\begin{itemize}
+\item build an element matrix,
+\item flatten it,
+\item scatter entries through a precomputed map.
+\end{itemize}
+
+It is still useful as a reference and validation kernel, but it is not the
+default production kernel for the 3D PMG benchmark.
+
+\section{BDDC Local-Subdomain Pattern}
+
+\code{BDDCSubdomainPattern} serves a different PETSc consumer: local square
+subdomain matrices for MATIS/PCBDDC. Its main differences from the owned-row
+pattern are:
+\begin{itemize}
+\item local square numbering instead of global owned rows,
+\item explicit interface and adjacency metadata,
+\item tangent refresh routines specialized for the BDDC preconditioner.
+\end{itemize}
+
+This branch becomes relevant only when the solver backend is changed to
+\code{bddc}.
+
+\section{Why The Main Text Excludes Them}
+
+The mainline chapter now follows one concrete path:
+\[
+\text{owned rows} \rightarrow \text{overlap constitutive data} \rightarrow
+\text{rows kernel}.
+\]
+
+The inactive paths are kept here so they remain documented without obscuring
+which branch the default benchmark actually executes.

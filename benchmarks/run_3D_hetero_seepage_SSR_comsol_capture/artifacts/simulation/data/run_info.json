@@ -1,0 +1,134 @@
+{
+  "run_info": {
+    "timestamp": "2026-04-04T05:39:30",
+    "runtime_seconds": 1251.039477549959,
+    "mpi_size": 8,
+    "mesh_nodes": 80226,
+    "mesh_elements": 55895,
+    "unknowns": 231201,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "step_count": 34
+  },
+  "params": {
+    "lambda_init": 1.0,
+    "d_lambda_init": 0.1,
+    "d_lambda_min": 1e-05,
+    "d_lambda_diff_scaled_min": 0.005,
+    "omega_max_stop": 340700000.0,
+    "step_max": 100,
+    "it_newt_max": 50,
+    "it_damp_max": 10,
+    "tol": 0.0001,
+    "r_min": 0.0001,
+    "elem_type": "P2",
+    "davis_type": "B",
+    "material_rows": [
+      [
+        15.0,
+        30.0,
+        0.0,
+        10000.0,
+        0.33,
+        19.0,
+        19.0
+      ],
+      [
+        15.0,
+        38.0,
+        0.0,
+        50000.0,
+        0.3,
+        22.0,
+        22.0
+      ],
+      [
+        10.0,
+        35.0,
+        0.0,
+        50000.0,
+        0.3,
+        21.0,
+        21.0
+      ],
+      [
+        18.0,
+        32.0,
+        0.0,
+        20000.0,
+        0.33,
+        20.0,
+        20.0
+      ]
+    ],
+    "node_ordering": "block_metis",
+    "mpi_distribute_by_nodes": true,
+    "pc_hypre_coarsen_type": "HMIS",
+    "pc_hypre_interp_type": "ext+i",
+    "pc_hypre_strong_threshold": null,
+    "recycle_preconditioner": true,
+    "constitutive_mode": "overlap",
+    "tangent_kernel": "rows",
+    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_ssr_comsol/comsol_mesh.msh",
+    "seepage_linear_tolerance": 1e-10,
+    "seepage_linear_max_iter": 500
+  },
+  "mesh": {
+    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_ssr_comsol/comsol_mesh.msh",
+    "coord_shape": [
+      3,
+      80226
+    ],
+    "elem_shape": [
+      10,
+      55895
+    ],
+    "surf_shape": [
+      6,
+      10439
+    ]
+  },
+  "timings": {
+    "constitutive": {
+      "reduction": 8.872567577054724,
+      "stress": 17.085105231730267,
+      "stress_tangent": 8.094110202975571,
+      "build_F": 19.737512769177556,
+      "build_F_K_tangent": 0.0,
+      "build_tangent_local": 39.43286826880649,
+      "local_strain": 10.363289170200005,
+      "local_constitutive": 15.01474716886878,
+      "local_constitutive_comm": 0.0,
+      "local_force_assembly": 19.734391445526853,
+      "local_force_gather": 0.0,
+      "potential": 0.0
+    },
+    "linear": {
+      "init_linear_iterations": 27,
+      "init_linear_solve_time": 3.1815167882014066,
+      "init_linear_preconditioner_time": 1.9901446637231857,
+      "init_linear_orthogonalization_time": 0.2997538740746677,
+      "attempt_linear_iterations_total": 7702,
+      "attempt_linear_solve_time_total": 905.9691976692993,
+      "attempt_linear_preconditioner_time_total": 34.220154916867614,
+      "attempt_linear_orthogonalization_time_total": 176.14808422559872
+    },
+    "continuation_total_wall_time": 1251.03844126896,
+    "seepage_runtime": 38.93524841940962
+  },
+  "seepage": {
+    "criterion": [
+      0.06706092631027855,
+      0.07147087610994109,
+      0.05956516279243278,
+      0.039202436104852904,
+      0.012053701479002452,
+      0.00927673148237607,
+      0.0003360754933382209,
+      4.00581048767303e-06,
+      1.315569225322678e-09,
+      5.0166208979915916e-17
+    ],
+    "iterations": 10,
+    "converged": true
+  }
+}

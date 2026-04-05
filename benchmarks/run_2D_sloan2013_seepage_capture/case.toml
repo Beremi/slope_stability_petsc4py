@@ -11,7 +11,7 @@ family = "2d_seepage"
 material_palette = "sloan2013"
 
 [problem]
-name = "benchmark_2d_sloan2013_seepage"
+name = "run_2D_sloan2013_seepage_capture"
 case = "2d_sloan2013_seepage"
 analysis = "seepage"
 dimension = 2

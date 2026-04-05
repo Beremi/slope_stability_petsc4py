@@ -1,0 +1,115 @@
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[a4paper,margin=1.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{xurl}
+\usepackage{hyperref}
+\usepackage{bookmark}
+\usepackage{titlesec}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+  plainpages=false,
+  pdftitle={PETSc to MATLAB Solution Map},
+  pdfauthor={OpenAI Codex}
+}
+
+\setlist[itemize]{leftmargin=1.5em, itemsep=0.2em, topsep=0.3em}
+\setlist[enumerate]{leftmargin=1.8em, itemsep=0.2em, topsep=0.3em}
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0pt}
+\setlength{\emergencystretch}{3em}
+\renewcommand{\arraystretch}{1.15}
+\urlstyle{tt}
+\titleformat{\chapter}[display]
+  {\bfseries\Large}
+  {\filright\color{gray}\large Chapter \thechapter}
+  {0.5em}
+  {\Huge}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\newcommand{\matlabpkg}[1]{\nolinkurl{slope_stability_matlab/#1}}
+\newcommand{\petscmod}[1]{\nolinkurl{src/slope_stability/#1}}
+
+\begin{document}
+
+\pagenumbering{gobble}
+\begin{titlepage}
+\centering
+{\Large PETSc to MATLAB Solution Map\par}
+\vspace{0.7cm}
+{\large slope\_stability\par}
+\vspace{1.2cm}
+{\large A chapter-by-chapter map from the original MATLAB workflow to the PETSc-based Python implementation\par}
+\vfill
+\begin{tabular}{rl}
+Repository: & \code{/home/beremi/repos/slope\_stability-1} \\
+Audience: & original MATLAB authors and maintainers \\
+Intent: & fastest path to locating each old concept in the PETSc codebase \\
+Date: & April 4, 2026 \\
+\end{tabular}
+\vfill
+\end{titlepage}
+
+\pagenumbering{roman}
+\chapter*{Reading Guide}
+This document is split into two parts.
+\begin{itemize}
+\item \textbf{Mainline path} follows only the committed default 3D benchmark in \code{benchmarks/3d\_hetero\_ssr\_default/case.toml}.
+\item \textbf{Annex} collects code paths that are present in the repository but inactive in that benchmark: seepage, alternative constitutive ownership modes, legacy tangent kernels, BDDC, Hypre/GAMG backends, direct SSR, limit load, and other optional continuation features.
+\end{itemize}
+
+Each chapter pair answers four questions:
+\begin{itemize}
+\item what the MATLAB code did in that part of the workflow,
+\item where the default PETSc responsibility now lives,
+\item what changed on the current parallel PMG path,
+\item where to look next if the inactive or alternative code paths matter.
+\end{itemize}
+
+The reference thread throughout the mainline part is the classical 3D heterogeneous SSR case, centered on \matlabpkg{slope\_stability\_3D\_hetero\_SSR.m} and the PETSc runner \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py}, with
+\code{constitutive\_mode = overlap},
+\code{tangent\_kernel = rows},
+\code{method = indirect}, and
+\code{pc\_backend = pmg\_shell}.
+
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\part{Mainline Path}
+\input{chapters/mainline/01_execution_map.tex}
+\input{chapters/mainline/02_mesh_materials_load.tex}
+\input{chapters/mainline/03_seepage_coupling.tex}
+\input{chapters/mainline/04_constitutive_reduction.tex}
+\input{chapters/mainline/05_tangent_assembly.tex}
+\input{chapters/mainline/06_linear_solvers_petsc.tex}
+\input{chapters/mainline/07_newton_damping.tex}
+\input{chapters/mainline/08_continuation.tex}
+
+\appendix
+\part{Annex: Inactive and Alternative Paths}
+\input{chapters/annex/01_execution_map.tex}
+\input{chapters/annex/02_mesh_materials_load.tex}
+\input{chapters/annex/03_seepage_coupling.tex}
+\input{chapters/annex/04_constitutive_reduction.tex}
+\input{chapters/annex/05_tangent_assembly.tex}
+\input{chapters/annex/06_linear_solvers_petsc.tex}
+\input{chapters/annex/07_newton_damping.tex}
+\input{chapters/annex/08_continuation.tex}
+
+\end{document}

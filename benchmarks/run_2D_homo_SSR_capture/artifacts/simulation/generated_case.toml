@@ -1,0 +1,64 @@
+[problem]
+name = "run_2D_homo_SSR_capture"
+case = "2d_homo_ssr"
+analysis = "ssr"
+dimension = 2
+variant = "homo"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+
+[geometry]
+h = 1.0
+x1 = 15.0
+x3 = 15.0
+y1 = 10.0
+y2 = 10.0
+beta_deg = 45.0
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_init = 0.9
+d_lambda_init = 0.1
+d_lambda_min = 1e-05
+d_lambda_diff_scaled_min = 0.001
+omega_max = 70000000.0
+step_max = 2
+
+[newton]
+it_max = 50
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 0.1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+threads = 1
+
+[export]
+write_custom_debug_bundle = false
+write_history_json = false
+write_solution_vtu = true
+custom_debug_name = "run_debug.h5"
+history_name = "continuation_history.json"
+solution_name = "final_solution.vtu"
+
+[[materials]]
+name = "homogeneous_slope"
+c0 = 6.0
+phi = 45.0
+psi = 0.0
+young = 40000.0
+poisson = 0.3
+gamma_sat = 20.0
+gamma_unsat = 20.0

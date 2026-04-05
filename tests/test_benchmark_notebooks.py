@@ -68,7 +68,7 @@ def test_every_benchmark_case_has_metadata_and_notebook_section() -> None:
 
 
 def test_default_3d_cases_have_explicit_export_blocks() -> None:
-    for name in ("3d_hetero_ssr_default", "3d_homo_ssr_default"):
+    for name in ("slope_stability_3D_hetero_SSR_default", "slope_stability_3D_homo_SSR_default"):
         raw = tomllib.loads((BENCHMARKS_DIR / name / "case.toml").read_text(encoding="utf-8"))
         export = dict(raw.get("export", {}))
         assert export.get("write_custom_debug_bundle") is True
@@ -87,7 +87,7 @@ def test_every_benchmark_has_valid_generated_notebook() -> None:
 
 
 def test_no_committed_generated_notebook_case_toml_remains() -> None:
-    assert not (BENCHMARKS_DIR / "3d_hetero_ssr_default" / "notebook_case.generated.toml").exists()
+    assert not (BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "notebook_case.generated.toml").exists()
 
 
 def test_generator_builds_valid_notebooks_for_all_cases() -> None:
@@ -115,7 +115,7 @@ def test_support_module_imports_without_viz_extras() -> None:
 
 def test_load_case_sections_resolves_relative_paths_for_generated_configs() -> None:
     module = _support()
-    sections = module.load_case_sections(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml")
+    sections = module.load_case_sections(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml")
 
     assert Path(sections["problem"]["mesh_path"]).is_absolute()
 
@@ -124,18 +124,21 @@ def test_smoke_profile_uses_lightweight_textmesh_and_ll_overrides() -> None:
     module = _support()
 
     koz_sections = module._profile_sections(  # noqa: SLF001
-        BENCHMARKS_DIR / "run_2d_kozinec_ssr" / "case.toml",
-        module.load_case_sections(BENCHMARKS_DIR / "run_2d_kozinec_ssr" / "case.toml"),
+        BENCHMARKS_DIR / "slope_stability_2D_Kozinec_SSR" / "case.toml",
+        module.load_case_sections(BENCHMARKS_DIR / "slope_stability_2D_Kozinec_SSR" / "case.toml"),
         "smoke",
     )
     assert koz_sections["problem"]["elem_type"] == "P1"
     assert koz_sections["execution"]["mpi_distribute_by_nodes"] is False
     assert koz_sections["execution"]["constitutive_mode"] == "global"
     assert koz_sections["linear_solver"]["solver_type"] == "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+    assert koz_sections["export"]["write_custom_debug_bundle"] is False
+    assert koz_sections["export"]["write_history_json"] is False
+    assert koz_sections["export"]["write_solution_vtu"] is True
 
     ll_sections = module._profile_sections(  # noqa: SLF001
-        BENCHMARKS_DIR / "run_3d_hetero_ll" / "case.toml",
-        module.load_case_sections(BENCHMARKS_DIR / "run_3d_hetero_ll" / "case.toml"),
+        BENCHMARKS_DIR / "slope_stability_3D_hetero_LL" / "case.toml",
+        module.load_case_sections(BENCHMARKS_DIR / "slope_stability_3D_hetero_LL" / "case.toml"),
         "smoke",
     )
     assert ll_sections["execution"]["mpi_distribute_by_nodes"] is False
@@ -146,17 +149,17 @@ def test_smoke_profile_uses_lightweight_textmesh_and_ll_overrides() -> None:
 def test_kozinec_ssr_defaults_to_p2_with_petsc_hypre() -> None:
     module = _support()
 
-    sections = module.load_case_sections(BENCHMARKS_DIR / "run_2d_kozinec_ssr" / "case.toml")
+    sections = module.load_case_sections(BENCHMARKS_DIR / "slope_stability_2D_Kozinec_SSR" / "case.toml")
 
     assert sections["problem"]["elem_type"] == "P2"
     assert sections["linear_solver"]["solver_type"] == "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
 
 
-def test_3d_hetero_ssr_default_uses_p4_pmg_defaults() -> None:
+def test_slope_stability_3D_hetero_SSR_default_uses_p4_pmg_defaults() -> None:
     module = _support()
 
-    sections = module.load_case_sections(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml")
-    metadata = module.load_case_metadata(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml")
+    sections = module.load_case_sections(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml")
+    metadata = module.load_case_metadata(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml")
 
     assert sections["problem"]["elem_type"] == "P4"
     assert sections["continuation"]["omega_max"] == 6.7e6
@@ -166,7 +169,7 @@ def test_3d_hetero_ssr_default_uses_p4_pmg_defaults() -> None:
     assert sections["newton"]["stopping_tol"] == 1e-4
     assert sections["linear_solver"]["pc_backend"] == "pmg_shell"
     assert metadata["jupyter_backend"] == "client"
-    assert metadata["nonlinear_surface_subdivision"] == 0
+    assert metadata["nonlinear_surface_subdivision"] == 2
     assert metadata["surface_decimate_reduction"] == 0.75
     assert metadata["boundary_edge_overlay"] is False
 
@@ -192,26 +195,36 @@ def test_display_nonlinear_surface_subdivision_reads_notebook_setting() -> None:
     module = _support()
 
     subdivision = module._display_nonlinear_surface_subdivision(  # noqa: SLF001
-        BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+        BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml"
     )
 
-    assert subdivision == 0
+    assert subdivision == 2
 
 
 def test_display_nonlinear_surface_subdivision_honors_override() -> None:
     module = _support()
 
     subdivision = module._display_nonlinear_surface_subdivision(  # noqa: SLF001
-        BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml",
+        BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml",
         override=3,
     )
 
     assert subdivision == 3
 
 
+def test_display_nonlinear_surface_subdivision_defaults_to_zero_for_p2_case() -> None:
+    module = _support()
+
+    subdivision = module._display_nonlinear_surface_subdivision(  # noqa: SLF001
+        BENCHMARKS_DIR / "slope_stability_3D_homo_SSR" / "case.toml"
+    )
+
+    assert subdivision == 0
+
+
 def test_display_surface_decimate_reduction_reads_notebook_setting_and_honors_override() -> None:
     module = _support()
-    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+    case_toml = BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml"
 
     assert module._display_surface_decimate_reduction(case_toml) == 0.75  # noqa: SLF001
     assert module._display_surface_decimate_reduction(case_toml, override=0.5) == 0.5  # noqa: SLF001
@@ -219,7 +232,7 @@ def test_display_surface_decimate_reduction_reads_notebook_setting_and_honors_ov
 
 def test_display_boundary_edge_overlay_reads_notebook_setting_and_honors_override() -> None:
     module = _support()
-    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+    case_toml = BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml"
 
     assert module._display_boundary_edge_overlay(case_toml) is False  # noqa: SLF001
     assert module._display_boundary_edge_overlay(case_toml, override=True) is True  # noqa: SLF001
@@ -227,14 +240,14 @@ def test_display_boundary_edge_overlay_reads_notebook_setting_and_honors_overrid
 
 def test_display_jupyter_backend_reads_notebook_setting_and_honors_override() -> None:
     module = _support()
-    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+    case_toml = BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml"
 
     assert module._display_jupyter_backend(case_toml) == "client"  # noqa: SLF001
     assert module._display_jupyter_backend(case_toml, override="static") == "static"  # noqa: SLF001
 
 
-def test_3d_hetero_ssr_default_visualisation_includes_deviatoric_slices() -> None:
-    source = _notebook_sources(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "visualisation.ipynb")
+def test_slope_stability_3D_hetero_SSR_default_visualisation_includes_deviatoric_slices() -> None:
+    source = _notebook_sources(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "visualisation.ipynb")
 
     assert "show_3d_deviatoric_slices" in source
     assert 'JUPYTER_BACKEND_OVERRIDE = None' in source
@@ -250,7 +263,7 @@ def test_3d_hetero_ssr_default_visualisation_includes_deviatoric_slices() -> Non
 
 
 def test_2d_seepage_continuation_cases_default_to_single_rank() -> None:
-    for name in ("run_2d_luzec_ssr", "run_2d_franz_dam_ssr"):
+    for name in ("slope_stability_2D_Luzec_SSR", "slope_stability_2D_Franz_dam_SSR"):
         raw = tomllib.loads((BENCHMARKS_DIR / name / "case.toml").read_text(encoding="utf-8"))
 
         assert raw["benchmark"]["mpi_ranks"] == 1
@@ -280,7 +293,7 @@ def test_sloan_seepage_case_raises_nonlinear_iteration_cap() -> None:
 
 def test_reuse_prefers_matching_generated_case_config(tmp_path: Path) -> None:
     module = _support()
-    case_toml = BENCHMARKS_DIR / "run_2d_kozinec_ssr" / "case.toml"
+    case_toml = BENCHMARKS_DIR / "slope_stability_2D_Kozinec_SSR" / "case.toml"
     run_label = "reuse_test"
     out_dir = tmp_path / "artifacts" / run_label
     data_dir = out_dir / "data"
@@ -396,7 +409,7 @@ def test_pore_pressure_field_reorders_old_comsol_ssr_artifacts(monkeypatch) -> N
 
 def test_2d_artifact_plots_use_vtu_topology_for_reused_generated_config() -> None:
     module = _support()
-    out_dir = BENCHMARKS_DIR / "run_2d_franz_dam_ssr" / "artifacts" / "simulation"
+    out_dir = BENCHMARKS_DIR / "slope_stability_2D_Franz_dam_SSR" / "artifacts" / "simulation"
     artifacts = module.load_run_artifacts(out_dir)
     active_config = out_dir / "generated_case.toml"
 
@@ -433,7 +446,7 @@ def test_saturation_field_falls_back_to_npz_when_vtu_cell_data_is_missing() -> N
 
 def test_2d_vtu_triangle6_subdivision_preserves_positive_area() -> None:
     module = _support()
-    out_dir = BENCHMARKS_DIR / "run_2d_franz_dam_ssr" / "artifacts" / "simulation"
+    out_dir = BENCHMARKS_DIR / "slope_stability_2D_Franz_dam_SSR" / "artifacts" / "simulation"
     vtu = module.load_vtu(out_dir / "exports" / "final_solution.vtu")
 
     coord, triangles, _parents, _elem, _elem_type = module._vtu_linear_triangles_2d(vtu)  # noqa: SLF001
@@ -444,6 +457,50 @@ def test_2d_vtu_triangle6_subdivision_preserves_positive_area() -> None:
     )
 
     assert np.all(areas > 0.0)
+
+
+@pytest.mark.parametrize("case_name", ["slope_stability_2D_Franz_dam_SSR", "slope_stability_2D_Kozinec_SSR", "slope_stability_2D_Luzec_SSR"])
+def test_2d_vtu_triangle6_internal_order_matches_case_mesh(case_name: str) -> None:
+    module = _support()
+    case_toml = BENCHMARKS_DIR / case_name / "case.toml"
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / case_name / "artifacts" / "simulation")
+    vtu = module.load_vtu(artifacts.vtu_path)
+    _coord, _triangles, _parents, elem, elem_type = module._vtu_linear_triangles_2d(vtu)  # noqa: SLF001
+
+    assert elem_type == "P2"
+    expected = module._load_case_mesh(case_toml).elem  # noqa: SLF001
+    np.testing.assert_array_equal(module._vtu_internal_elem_2d(elem, elem_type), expected)  # noqa: SLF001
+
+
+def test_slice_source_grid_repairs_p2_tetra_connectivity(monkeypatch) -> None:
+    pv = pytest.importorskip("pyvista")
+    pv.OFF_SCREEN = True
+    module = _support()
+    case_toml = BENCHMARKS_DIR / "slope_stability_3D_hetero_LL" / "case.toml"
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "slope_stability_3D_hetero_LL" / "artifacts" / "simulation")
+    raw = pv.read(artifacts.vtu_path)
+    fixed = module._slice_source_grid(raw, artifacts=artifacts, case_toml=case_toml)  # noqa: SLF001
+
+    def boundary_edge_count(grid, *, axis: str, value: float) -> int:
+        normal = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}[axis]
+        origin = list(grid.center)
+        origin[{"x": 0, "y": 1, "z": 2}[axis]] = value
+        slc = grid.slice(normal=normal, origin=origin, generate_triangles=True)
+        surf = slc.extract_surface(algorithm="dataset_surface") if hasattr(slc, "extract_surface") else slc
+        edges = surf.extract_feature_edges(
+            boundary_edges=True,
+            feature_edges=False,
+            manifold_edges=False,
+            non_manifold_edges=False,
+        )
+        return int(edges.n_cells)
+
+    raw_edges = boundary_edge_count(raw, axis="z", value=43.30127019)
+    fixed_edges = boundary_edge_count(fixed, axis="z", value=43.30127019)
+
+    assert fixed.n_cells == raw.n_cells
+    assert fixed.n_points == raw.n_points
+    assert fixed_edges < raw_edges / 5
 
 
 def test_show_3d_deviatoric_surface_view_uses_surface_cell_scalars(monkeypatch) -> None:
@@ -541,6 +598,66 @@ def test_surface_parent_elements_and_plotting_face_ids_for_p2_faces() -> None:
     assert np.array_equal(parent, np.array([0], dtype=np.int64))
 
 
+def test_surface_for_display_uses_explicit_builder_for_p2(monkeypatch) -> None:
+    pv = pytest.importorskip("pyvista")
+    module = _support()
+    case_toml = BENCHMARKS_DIR / "slope_stability_3D_homo_SSR" / "case.toml"
+
+    class DummyDataSet:
+        def __init__(self):
+            self.points = np.arange(30, dtype=np.float64).reshape(10, 3)
+            self.point_data = {
+                "displacement": np.arange(30, dtype=np.float64).reshape(10, 3),
+            }
+
+        def extract_surface(self, **kwargs):
+            raise AssertionError("P2 display path should not call VTK nonlinear surface extraction.")
+
+    dummy_case_mesh = SimpleNamespace(
+        surf=np.array(
+            [
+                [0],
+                [1],
+                [2],
+                [3],
+                [4],
+                [5],
+            ],
+            dtype=np.int64,
+        ),
+        elem=np.array(
+            [
+                [0],
+                [1],
+                [2],
+                [6],
+                [3],
+                [4],
+                [5],
+                [7],
+                [8],
+                [9],
+            ],
+            dtype=np.int64,
+        ),
+    )
+
+    monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
+    monkeypatch.setattr(module, "_load_case_mesh", lambda *args, **kwargs: dummy_case_mesh)
+
+    surface = module._surface_for_display(  # noqa: SLF001
+        DummyDataSet(),
+        case_toml=case_toml,
+        artifacts=SimpleNamespace(),
+        nonlinear_subdivision=3,
+        point_array_names=("displacement",),
+    )
+
+    assert surface.n_cells == 4
+    assert surface.n_points == 6
+    assert "displacement" in surface.point_data
+
+
 def test_show_3d_deviatoric_slices_uses_single_scalar_bar(monkeypatch) -> None:
     pv = pytest.importorskip("pyvista")
     pv.OFF_SCREEN = True
@@ -572,8 +689,8 @@ def test_show_3d_deviatoric_slices_uses_single_scalar_bar(monkeypatch) -> None:
 def test_refine_slice_for_display_subdivides_p4_slice_and_resamples() -> None:
     pv = pytest.importorskip("pyvista")
     module = _support()
-    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "artifacts" / "simulation")
-    case_toml = BENCHMARKS_DIR / "3d_hetero_ssr_default" / "case.toml"
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "artifacts" / "simulation")
+    case_toml = BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml"
 
     grid = pv.read(artifacts.vtu_path)
     slc = grid.slice(
@@ -617,9 +734,14 @@ def test_show_3d_saturation_view_uses_region_surfaces(monkeypatch) -> None:
 
 def test_family_specific_notebooks_include_expected_plot_cells() -> None:
     expected = {
-        "run_2D_homo_SSR_capture": ["plot_2d_displacement", "plot_2d_deviatoric_strain"],
-        "run_2D_sloan2013_seepage_capture": ["plot_2d_pore_pressure", "plot_2d_saturation"],
-        "run_2d_luzec_ssr": [
+        "run_2D_homo_SSR_capture": ["plot_2d_mesh", "plot_2d_displacement", "plot_2d_deviatoric_strain"],
+        "run_2D_sloan2013_seepage_capture": [
+            "plot_2d_heterogeneity",
+            "plot_2d_mesh",
+            "plot_2d_pore_pressure",
+            "plot_2d_saturation",
+        ],
+        "slope_stability_2D_Luzec_SSR": [
             "plot_2d_heterogeneity",
             "plot_2d_mesh",
             "plot_2d_pore_pressure",
@@ -627,12 +749,42 @@ def test_family_specific_notebooks_include_expected_plot_cells() -> None:
             "plot_2d_displacement",
             "plot_2d_deviatoric_strain",
         ],
-        "run_3D_hetero_SSR_capture": ["show_3d_displacement_view", "show_3d_deviatoric_surface_view"],
-        "run_3d_hetero_ll": ["show_3d_deviatoric_slices"],
-        "run_3D_hetero_seepage_capture": ["show_3d_pore_pressure_view", "show_3d_saturation_view"],
+        "run_3D_hetero_SSR_capture": [
+            "show_3d_mesh_view",
+            "show_3d_displacement_view",
+            "show_3d_deviatoric_surface_view",
+            "show_3d_deviatoric_slices",
+        ],
+        "SIOPT_LL": [
+            "show_3d_mesh_view",
+            "show_3d_displacement_view",
+            "show_3d_deviatoric_surface_view",
+            "show_3d_deviatoric_slices",
+        ],
+        "SIOPT_SSR": [
+            "show_3d_mesh_view",
+            "show_3d_displacement_view",
+            "show_3d_deviatoric_surface_view",
+            "show_3d_deviatoric_slices",
+        ],
+        "slope_stability_3D_hetero_LL": ["show_3d_mesh_view", "show_3d_deviatoric_slices"],
+        "slope_stability_3D_homo_seepage_SSR_concave": [
+            "show_3d_mesh_view",
+            "show_3d_pore_pressure_view",
+            "show_3d_saturation_view",
+            "show_3d_displacement_view",
+            "show_3d_deviatoric_surface_view",
+            "show_3d_deviatoric_slices",
+        ],
+        "run_3D_hetero_seepage_capture": [
+            "show_3d_mesh_view",
+            "show_3d_pore_pressure_view",
+            "show_3d_saturation_view",
+        ],
         "run_3D_hetero_seepage_SSR_comsol_capture": [
             "show_3d_mesh_view",
             "show_3d_pore_pressure_view",
+            "show_3d_saturation_view",
             "show_3d_displacement_view",
             "show_3d_deviatoric_surface_view",
             "show_3d_deviatoric_slices",
@@ -646,9 +798,34 @@ def test_family_specific_notebooks_include_expected_plot_cells() -> None:
             assert snippet in source, (case_name, snippet)
 
 
+def test_visualisation_notebooks_include_standard_section_headings() -> None:
+    for case_toml in _case_tomls():
+        raw = tomllib.loads(case_toml.read_text(encoding="utf-8"))
+        family = str(raw["notebook"]["family"])
+        source = _notebook_sources(case_toml.parent / "visualisation.ipynb")
+
+        assert "## Artifact Source" in source
+        assert "## Visualisation Workflow" in source
+        assert "## Controls" in source
+        assert "## Geometry And Materials" in source
+
+        if family.startswith("3d_"):
+            assert "## Interactive 3D Views" in source
+        if "seepage" in family:
+            assert "## Hydraulic Fields" in source
+        if family in {"2d_continuation", "2d_seepage_continuation", "3d_continuation", "3d_seepage_continuation"}:
+            assert "## Mechanical Response" in source
+        has_slices = any(
+            raw.get("notebook", {}).get(key)
+            for key in ("slice_planes_x", "slice_planes_y", "slice_planes_z")
+        )
+        if has_slices:
+            assert "## Slice Views" in source
+
+
 def test_3d_hetero_default_notebook_has_no_duplicate_legacy_sections() -> None:
-    simulation_source = _notebook_sources(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "simulation.ipynb")
-    source = _notebook_sources(BENCHMARKS_DIR / "3d_hetero_ssr_default" / "visualisation.ipynb")
+    simulation_source = _notebook_sources(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "simulation.ipynb")
+    source = _notebook_sources(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "visualisation.ipynb")
 
     assert "show_3d_displacement_view" in source
     assert "show_3d_deviatoric_surface_view" in source

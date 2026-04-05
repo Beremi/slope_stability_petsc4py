@@ -15,7 +15,8 @@ from slope_stability.problem_assets import load_material_rows_for_path
 
 ROOT = Path(__file__).resolve().parents[1]
 MESH_PATH = ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
-CASE_PATH = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "case.toml"
+SIOPT_MESH_PATH = ROOT / "meshes" / "3d_siopt" / "SIOPT_L0.msh"
+CASE_PATH = ROOT / "benchmarks" / "slope_stability_3D_hetero_SSR_default" / "case.toml"
 
 
 def test_family_materials_resolve_from_mesh_folder() -> None:
@@ -90,3 +91,20 @@ def test_gmsh_loader_elevates_tet4_to_tet35() -> None:
     assert int((~mesh_p4.q_mask[0]).sum()) == 1472
     assert int((~mesh_p4.q_mask[1]).sum()) == 2783
     assert int((~mesh_p4.q_mask[2]).sum()) == 5070
+
+
+def test_siopt_boundary_type_glues_bottom_in_all_directions() -> None:
+    mesh_sliding = load_mesh_file(SIOPT_MESH_PATH, elem_type="P2", boundary_type=0)
+    mesh_glued = load_mesh_file(SIOPT_MESH_PATH, elem_type="P2", boundary_type=1)
+
+    assert np.array_equal(np.unique(mesh_glued.boundary), np.array([0, 1, 3, 5], dtype=np.int64))
+
+    bottom_nodes = set(np.unique(mesh_glued.surf[:, mesh_glued.boundary == 5].ravel()))
+    other_boundary_nodes = set(np.unique(mesh_glued.surf[:, mesh_glued.boundary != 5].ravel()))
+    bottom_only = np.asarray(sorted(bottom_nodes - other_boundary_nodes), dtype=np.int64)
+
+    assert bottom_only.size > 0
+    assert np.all(~mesh_sliding.q_mask[1, bottom_only])
+    assert np.all(mesh_sliding.q_mask[0, bottom_only])
+    assert np.all(mesh_sliding.q_mask[2, bottom_only])
+    assert np.all(~mesh_glued.q_mask[:, bottom_only])

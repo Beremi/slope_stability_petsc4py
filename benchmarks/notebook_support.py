@@ -146,6 +146,8 @@ def load_case_metadata(case_toml: Path) -> dict[str, Any]:
     benchmark = dict(raw.get("benchmark", {}))
     notebook = dict(raw.get("notebook", {}))
     problem = dict(raw.get("problem", {}))
+    elem_type = str(problem.get("elem_type", "")).strip().upper()
+    default_surface_subdivision = 2 if elem_type == "P4" else 0
     return {
         "case_toml": case_toml,
         "case_dir": case_toml.parent,
@@ -159,7 +161,7 @@ def load_case_metadata(case_toml: Path) -> dict[str, Any]:
         "mpi_ranks": int(benchmark.get("mpi_ranks", 8)),
         "family": str(notebook.get("family", "")),
         "jupyter_backend": str(notebook.get("jupyter_backend", "trame")),
-        "nonlinear_surface_subdivision": int(notebook.get("nonlinear_surface_subdivision", 4)),
+        "nonlinear_surface_subdivision": int(notebook.get("nonlinear_surface_subdivision", default_surface_subdivision)),
         "surface_decimate_reduction": float(notebook.get("surface_decimate_reduction", 0.0)),
         "boundary_edge_overlay": bool(notebook.get("boundary_edge_overlay", False)),
     }
@@ -557,9 +559,10 @@ def _vtu_2d_topology(vtu: VtuData) -> tuple[np.ndarray, np.ndarray, str]:
 def _vtu_internal_elem_2d(elem: np.ndarray, elem_type: str) -> np.ndarray:
     elem_arr = np.asarray(elem, dtype=np.int64)
     if elem_type == "P2":
-        # VTU triangle6 order is [v0, v1, v2, e01, e12, e20];
-        # the FEM operators expect [v0, v1, v2, e12, e20, e01].
-        return elem_arr[[0, 1, 2, 4, 5, 3], :]
+        # Reloaded triangle6 cells come back in [v0, v1, v2, e20, e01, e12]
+        # order for the committed notebook artifacts; the FEM operators expect
+        # [v0, v1, v2, e12, e20, e01].
+        return elem_arr[[0, 1, 2, 5, 3, 4], :]
     return elem_arr
 
 
@@ -569,9 +572,9 @@ def _vtu_linear_triangles_2d(vtu: VtuData) -> tuple[np.ndarray, np.ndarray, np.n
         n_elem = elem.shape[1]
         triangles = np.empty((n_elem * 4, 3), dtype=np.int64)
         parents = np.repeat(np.arange(n_elem, dtype=np.int64), 4)
-        e01 = elem[3, :]
-        e12 = elem[4, :]
-        e20 = elem[5, :]
+        e20 = elem[3, :]
+        e01 = elem[4, :]
+        e12 = elem[5, :]
         triangles[0::4, :] = np.stack((elem[0, :], e01, e20), axis=1)
         triangles[1::4, :] = np.stack((e01, elem[1, :], e12), axis=1)
         triangles[2::4, :] = np.stack((e20, e12, elem[2, :]), axis=1)
@@ -810,7 +813,12 @@ def show_3d_mesh_view(
     grid = pv.read(artifacts.vtu_path)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
     reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
-    surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+    surface = _surface_for_display(
+        grid,
+        case_toml=case_toml,
+        artifacts=artifacts,
+        nonlinear_subdivision=subdivision,
+    )
     surface = _decimate_display_mesh(surface, reduction=reduction)
     surface = _optimize_display_mesh(surface)
     plotter = _new_plotter(pv, title="Mesh outline")
@@ -835,13 +843,19 @@ def show_3d_pore_pressure_view(
     grid.point_data["pore_pressure"] = _pore_pressure_field(artifacts, case_toml)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
     reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
-    surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+    surface = _surface_for_display(
+        grid,
+        case_toml=case_toml,
+        artifacts=artifacts,
+        nonlinear_subdivision=subdivision,
+        point_array_names=("pore_pressure",),
+    )
     surface = _decimate_display_mesh(surface, reduction=reduction)
     surface = _optimize_display_mesh(surface, keep_point_arrays=("pore_pressure",))
     plotter = _new_plotter(pv, title="Pore pressure [kPa]")
     plotter.add_mesh(surface, scalars="pore_pressure", cmap=PARULA_EQUIV, show_edges=False)
     if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
-        _add_boundary_edge_overlay(plotter, grid)
+        _add_boundary_edge_overlay(plotter, grid, case_toml=case_toml, artifacts=artifacts)
     _apply_matlab_camera(plotter)
     return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
@@ -852,6 +866,7 @@ def show_3d_saturation_view(
     *,
     surface_subdivision: int | None = None,
     surface_decimate_reduction: float | None = None,
+    boundary_edge_overlay: bool | None = None,
     jupyter_backend: str | None = None,
 ):
     if not _module_available("pyvista"):
@@ -864,30 +879,61 @@ def show_3d_saturation_view(
     plotter = _new_plotter(pv, title="Saturation")
     legend_entries: list[list[str]] = []
     value_labels = {0.0: "unsaturated", 1.0: "saturated"}
-    for value in sorted(float(v) for v in np.unique(saturation)):
-        cell_ids = np.flatnonzero(np.isclose(saturation, value))
-        if cell_ids.size == 0:
-            continue
-        region = grid.extract_cells(cell_ids)
-        surface = _extract_surface_for_display(region, nonlinear_subdivision=subdivision)
-        surface = _decimate_display_mesh(surface, reduction=reduction)
-        surface = _optimize_display_mesh(surface)
-        if surface.n_cells == 0:
-            continue
-        color = SATURATION_PALETTE.get(int(round(value)), (0.8, 0.8, 0.8))
-        plotter.add_mesh(
-            surface,
-            color=color,
-            show_edges=True,
-            edge_color="#222222",
-            line_width=0.35,
-            lighting=False,
-            opacity=1.0,
+    if _use_explicit_surface_builder(case_toml):
+        surface = _surface_for_display(
+            grid,
+            case_toml=case_toml,
+            artifacts=artifacts,
+            nonlinear_subdivision=subdivision,
+            cell_data_from_parent={"saturation": saturation},
         )
-        legend_entries.append([value_labels.get(value, f"saturation={value:g}"), color])
+        surface = _decimate_display_mesh(surface, reduction=reduction)
+        surface = _optimize_display_mesh(surface, keep_cell_arrays=("saturation",))
+        for value in sorted(float(v) for v in np.unique(surface.cell_data["saturation"])):
+            cell_ids = np.flatnonzero(np.isclose(np.asarray(surface.cell_data["saturation"], dtype=np.float64), value))
+            if cell_ids.size == 0:
+                continue
+            region = surface.extract_cells(cell_ids)
+            if region.n_cells == 0:
+                continue
+            color = SATURATION_PALETTE.get(int(round(value)), (0.8, 0.8, 0.8))
+            plotter.add_mesh(
+                region,
+                color=color,
+                show_edges=True,
+                edge_color="#222222",
+                line_width=0.35,
+                lighting=False,
+                opacity=1.0,
+            )
+            legend_entries.append([value_labels.get(value, f"saturation={value:g}"), color])
+    else:
+        for value in sorted(float(v) for v in np.unique(saturation)):
+            cell_ids = np.flatnonzero(np.isclose(saturation, value))
+            if cell_ids.size == 0:
+                continue
+            region = grid.extract_cells(cell_ids)
+            surface = _extract_surface_for_display(region, nonlinear_subdivision=subdivision)
+            surface = _decimate_display_mesh(surface, reduction=reduction)
+            surface = _optimize_display_mesh(surface)
+            if surface.n_cells == 0:
+                continue
+            color = SATURATION_PALETTE.get(int(round(value)), (0.8, 0.8, 0.8))
+            plotter.add_mesh(
+                surface,
+                color=color,
+                show_edges=True,
+                edge_color="#222222",
+                line_width=0.35,
+                lighting=False,
+                opacity=1.0,
+            )
+            legend_entries.append([value_labels.get(value, f"saturation={value:g}"), color])
     if not legend_entries:
         return "No saturation field available for 3D rendering."
     plotter.add_legend(legend_entries, bcolor="white", face="rectangle")
+    if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
+        _add_boundary_edge_overlay(plotter, grid, case_toml=case_toml, artifacts=artifacts)
     _apply_matlab_camera(plotter)
     return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
@@ -911,9 +957,12 @@ def show_3d_displacement_view(
     scale = matlab_warp_scale(case_mesh.coord, displacement) if warp_scale is None else float(warp_scale)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
     reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
-    surface = _extract_surface_for_display(
+    surface = _surface_for_display(
         grid,
+        case_toml=case_toml,
+        artifacts=artifacts,
         nonlinear_subdivision=subdivision,
+        point_array_names=("displacement", "displacement_magnitude"),
     )
     surface = _decimate_display_mesh(surface, reduction=reduction)
     surface = _optimize_display_mesh(surface, keep_point_arrays=("displacement", "displacement_magnitude"))
@@ -922,7 +971,14 @@ def show_3d_displacement_view(
     plotter = _new_plotter(pv, title=f"Displacement magnitude (warp scale = {scale:.4g})")
     plotter.add_mesh(surface, scalars="displacement_magnitude", cmap=PARULA_EQUIV, show_edges=False)
     if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
-        _add_boundary_edge_overlay(plotter, grid, warp_vector_name="displacement", warp_factor=scale)
+        _add_boundary_edge_overlay(
+            plotter,
+            grid,
+            case_toml=case_toml,
+            artifacts=artifacts,
+            warp_vector_name="displacement",
+            warp_factor=scale,
+        )
     _apply_matlab_camera(plotter)
     return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
@@ -943,7 +999,13 @@ def show_3d_deviatoric_surface_view(
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
     reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
     if "deviatoric_strain" in grid.point_data:
-        surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+        surface = _surface_for_display(
+            grid,
+            case_toml=case_toml,
+            artifacts=artifacts,
+            nonlinear_subdivision=subdivision,
+            point_array_names=("deviatoric_strain",),
+        )
         surface = _decimate_display_mesh(surface, reduction=reduction)
         surface = _optimize_display_mesh(surface, keep_point_arrays=("deviatoric_strain",))
         plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
@@ -956,11 +1018,17 @@ def show_3d_deviatoric_surface_view(
             lighting=False,
         )
         if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
-            _add_boundary_edge_overlay(plotter, grid)
+            _add_boundary_edge_overlay(plotter, grid, case_toml=case_toml, artifacts=artifacts)
         _apply_matlab_camera(plotter)
         return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
     if "deviatoric_strain" in grid.cell_data:
-        surface = _extract_surface_for_display(grid, nonlinear_subdivision=subdivision)
+        surface = _surface_for_display(
+            grid,
+            case_toml=case_toml,
+            artifacts=artifacts,
+            nonlinear_subdivision=subdivision,
+            cell_data_from_parent={"deviatoric_strain": np.asarray(grid.cell_data["deviatoric_strain"], dtype=np.float64)},
+        )
         surface = _decimate_display_mesh(surface, reduction=reduction)
         surface = _optimize_display_mesh(surface, keep_cell_arrays=("deviatoric_strain",))
         plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
@@ -973,7 +1041,7 @@ def show_3d_deviatoric_surface_view(
             lighting=False,
         )
         if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
-            _add_boundary_edge_overlay(plotter, grid)
+            _add_boundary_edge_overlay(plotter, grid, case_toml=case_toml, artifacts=artifacts)
         _apply_matlab_camera(plotter)
         return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
@@ -1005,7 +1073,7 @@ def show_3d_deviatoric_surface_view(
         lighting=False,
     )
     if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
-        _add_boundary_edge_overlay(plotter, grid)
+        _add_boundary_edge_overlay(plotter, grid, case_toml=case_toml, artifacts=artifacts)
     _apply_matlab_camera(plotter)
     return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
@@ -1030,7 +1098,7 @@ def show_3d_deviatoric_slices(
     if not any(plane_map.values()):
         return "No MATLAB slice planes are configured for this benchmark."
     pv = _import_pyvista()
-    grid = pv.read(artifacts.vtu_path)
+    grid = _slice_source_grid(pv.read(artifacts.vtu_path), artifacts=artifacts, case_toml=case_toml)
     if "deviatoric_strain" in grid.point_data:
         point_grid = grid
         values = np.asarray(grid.point_data["deviatoric_strain"], dtype=np.float64)
@@ -1114,6 +1182,37 @@ def _slice_refinement_levels(case_toml: Path) -> int:
     return 1 if _elem_type(case_toml) == "P4" else 0
 
 
+def _slice_source_grid(grid, *, artifacts: RunArtifacts, case_toml: Path):
+    if int(_load_runtime_config(case_toml).problem.dimension) != 3 or _elem_type(case_toml) != "P2":
+        return grid
+    try:
+        case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
+    except Exception:
+        return grid
+    if not case_mesh.cell_blocks:
+        return grid
+    cell_type, cells = case_mesh.cell_blocks[0]
+    cell_block = np.asarray(cells, dtype=np.int64)
+    if cell_type != "tetra10" or cell_block.ndim != 2 or cell_block.shape[1] != 10 or cell_block.shape[0] != grid.n_cells:
+        return grid
+    if case_mesh.points.shape != np.asarray(grid.points).shape or not np.allclose(case_mesh.points, np.asarray(grid.points)):
+        return grid
+
+    # Internal quadratic tetra order is [v0, v1, v2, v3, e01, e12, e02, e13, e23, e03].
+    # VTK_QUADRATIC_TETRA expects [v0, v1, v2, v3, e01, e12, e02, e03, e13, e23].
+    canonical = cell_block[:, [0, 1, 2, 3, 4, 5, 6, 9, 7, 8]]
+    pv = _import_pyvista()
+    n_nodes = canonical.shape[1]
+    cell_array = np.column_stack((np.full(canonical.shape[0], n_nodes, dtype=np.int64), canonical)).reshape(-1)
+    cell_types = np.full(canonical.shape[0], int(pv.CellType.QUADRATIC_TETRA), dtype=np.uint8)
+    corrected = pv.UnstructuredGrid(cell_array, cell_types, np.asarray(grid.points, dtype=np.float64))
+    for name in list(getattr(grid, "point_data", {}).keys()):
+        corrected.point_data[name] = np.asarray(grid.point_data[name])
+    for name in list(getattr(grid, "cell_data", {}).keys()):
+        corrected.cell_data[name] = np.asarray(grid.cell_data[name])
+    return corrected
+
+
 def _refine_slice_for_display(dataset, source_grid, *, case_toml: Path):
     levels = _slice_refinement_levels(case_toml)
     if levels <= 0 or getattr(dataset, "n_cells", 0) == 0:
@@ -1128,16 +1227,82 @@ def _refine_slice_for_display(dataset, source_grid, *, case_toml: Path):
     return refined.sample(source_grid)
 
 
+def _use_explicit_surface_builder(case_toml: Path) -> bool:
+    return _elem_type(case_toml) in {"P1", "P2"}
+
+
+def _build_explicit_boundary_surface(
+    dataset,
+    *,
+    case_toml: Path,
+    artifacts: RunArtifacts,
+    point_array_names: tuple[str, ...] = (),
+    cell_data_from_parent: dict[str, np.ndarray] | None = None,
+):
+    pv = _import_pyvista()
+    case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
+    surf = np.asarray(case_mesh.surf, dtype=np.int64)
+    if surf.size == 0:
+        return pv.PolyData()
+
+    triangles, face_ids = _build_plotting_mesh_with_face_ids(surf)
+    used_nodes, inverse = np.unique(triangles.reshape(-1), return_inverse=True)
+    local_triangles = inverse.reshape(triangles.shape)
+    faces = np.column_stack((np.full(local_triangles.shape[0], 3, dtype=np.int64), local_triangles)).reshape(-1)
+    surface = pv.PolyData(np.asarray(dataset.points[used_nodes], dtype=np.float64), faces)
+
+    for name in point_array_names:
+        if name not in dataset.point_data:
+            continue
+        surface.point_data[name] = np.asarray(dataset.point_data[name])[used_nodes]
+
+    if cell_data_from_parent:
+        parent = _surface_parent_elements(np.asarray(case_mesh.elem, dtype=np.int64), surf)
+        for name, values in cell_data_from_parent.items():
+            arr = np.asarray(values).reshape(-1)
+            surface.cell_data[name] = arr[parent[face_ids]]
+    return surface
+
+
+def _surface_for_display(
+    dataset,
+    *,
+    case_toml: Path,
+    artifacts: RunArtifacts,
+    nonlinear_subdivision: int = 4,
+    point_array_names: tuple[str, ...] = (),
+    cell_data_from_parent: dict[str, np.ndarray] | None = None,
+):
+    if not _use_explicit_surface_builder(case_toml):
+        return _extract_surface_for_display(dataset, nonlinear_subdivision=nonlinear_subdivision)
+
+    return _build_explicit_boundary_surface(
+        dataset,
+        case_toml=case_toml,
+        artifacts=artifacts,
+        point_array_names=point_array_names,
+        cell_data_from_parent=cell_data_from_parent,
+    )
+
+
 def _add_boundary_edge_overlay(
     plotter,
     dataset,
     *,
+    case_toml: Path,
+    artifacts: RunArtifacts,
     warp_vector_name: str | None = None,
     warp_factor: float = 1.0,
     color: str = "#1f1f1f",
     line_width: float = 1.2,
 ):
-    edge_surface = _extract_surface_for_display(dataset, nonlinear_subdivision=0)
+    edge_surface = _surface_for_display(
+        dataset,
+        case_toml=case_toml,
+        artifacts=artifacts,
+        nonlinear_subdivision=0,
+        point_array_names=((warp_vector_name,) if warp_vector_name is not None else ()),
+    )
     keep_arrays = (warp_vector_name,) if warp_vector_name is not None else ()
     edge_surface = _optimize_display_mesh(edge_surface, keep_point_arrays=keep_arrays)
     if warp_vector_name is not None and warp_vector_name in edge_surface.point_data:
@@ -1198,7 +1363,7 @@ def _display_nonlinear_surface_subdivision(case_toml: Path, *, override: int | N
     if override is not None:
         return max(0, int(override))
     metadata = load_case_metadata(case_toml)
-    return max(0, int(metadata.get("nonlinear_surface_subdivision", 4)))
+    return max(0, int(metadata.get("nonlinear_surface_subdivision", 0)))
 
 
 def _display_boundary_edge_overlay(case_toml: Path, *, override: bool | None = None) -> bool:
@@ -1337,7 +1502,7 @@ def _comsol_ssr_node_permutation(case_toml: Path, artifacts: RunArtifacts) -> np
     from slope_stability.mesh import load_mesh_p2_comsol, reorder_mesh_nodes
 
     cfg = _load_runtime_config(case_toml)
-    if cfg.problem.case not in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr"}:
+    if cfg.problem.case not in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
         return None
     part_count = _artifacts_mpi_size(artifacts) if cfg.execution.node_ordering.lower() == "block_metis" else None
     mesh = load_mesh_p2_comsol(cfg.problem.mesh_path, boundary_type=1)
@@ -1440,7 +1605,7 @@ def _pore_pressure_field(
         raise KeyError("No pore-pressure field available in artifacts or VTU export")
 
     cfg = _load_runtime_config(case_toml)
-    if cfg.problem.case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr"}:
+    if cfg.problem.case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
         perm = _comsol_ssr_node_permutation(case_toml, artifacts)
         if perm is not None and perm.size == raw.size:
             return raw[perm]
@@ -1491,6 +1656,7 @@ def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], exec
     linear_solver = dict(cloned.get("linear_solver", {}))
     seepage = dict(cloned.get("seepage", {}))
     execution = dict(cloned.get("execution", {}))
+    export = dict(cloned.get("export", default_export_section()))
     case_id = str(problem.get("case", "")).lower()
     benchmark_name = case_toml.parent.name.lower()
 
@@ -1507,6 +1673,10 @@ def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], exec
     if execution:
         execution["mpi_distribute_by_nodes"] = bool(execution.get("mpi_distribute_by_nodes", True))
         cloned["execution"] = execution
+    export["write_custom_debug_bundle"] = False
+    export["write_history_json"] = False
+    export["write_solution_vtu"] = True
+    cloned["export"] = export
     if str(problem.get("analysis", "")).lower() == "seepage" and "linear_solver" in cloned:
         cloned["linear_solver"]["max_iterations"] = min(int(cloned["linear_solver"].get("max_iterations", 500)), 300)
     if case_id in {
@@ -1526,8 +1696,8 @@ def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], exec
         problem["elem_type"] = "P1"
         cloned["problem"] = problem
     if benchmark_name in {
-        "run_3d_hetero_ll",
-        "run_3d_homo_ll",
+        "slope_stability_3d_hetero_ll",
+        "slope_stability_3d_homo_ll",
     }:
         execution = dict(cloned.get("execution", {}))
         execution["mpi_distribute_by_nodes"] = False
@@ -1547,8 +1717,12 @@ def _profile_mpi_ranks(metadata: dict[str, Any], execution_profile: str) -> int:
 
 
 def _import_pyvista():
+    os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
     os.environ.setdefault("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
+    os.environ.setdefault("PYVISTA_TRAME_SERVER_PROXY_ENABLED", "true")
+    if os.environ.get("CODESPACES") == "true":
+        os.environ.setdefault("PYVISTA_TRAME_SERVER_PROXY_PREFIX", "/proxy/{port}/")
     import pyvista as pv
 
     return pv

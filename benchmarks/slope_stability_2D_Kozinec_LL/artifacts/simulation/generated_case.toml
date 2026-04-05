@@ -1,0 +1,118 @@
+[problem]
+name = "slope_stability_2D_Kozinec_LL"
+case = "2d_kozinec_ll"
+analysis = "ll"
+dimension = 2
+variant = "hetero"
+elem_type = "P1"
+davis_type = "B"
+seepage = false
+
+[case_data]
+mesh_dir = "/home/beremi/repos/slope_stability-1/meshes/2d_kozinec"
+
+[execution]
+node_ordering = "none"
+mpi_distribute_by_nodes = false
+constitutive_mode = "global"
+
+[continuation]
+method = "indirect"
+lambda_ell = 1.0
+d_t_min = 0.001
+d_omega_ini_scale = 0.03333333333333333
+omega_max = 200000.0
+step_max = 2
+
+[newton]
+it_max = 200
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 0.1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+threads = 1
+
+[export]
+write_custom_debug_bundle = false
+write_history_json = false
+write_solution_vtu = true
+custom_debug_name = "run_debug.h5"
+history_name = "continuation_history.json"
+solution_name = "final_solution.vtu"
+
+[[materials]]
+name = "subdomain_1"
+c0 = 9.0
+phi = 26.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.3
+gamma_unsat = 20.7
+
+[[materials]]
+name = "subdomain_2"
+c0 = 2.0
+phi = 33.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 19.0
+gamma_unsat = 20.5
+
+[[materials]]
+name = "subdomain_3"
+c0 = 5.0
+phi = 27.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 19.4
+gamma_unsat = 21.4
+
+[[materials]]
+name = "subdomain_4"
+c0 = 3.0
+phi = 13.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.0
+gamma_unsat = 20.5
+
+[[materials]]
+name = "subdomain_5"
+c0 = 5.0
+phi = 27.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 19.4
+gamma_unsat = 21.4
+
+[[materials]]
+name = "subdomain_6"
+c0 = 3.0
+phi = 13.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.0
+gamma_unsat = 20.5
+
+[[materials]]
+name = "subdomain_7"
+c0 = 1.0
+phi = 45.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.5
+gamma_unsat = 20.6

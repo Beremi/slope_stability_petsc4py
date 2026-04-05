@@ -1,0 +1,45 @@
+\chapter{Newton Solvers and Damping: Inactive Branches}
+\label{app:newton}
+
+This appendix chapter collects Newton interfaces and solver interactions that
+remain implemented but are not exercised by the committed default PMG
+benchmark.
+
+\section{Full-System Operator Mode}
+
+Some solver backends prefer the full operator instead of the reduced free-space
+matrix. In those cases Newton can keep a full PETSc operator and let the solver
+manage free indices internally. This branch is inactive for \code{pmg\_shell}
+because \code{full\_system\_preconditioner = false}.
+
+\section{Local Full-Operator Builders}
+
+The constitutive layer also exposes:
+\begin{itemize}
+\item \code{build\_F\_local(...)},
+\item \code{build\_F\_free\_local(...)},
+\item related local-output interfaces.
+\end{itemize}
+
+These support PETSc full-operator workflows that consume owned-row local data
+directly. They are not the mainline PMG-shell path.
+
+\section{Separate Explicit Preconditioning Matrices}
+
+The broader PETSc framework can request an explicit preconditioning matrix
+separate from the operator used in the Krylov solve. Depending on solver policy,
+that matrix can come from:
+\begin{itemize}
+\item the elastic operator,
+\item the tangent operator,
+\item the regularized operator.
+\end{itemize}
+
+The default PMG-shell benchmark keeps a narrower, fixed policy and therefore
+does not need the full generality discussed above.
+
+\section{Optional Warm Starts}
+
+The code also supports temporary first-iteration warm-start bases passed from
+continuation into Newton. Those features remain inactive in the committed
+benchmark because \code{continuation\_first\_newton\_warm\_start\_mode = none}.

@@ -122,7 +122,7 @@ def rebuild_case_mesh(cfg: RunCaseConfig, *, mpi_size: int = 1) -> CaseMesh:
             material=np.asarray(mesh.material, dtype=np.int64),
         )
 
-    if case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr"}:
+    if case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
         mesh = load_mesh_p2_comsol(cfg.problem.mesh_path, boundary_type=1)
         reordered = _maybe_reorder(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, cfg, part_count)
         return _build_case_mesh(

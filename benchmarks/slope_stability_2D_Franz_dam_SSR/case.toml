@@ -1,0 +1,162 @@
+[benchmark]
+title = "2D Franz dam SSR"
+matlab_script = "slope_stability_2D_Franz_dam_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 1
+suite = false
+
+[problem]
+name = "slope_stability_2D_Franz_dam_SSR"
+case = "2d_franz_dam_ssr"
+analysis = "ssr"
+dimension = 2
+variant = "hetero"
+elem_type = "P2"
+davis_type = "B"
+seepage = true
+
+[case_data]
+mesh_dir = "../../meshes/2d_franz_dam"
+
+[execution]
+node_ordering = "none"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_init = 0.7
+d_lambda_init = 0.1
+d_lambda_min = 1e-5
+d_lambda_diff_scaled_min = 1e-3
+omega_max = 1.0e10
+step_max = 100
+
+[newton]
+it_max = 50
+it_damp_max = 10
+tol = 1e-5
+r_min = 1e-4
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 1e-1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 500
+water_unit_weight = 9.81
+conductivity = [1.0e-5, 1.0e-4, 5.0e-5, 5.0e-6, 1.0e-9, 1.0e-4, 2.0e-9, 5.0e-6, 5.0e-5, 5.0e-4]
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true
+
+[notebook]
+family = "2d_seepage_continuation"
+material_palette = "franz_dam"
+
+[[materials]]
+name = "zone_1"
+c0 = 50.0
+phi = 42.0
+psi = 42.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 27.0
+gamma_unsat = 27.0
+
+[[materials]]
+name = "zone_2"
+c0 = 0.5
+phi = 41.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 22.0
+gamma_unsat = 22.0
+
+[[materials]]
+name = "zone_3"
+c0 = 0.5
+phi = 40.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 23.0
+gamma_unsat = 23.0
+
+[[materials]]
+name = "zone_4"
+c0 = 0.0
+phi = 38.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 23.0
+gamma_unsat = 23.0
+
+[[materials]]
+name = "zone_5"
+c0 = 10.0
+phi = 25.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 22.0
+gamma_unsat = 22.0
+
+[[materials]]
+name = "zone_6"
+c0 = 0.5
+phi = 41.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 22.0
+gamma_unsat = 22.0
+
+[[materials]]
+name = "zone_7"
+c0 = 75.0
+phi = 42.0
+psi = 42.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 27.0
+gamma_unsat = 27.0
+
+[[materials]]
+name = "zone_8"
+c0 = 0.0
+phi = 38.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 23.0
+gamma_unsat = 23.0
+
+[[materials]]
+name = "zone_9"
+c0 = 0.5
+phi = 41.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 23.0
+gamma_unsat = 23.0
+
+[[materials]]
+name = "zone_10"
+c0 = 0.5
+phi = 41.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 21.0
+gamma_unsat = 21.0

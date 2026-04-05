@@ -1,0 +1,47 @@
+[problem]
+name = "slope_stability_3D_hetero_LL"
+case = "3d_hetero_ssr"
+analysis = "ll"
+dimension = 3
+variant = "hetero"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+mesh_path = "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_ll/LL_hetero_ada_L1.msh"
+mesh_boundary_type = 0
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = false
+constitutive_mode = "global"
+
+[continuation]
+method = "indirect"
+lambda_ell = 1.0
+d_t_min = 0.001
+d_omega_ini_scale = 0.5
+omega_max = 80000000.0
+step_max = 2
+
+[newton]
+it_max = 200
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 0.1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+threads = 1
+
+[export]
+write_custom_debug_bundle = false
+write_history_json = false
+write_solution_vtu = true
+custom_debug_name = "run_debug.h5"
+history_name = "continuation_history.json"
+solution_name = "final_solution.vtu"

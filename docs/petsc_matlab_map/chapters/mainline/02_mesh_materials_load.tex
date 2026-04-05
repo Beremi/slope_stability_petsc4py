@@ -1,0 +1,106 @@
+\chapter{Mesh, Materials, and Load Assembly}
+
+On the current parallel PMG path, preprocessing still serves the same purpose
+as in MATLAB: turn the mesh and material table into the objects needed by the
+constitutive builder and continuation solver. The important difference is that
+the default path no longer starts by building one global \code{B} matrix and
+one global elastic matrix.
+
+\section{Mainline Preprocessing Sequence}
+
+For the committed 3D benchmark, \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py}
+performs the following sequence:
+\begin{enumerate}
+\item load the Gmsh mesh through \code{load\_mesh\_from\_file(...)},
+\item reorder nodes with \code{block\_metis},
+\item compute \code{n\_q} from \code{quadrature\_volume\_3d(elem\_type)},
+\item expand material rows over integration points through
+\code{heterogenous\_materials(...)},
+\item choose the lightweight MPI elastic path,
+\item assemble owned elastic rows through
+\code{assemble\_owned\_elastic\_rows\_for\_comm(...)},
+\item convert those rows into a PETSc AIJ matrix \code{K\_elast},
+\item gather the local right-hand-side pieces into the global body-force field
+\code{f\_V}.
+\end{enumerate}
+
+So the current default path reaches the same physical objects as MATLAB, but it
+reaches them through rank-owned assembly rather than a global sparse build.
+
+\section{Object Mapping on the Mainline Path}
+
+\begin{longtable}{@{}p{0.22\textwidth}p{0.34\textwidth}p{0.38\textwidth}@{}}
+\toprule
+Object & MATLAB meaning & Mainline PETSc meaning \\
+\midrule
+\endhead
+\code{coord} & nodal coordinates & reordered coordinates aligned with PETSc ownership \\
+\code{elem} & element connectivity & same connectivity after node permutation \\
+\code{surf} & boundary faces & same boundary meaning after node permutation \\
+\code{q\_mask} & free displacement mask & same mask, reused later by solver and free-DOF extraction \\
+\code{material\_identifier} & material row id per element & same element-wise id after reorder \\
+\code{c0}, \code{phi}, \code{psi}, \code{shear}, \code{bulk}, \code{lame}, \code{gamma} & integration-point material arrays & same arrays built by \code{heterogenous\_materials(...)} \\
+\code{K\_elast} & elastic stiffness matrix & PETSc AIJ matrix assembled from owned rows \\
+\code{f\_V} & body-force vector & global field formed by gathering rank-local body-force pieces \\
+\bottomrule
+\end{longtable}
+
+\section{Node Reordering Is Part of The Mainline}
+
+For the current benchmark, node reordering is not an optional PETSc tuning
+detail. It is part of the default path because the runner sets
+\code{node\_ordering = block\_metis}. That means:
+\begin{itemize}
+\item the numbering is chosen to align with MPI ownership,
+\item later owned-row matrix assembly uses that numbering directly,
+\item the constitutive and tangent chapters inherit this reordered ownership map.
+\end{itemize}
+
+MATLAB did not need an explicit public reordering stage because its global
+matrix lived in one address space.
+
+\section{Material Expansion Is Still A Direct Translation}
+
+\petscmod{mesh/materials.py::heterogenous\_materials} is still the closest
+translation of \matlabpkg{+ASSEMBLY/heterogenous\_materials.m}. It still:
+\begin{itemize}
+\item interprets material ids element-wise,
+\item converts \code{phi} and \code{psi} to radians,
+\item derives \code{shear}, \code{bulk}, and \code{lame},
+\item repeats material rows over the element quadrature rule,
+\item builds the integration-point weight term \code{gamma}.
+\end{itemize}
+
+For the non-seepage mainline run, the saturation mask is effectively fixed, so
+the mechanical body-force path is determined directly from the material table
+without any preceding seepage solve.
+
+\section{What The Mainline Path Does Not Build}
+
+The most important difference from the earlier document version is this:
+\begin{itemize}
+\item the current default PMG path does \textbf{not} use the global
+\code{assemble\_strain\_operator(...) + build\_elastic\_stiffness\_matrix(...)}
+route as its normal startup path,
+\item instead it builds owned elastic rows immediately and lets the owned
+tangent pattern carry the detailed strain geometry for later Newton updates.
+\end{itemize}
+
+The global reference assembly is still available, but it belongs in the annex
+because it is not the default parallel PMG route.
+
+\section{Where To Edit}
+
+\begin{itemize}
+\item \petscmod{mesh/loader.py} for mesh loading,
+\item \petscmod{mesh/reorder.py} for ownership-oriented numbering,
+\item \petscmod{mesh/materials.py} for integration-point material expansion,
+\item \petscmod{fem/distributed\_elastic.py} for the owned elastic precursor,
+\item \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py} for the exact mainline
+assembly order.
+\end{itemize}
+
+\section{Where The Other Preprocessing Paths Went}
+
+The global reference assembly, other node orderings, and seepage-oriented mesh
+loaders are moved to Appendix~\ref{app:mesh}.

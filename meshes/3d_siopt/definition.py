@@ -9,9 +9,9 @@ DEFINITION = {
     "default_mesh": "SIOPT_L0.msh",
     "mesh_files": sorted(path.name for path in ASSET_DIR.glob("*.msh")),
     "dirichlet_labels": {
-        "x": [1, 2],
+        "x": [1],
         "y": [5],
-        "z": [3, 4],
+        "z": [3],
     },
     "materials": [
         {
@@ -25,5 +25,5 @@ DEFINITION = {
             "gamma_unsat": 20.0,
         },
     ],
-    "notes": "SIOPT 3D benchmark family stored as Gmsh tet4 with family-local BC and material metadata.",
+    "notes": "SIOPT 3D benchmark family stored as Gmsh tet4 with family-local BC and material metadata; boundary label 5 is the glued bottom when boundary_type=1.",
 }

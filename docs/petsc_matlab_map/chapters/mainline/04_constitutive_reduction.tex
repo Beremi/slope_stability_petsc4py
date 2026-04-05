@@ -1,0 +1,103 @@
+\chapter{Constitutive Relationships and Reduction}
+
+The constitutive law itself is unchanged on the current PMG path:
+\begin{itemize}
+\item the same Mohr-Coulomb return mapping,
+\item the same Davis reduction,
+\item the same stress tensor \(S\),
+\item the same consistent tangent \(DS\).
+\end{itemize}
+
+What changes on the mainline path is how those quantities are owned, cached,
+and exposed to distributed PETSc operators.
+
+\section{Mainline Constitutive Cycle}
+
+For the committed benchmark, one constitutive evaluation still means:
+\begin{enumerate}
+\item reduce strength parameters for the current \(\lambda\),
+\item compute strain from the current displacement field,
+\item evaluate stresses and tangent blocks at integration points,
+\item assemble the internal force,
+\item build or refresh the tangent and regularized operators needed by Newton.
+\end{enumerate}
+
+That is the same cycle MATLAB authors already know.
+
+\section{What The Mainline Builder Owns}
+
+The mainline \code{ConstitutiveOperator} in
+\petscmod{constitutive/problem.py} owns:
+\begin{itemize}
+\item the material arrays \code{c0}, \code{phi}, \code{psi}, \code{shear},
+\code{bulk}, \code{lame},
+\item the free-DOF mask \code{q\_mask},
+\item the current stress and tangent state,
+\item the owned tangent metadata supplied by
+\code{OwnedTangentPattern},
+\item cached PETSc matrices for tangent and regularized operators on that owned
+pattern.
+\end{itemize}
+
+The widened class boundary is a PETSc requirement, not a constitutive change.
+
+\section{Mainline Ownership Mode: Overlap}
+
+For the committed 3D benchmark, the important constitutive fact is simple:
+\begin{itemize}
+\item \code{constitutive\_mode = overlap},
+\item the owned tangent pattern is prepared with
+\code{include\_unique = false},
+\item each rank evaluates constitutive data directly on the overlap integration
+points it needs for its owned rows,
+\item no unique-owner gather or exchange stage participates in the mainline
+run.
+\end{itemize}
+
+So the current benchmark should be read as an \emph{overlap-evaluated
+constitutive path}, not as a unique-owner recovery path.
+
+\section{Which Builder Interfaces Are Mainline}
+
+Because the linear solver backend is \code{pmg\_shell} and does not prefer the
+full-system operator, the mainline Newton path mainly consumes:
+\begin{itemize}
+\item \code{build\_F\_free(...)} or equivalent free-output residual builders,
+\item \code{build\_F\_K\_tangent\_reduced\_free(...)} and related free-output
+tangent builders,
+\item \code{build\_K\_regularized(...)} for the regularized owned-row PETSc
+matrix.
+\end{itemize}
+
+So although the class exposes many interfaces, the default 3D PMG route is the
+free-output interface family backed by owned-row caches.
+
+\section{What Stayed The Same For MATLAB Authors}
+
+The most important parity statement is still:
+\begin{itemize}
+\item \code{reduction(lambda)} still means strength reduction,
+\item strain still comes from the current displacement field,
+\item \code{constitutive\_problem\_3D(...)} still computes the same stresses and
+tangent blocks,
+\item the internal force and tangent still represent the same nonlinear
+mechanics.
+\end{itemize}
+
+The PETSc scaffolding around those steps exists because MPI ownership and solver
+reuse are now explicit.
+
+\section{Where To Edit}
+
+\begin{itemize}
+\item \petscmod{constitutive/reduction.py} for Davis reduction rules,
+\item \petscmod{constitutive/problem.py} for stress, tangent, residual, and
+regularized-operator exposure,
+\item \petscmod{fem/distributed\_tangent.py} when the owned-row constitutive
+interface changes.
+\end{itemize}
+
+\section{Where The Other Constitutive Modes Went}
+
+The global and unique-owner constitutive modes, along with the BDDC-specific
+builder interfaces, are moved to Appendix~\ref{app:constitutive}.

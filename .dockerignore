@@ -1,0 +1,13 @@
+.build/
+.git/
+.pytest_cache/
+.venv/
+.vscode/
+archives/
+artifacts/
+benchmarks/*/artifacts/
+docs/petsc_matlab_map/
+scripts_local/
+slope_stability_matlab/
+tests_local/
+tmp_viz_debug/

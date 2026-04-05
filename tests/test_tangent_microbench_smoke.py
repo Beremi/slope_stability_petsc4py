@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "archive" / "bench_tangent_kernels.py"
+SCRIPT = ROOT / "benchmarks" / "slope_stability_3D_hetero_SSR_default" / "archive" / "bench_tangent_kernels.py"
 
 
 def test_tangent_microbenchmark_smoke(tmp_path: Path) -> None:

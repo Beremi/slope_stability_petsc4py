@@ -1,0 +1,53 @@
+[problem]
+name = "run_3D_hetero_seepage_SSR_comsol_capture"
+case = "3d_hetero_seepage_ssr_comsol"
+analysis = "ssr"
+dimension = 3
+variant = "hetero"
+elem_type = "P2"
+davis_type = "B"
+seepage = true
+mesh_path = "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_ssr_comsol/comsol_mesh.msh"
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_init = 1.0
+d_lambda_init = 0.1
+d_lambda_min = 1e-05
+d_lambda_diff_scaled_min = 0.005
+omega_max = 340700000.0
+step_max = 2
+
+[newton]
+it_max = 50
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 0.1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+threads = 1
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 300
+water_unit_weight = 9.81
+conductivity = [1.0]
+
+[export]
+write_custom_debug_bundle = false
+write_history_json = false
+write_solution_vtu = true
+custom_debug_name = "run_debug.h5"
+history_name = "continuation_history.json"
+solution_name = "final_solution.vtu"

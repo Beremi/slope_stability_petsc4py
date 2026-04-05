@@ -1,0 +1,56 @@
+[benchmark]
+title = "3D heterogeneous LL"
+matlab_script = "slope_stability_3D_hetero_LL.m"
+comparison_kind = "continuation"
+mpi_ranks = 8
+suite = false
+
+[problem]
+name = "slope_stability_3D_hetero_LL"
+case = "3d_hetero_ssr"
+analysis = "ll"
+dimension = 3
+variant = "hetero"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+mesh_path = "../../meshes/3d_hetero_ll/LL_hetero_ada_L1.msh"
+mesh_boundary_type = 0
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_ell = 1.0
+d_t_min = 1e-3
+d_omega_ini_scale = 0.5
+omega_max = 8.0e7
+step_max = 100
+
+[newton]
+it_max = 200
+it_damp_max = 10
+tol = 1e-4
+r_min = 1e-4
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 1e-1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true
+
+[notebook]
+family = "3d_continuation"
+slice_planes_y = [35.0]
+slice_planes_z = [43.30127019, 64.95190529]
+strain_clim_scale_max = 0.25

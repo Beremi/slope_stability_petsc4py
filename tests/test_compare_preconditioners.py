@@ -9,7 +9,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "benchmarks" / "3d_hetero_ssr_default" / "archive" / "compare_preconditioners.py"
+MODULE_PATH = ROOT / "benchmarks" / "slope_stability_3D_hetero_SSR_default" / "archive" / "compare_preconditioners.py"
 
 
 def _load_module():
@@ -72,8 +72,8 @@ def test_final_report_handles_reused_baseline_and_gated_out_bddc() -> None:
         mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
         summary_payload=summary_payload,
         baseline_summary_path=ROOT / "artifacts" / "p2_p4_compare_rank8_final_memfix" / "summary.json",
-        baseline_report_path=ROOT / "benchmarks" / "3d_hetero_ssr_default" / "archive" / "report_p2_vs_p4_rank8_final_memfix.md",
-        recycle_failure_report=ROOT / "benchmarks" / "3d_hetero_ssr_default" / "archive" / "report_p4_rank8_recycle_guard80_failed.md",
+        baseline_report_path=ROOT / "benchmarks" / "slope_stability_3D_hetero_SSR_default" / "archive" / "report_p2_vs_p4_rank8_final_memfix.md",
+        recycle_failure_report=ROOT / "benchmarks" / "slope_stability_3D_hetero_SSR_default" / "archive" / "report_p4_rank8_recycle_guard80_failed.md",
     )
 
     text = "\n".join(lines)

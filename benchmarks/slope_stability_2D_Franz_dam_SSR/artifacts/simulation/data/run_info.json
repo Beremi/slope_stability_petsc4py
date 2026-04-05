@@ -1,0 +1,188 @@
+{
+  "run_info": {
+    "timestamp": "2026-04-04T05:03:44",
+    "runtime_seconds": 289.69466441799887,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "analysis": "ssr",
+    "continuation_method": "indirect",
+    "case_name": "franz_dam",
+    "rank_count": 1,
+    "step_count": 11
+  },
+  "params": {
+    "case_name": "franz_dam",
+    "analysis": "ssr",
+    "continuation_method": "indirect",
+    "elem_type": "P2",
+    "davis_type": "B",
+    "material_rows": [
+      [
+        50.0,
+        42.0,
+        42.0,
+        16000.0,
+        0.4,
+        27.0,
+        27.0
+      ],
+      [
+        0.5,
+        41.0,
+        0.0,
+        16000.0,
+        0.4,
+        22.0,
+        22.0
+      ],
+      [
+        0.5,
+        40.0,
+        0.0,
+        16000.0,
+        0.4,
+        23.0,
+        23.0
+      ],
+      [
+        0.0,
+        38.0,
+        0.0,
+        16000.0,
+        0.4,
+        23.0,
+        23.0
+      ],
+      [
+        10.0,
+        25.0,
+        0.0,
+        16000.0,
+        0.4,
+        22.0,
+        22.0
+      ],
+      [
+        0.5,
+        41.0,
+        0.0,
+        16000.0,
+        0.4,
+        22.0,
+        22.0
+      ],
+      [
+        75.0,
+        42.0,
+        42.0,
+        16000.0,
+        0.4,
+        27.0,
+        27.0
+      ],
+      [
+        0.0,
+        38.0,
+        0.0,
+        16000.0,
+        0.4,
+        23.0,
+        23.0
+      ],
+      [
+        0.5,
+        41.0,
+        0.0,
+        16000.0,
+        0.4,
+        23.0,
+        23.0
+      ],
+      [
+        0.5,
+        41.0,
+        0.0,
+        16000.0,
+        0.4,
+        21.0,
+        21.0
+      ]
+    ],
+    "hydraulic_conductivity": [
+      1e-05,
+      0.0001,
+      5e-05,
+      5e-06,
+      1e-09,
+      0.0001,
+      2e-09,
+      5e-06,
+      5e-05,
+      0.0005
+    ],
+    "node_ordering": "none",
+    "lambda_init": 0.7,
+    "d_lambda_init": 0.1,
+    "d_lambda_min": 1e-05,
+    "d_lambda_diff_scaled_min": 0.001,
+    "lambda_ell": 1.0,
+    "d_omega_ini_scale": 0.2,
+    "d_t_min": 0.001,
+    "omega_max_stop": 10000000000.0,
+    "step_max": 100,
+    "it_newt_max": 50,
+    "it_damp_max": 10,
+    "tol": 1e-05,
+    "r_min": 0.0001,
+    "linear_tolerance": 0.1,
+    "linear_max_iter": 100,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "pc_hypre_coarsen_type": "HMIS",
+    "pc_hypre_interp_type": "ext+i",
+    "pc_hypre_strong_threshold": null,
+    "recycle_preconditioner": true,
+    "constitutive_mode": "overlap",
+    "tangent_kernel": "rows",
+    "mesh_dir": "/home/beremi/repos/slope_stability-1/meshes/2d_franz_dam"
+  },
+  "mesh": {
+    "coord_shape": [
+      2,
+      10049
+    ],
+    "elem_shape": [
+      6,
+      4920
+    ],
+    "surf_shape": [
+      3,
+      208
+    ]
+  },
+  "timings": {
+    "constitutive": {
+      "reduction": 5.366854943102226,
+      "stress": 39.18434628774412,
+      "stress_tangent": 8.862475024536252,
+      "build_F": 3.230396398343146,
+      "build_F_K_tangent": 0.0,
+      "build_tangent_local": 86.30457100830972,
+      "local_strain": 1.584659158717841,
+      "local_constitutive": 45.51990474388003,
+      "local_constitutive_comm": 0.0,
+      "local_force_assembly": 3.2276887965854257,
+      "local_force_gather": 0.0,
+      "potential": 0.0
+    },
+    "linear": {
+      "init_linear_iterations": 0,
+      "init_linear_solve_time": 0.0,
+      "init_linear_preconditioner_time": 0.0,
+      "init_linear_orthogonalization_time": 0.0,
+      "attempt_linear_iterations_total": 24820,
+      "attempt_linear_solve_time_total": 131.87703562737443,
+      "attempt_linear_preconditioner_time_total": 0.5966656072996557,
+      "attempt_linear_orthogonalization_time_total": 8.47658497444354
+    },
+    "continuation_total_wall_time": 289.69429945992306
+  }
+}

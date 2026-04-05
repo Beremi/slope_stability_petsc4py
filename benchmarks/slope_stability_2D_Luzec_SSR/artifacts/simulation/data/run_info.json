@@ -1,0 +1,168 @@
+{
+  "run_info": {
+    "timestamp": "2026-04-04T05:13:37",
+    "runtime_seconds": 154.20316949882545,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "analysis": "ssr",
+    "continuation_method": "indirect",
+    "case_name": "luzec",
+    "rank_count": 1,
+    "step_count": 16
+  },
+  "params": {
+    "case_name": "luzec",
+    "analysis": "ssr",
+    "continuation_method": "indirect",
+    "elem_type": "P2",
+    "davis_type": "B",
+    "material_rows": [
+      [
+        14.0,
+        21.0,
+        0.0,
+        16000.0,
+        0.4,
+        21.0,
+        21.0
+      ],
+      [
+        1.0,
+        33.0,
+        0.0,
+        16000.0,
+        0.4,
+        21.0,
+        19.0
+      ],
+      [
+        7.5,
+        30.25,
+        0.0,
+        16000.0,
+        0.4,
+        22.0,
+        21.0
+      ],
+      [
+        1.6,
+        24.0,
+        0.0,
+        16000.0,
+        0.4,
+        21.0,
+        19.0
+      ],
+      [
+        2.0,
+        37.0,
+        0.0,
+        16000.0,
+        0.4,
+        21.0,
+        21.0
+      ],
+      [
+        1.6,
+        24.0,
+        0.0,
+        16000.0,
+        0.4,
+        21.0,
+        19.0
+      ],
+      [
+        50.0,
+        45.0,
+        0.0,
+        16000.0,
+        0.4,
+        19.0,
+        19.0
+      ],
+      [
+        1.6,
+        24.0,
+        0.0,
+        16000.0,
+        0.4,
+        21.0,
+        19.0
+      ]
+    ],
+    "hydraulic_conductivity": [
+      0.000864,
+      86.4,
+      0.000864,
+      0.86,
+      86.4,
+      0.86,
+      0.000864,
+      0.86
+    ],
+    "node_ordering": "none",
+    "lambda_init": 0.7,
+    "d_lambda_init": 0.1,
+    "d_lambda_min": 1e-05,
+    "d_lambda_diff_scaled_min": 0.001,
+    "lambda_ell": 1.0,
+    "d_omega_ini_scale": 0.2,
+    "d_t_min": 0.001,
+    "omega_max_stop": 70000000.0,
+    "step_max": 100,
+    "it_newt_max": 50,
+    "it_damp_max": 10,
+    "tol": 0.0001,
+    "r_min": 0.0001,
+    "linear_tolerance": 0.1,
+    "linear_max_iter": 100,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "pc_hypre_coarsen_type": "HMIS",
+    "pc_hypre_interp_type": "ext+i",
+    "pc_hypre_strong_threshold": null,
+    "recycle_preconditioner": true,
+    "constitutive_mode": "overlap",
+    "tangent_kernel": "rows",
+    "mesh_dir": "/home/beremi/repos/slope_stability-1/meshes/2d_luzec"
+  },
+  "mesh": {
+    "coord_shape": [
+      2,
+      17913
+    ],
+    "elem_shape": [
+      6,
+      8772
+    ],
+    "surf_shape": [
+      3,
+      368
+    ]
+  },
+  "timings": {
+    "constitutive": {
+      "reduction": 1.477632479975,
+      "stress": 13.666853648843244,
+      "stress_tangent": 4.8885777266696095,
+      "build_F": 1.108957696473226,
+      "build_F_K_tangent": 0.0,
+      "build_tangent_local": 43.25188965443522,
+      "local_strain": 0.5372986041475087,
+      "local_constitutive": 17.385074712568894,
+      "local_constitutive_comm": 0.0,
+      "local_force_assembly": 1.108272845391184,
+      "local_force_gather": 0.0,
+      "potential": 0.0
+    },
+    "linear": {
+      "init_linear_iterations": 0,
+      "init_linear_solve_time": 0.0,
+      "init_linear_preconditioner_time": 0.0,
+      "init_linear_orthogonalization_time": 0.0,
+      "attempt_linear_iterations_total": 7586,
+      "attempt_linear_solve_time_total": 85.88334493036382,
+      "attempt_linear_preconditioner_time_total": 0.26742794271558523,
+      "attempt_linear_orthogonalization_time_total": 1.7290772206615657
+    },
+    "continuation_total_wall_time": 154.20260008098558
+  }
+}

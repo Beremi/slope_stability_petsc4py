@@ -300,7 +300,13 @@ def _build_regularized_if_available(constitutive_matrix_builder, *, lam=None, U,
 def _build_regularized_from_cached_if_available(constitutive_matrix_builder, r: float):
     fn = getattr(constitutive_matrix_builder, "build_K_regularized", None)
     if callable(fn):
-        return fn(r)
+        try:
+            return fn(r)
+        except ValueError as exc:
+            message = str(exc)
+            if "Tangent DS not computed" in message or "DS must have shape" in message:
+                return None
+            raise
     return None
 
 

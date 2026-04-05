@@ -1,0 +1,45 @@
+\chapter{Constitutive Relationships and Reduction: Inactive Modes}
+\label{app:constitutive}
+
+This appendix chapter collects constitutive execution modes and builder
+interfaces that are present in the repository but inactive in the committed
+parallel PMG benchmark.
+
+\section{Alternative Ownership Modes}
+
+\begin{longtable}{@{}p{0.23\textwidth}p{0.31\textwidth}p{0.38\textwidth}@{}}
+\toprule
+Mode & Meaning & Why it exists \\
+\midrule
+\endhead
+\code{global} & build and use global \code{B}, \code{S}, and \code{DS} arrays & closest MATLAB parity and easiest validation path \\
+\code{unique} / \code{unique\_gather} & evaluate only unique integration points, then gather & explicit ownership semantics \\
+\code{unique\_exchange} & unique-owner evaluation plus neighbor exchange & lower communication than full gather \\
+\bottomrule
+\end{longtable}
+
+These are execution strategies, not different constitutive laws.
+
+\section{Why They Are Not Mainline Today}
+
+For the committed 3D benchmark:
+\begin{itemize}
+\item \code{global} is a reference and validation path,
+\item \code{unique*} modes are alternative MPI ownership experiments,
+\item the default run stays in \code{overlap} because it maps directly onto the
+owned-row tangent assembly used by the PMG path.
+\end{itemize}
+
+\section{Additional Builder Interfaces}
+
+The Python constitutive layer also exposes interfaces that are not central to
+the default PMG run:
+\begin{itemize}
+\item \code{build\_F(...)} and \code{build\_F\_all(...)} for full-field outputs,
+\item \code{build\_F\_local(...)} and \code{build\_F\_free\_local(...)} for
+local full-operator branches,
+\item \code{build\_bddc\_*} methods for BDDC local-subdomain matrices.
+\end{itemize}
+
+They are documented here because they matter for solver backends other than the
+mainline \code{pmg\_shell} route.

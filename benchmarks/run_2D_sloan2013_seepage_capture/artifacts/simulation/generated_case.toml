@@ -1,0 +1,32 @@
+[problem]
+name = "run_2D_sloan2013_seepage_capture"
+case = "2d_sloan2013_seepage"
+analysis = "seepage"
+dimension = 2
+variant = "hetero"
+elem_type = "P1"
+davis_type = "B"
+seepage = true
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"
+tolerance = 1e-10
+max_iterations = 120
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+threads = 1
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 300
+nonlinear_max_iter = 100
+water_unit_weight = 9.81
+conductivity = [1.0, 1.0]
+
+[export]
+write_custom_debug_bundle = false
+write_history_json = false
+write_solution_vtu = true
+custom_debug_name = "run_debug.h5"
+history_name = "continuation_history.json"
+solution_name = "final_solution.vtu"

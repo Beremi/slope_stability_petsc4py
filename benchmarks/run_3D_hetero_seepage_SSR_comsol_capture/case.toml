@@ -12,7 +12,7 @@ slice_planes_z = [1.0e-16, 21.6506]
 strain_clim_scale_max = 0.25
 
 [problem]
-name = "benchmark_3d_hetero_seepage_ssr_comsol"
+name = "run_3D_hetero_seepage_SSR_comsol_capture"
 case = "3d_hetero_seepage_ssr_comsol"
 analysis = "ssr"
 dimension = 3

@@ -1,0 +1,97 @@
+\chapter{Linear Solvers and PETSc}
+
+For the committed 3D benchmark, the key linear-solver fact is that the outer
+solver family and the inner preconditioner backend are now separate controls.
+The current mainline combination is:
+\begin{itemize}
+\item \code{solver\_type = PETSC\_MATLAB\_DFGMRES\_HYPRE\_NULLSPACE},
+\item \code{pc\_backend = pmg\_shell}.
+\end{itemize}
+
+So the historical solver-type name is preserved, but the actual backend used by
+the default benchmark is the PMG shell path.
+
+\section{Mainline Role Map}
+
+\begin{longtable}{@{}p{0.29\textwidth}p{0.28\textwidth}p{0.35\textwidth}@{}}
+\toprule
+MATLAB role & MATLAB location & Mainline PETSc location \\
+\midrule
+\endhead
+Solver factory & \matlabpkg{+LINEAR\_SOLVERS/set\_linear\_solver.m} & \petscmod{linear/solver.py::SolverFactory.create} \\
+Deflated FGMRES logic & \matlabpkg{+LINEAR\_SOLVERS/DFGMRES.m} & MATLAB-style PETSc wrappers in \petscmod{linear/solver.py} \\
+Iteration logging & \matlabpkg{+LINEAR\_SOLVERS/IterationCollector.m} & \petscmod{linear/collector.py} \\
+Near-nullspace helpers & \matlabpkg{+LINEAR\_SOLVERS/near\_null\_space\_elasticity\_3D.m} & \petscmod{linear/preconditioners.py} and solver setup \\
+\bottomrule
+\end{longtable}
+
+\section{What The Mainline Solver Actually Means}
+
+For the default parallel PMG benchmark, the solver stack should be read as:
+\begin{itemize}
+\item \textbf{outer solver family:} PETSc-wrapped MATLAB-style deflated FGMRES,
+\item \textbf{fine-grid operator:} the reduced free-space regularized operator
+coming from the owned-row tangent path,
+\item \textbf{preconditioner backend:} \code{pmg\_shell}.
+\end{itemize}
+
+That is the decisive interpretation. The benchmark is not currently using the
+Hypre backend despite the historical text inside \code{solver\_type}.
+
+\section{PMG Shell Requirements}
+
+The PMG-shell path enforces a narrower contract than the broader solver
+framework:
+\begin{itemize}
+\item \code{preconditioner\_matrix\_source = tangent},
+\item \code{preconditioner\_matrix\_policy = current},
+\item \code{preconditioner\_rebuild\_policy = every\_newton},
+\item \code{full\_system\_preconditioner = false}.
+\end{itemize}
+
+Those requirements matter because they determine which constitutive and Newton
+interfaces are actually exercised. In particular, they keep the mainline path on
+the reduced free-space operator rather than the full-system or BDDC branches.
+
+\section{Mainline Solver Lifecycle}
+
+At each nonlinear step, the solver side does the following:
+\begin{enumerate}
+\item receive the current reduced operator from Newton,
+\item decide whether the PMG preconditioner should be rebuilt,
+\item configure the PMG shell multilevel objects,
+\item solve the reduced linear system with the PETSc/MATLAB deflated FGMRES
+wrapper,
+\item record iteration counts, solve time, preconditioner time, and
+orthogonalization time.
+\end{enumerate}
+
+This is the same broad job as the MATLAB solver object, but PETSc makes the
+preconditioner lifecycle explicit.
+
+\section{How The Mainline Path Relates To PMG}
+
+The custom \code{pmg\_shell} backend is the current default PMG route for the
+3D benchmark. In practical terms it means:
+\begin{itemize}
+\item the fine operator comes from the distributed owned-row tangent assembly,
+\item the operator passed to the solve is the reduced free-space operator,
+\item the preconditioner is rebuilt from the current tangent each Newton step.
+\end{itemize}
+
+That is the mainline meaning of ``parallel PMG'' in this repository today.
+
+\section{Where To Edit}
+
+\begin{itemize}
+\item \petscmod{linear/solver.py} for solver-family selection, PMG-shell setup,
+and preconditioner lifecycle,
+\item \petscmod{linear/preconditioners.py} for helper objects and nullspace
+construction,
+\item \petscmod{linear/collector.py} for iteration and timing collection.
+\end{itemize}
+
+\section{Where The Other Solver Families Went}
+
+Hypre, GAMG, BDDC, direct solves, built-in PETSc \code{pmg}, and other solver
+policies are moved to Appendix~\ref{app:linear}.

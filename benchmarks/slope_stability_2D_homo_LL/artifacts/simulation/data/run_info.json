@@ -1,0 +1,99 @@
+{
+  "run_info": {
+    "timestamp": "2026-04-04T05:06:13",
+    "runtime_seconds": 145.3284499309957,
+    "mpi_size": 8,
+    "mesh_nodes": 10641,
+    "mesh_elements": 5200,
+    "unknowns": 20840,
+    "analysis": "ll",
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "step_count": 17
+  },
+  "params": {
+    "analysis": "ll",
+    "elem_type": "P2",
+    "davis_type": "B",
+    "h": 0.5,
+    "x1": 15.0,
+    "x2": 10.000000000000002,
+    "x3": 15.0,
+    "y1": 10.0,
+    "y2": 10.0,
+    "beta_deg": 45.0,
+    "material_row": [
+      6.0,
+      45.0,
+      0.0,
+      40000.0,
+      0.3,
+      20.0,
+      20.0
+    ],
+    "node_ordering": "block_metis",
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "lambda_init": 1.0,
+    "d_lambda_init": 0.1,
+    "d_lambda_min": 0.001,
+    "d_lambda_diff_scaled_min": 0.001,
+    "lambda_ell": 1.0,
+    "d_omega_ini_scale": 0.2,
+    "d_t_min": 0.001,
+    "omega_max_stop": 2000.0,
+    "step_max": 100,
+    "it_newt_max": 100,
+    "it_damp_max": 10,
+    "tol": 0.0001,
+    "r_min": 0.0001,
+    "linear_tolerance": 0.1,
+    "linear_max_iter": 100,
+    "mpi_distribute_by_nodes": true,
+    "recycle_preconditioner": true,
+    "constitutive_mode": "overlap",
+    "tangent_kernel": "rows",
+    "pc_hypre_coarsen_type": "HMIS",
+    "pc_hypre_interp_type": "ext+i",
+    "pc_hypre_strong_threshold": null
+  },
+  "mesh": {
+    "coord_shape": [
+      2,
+      10641
+    ],
+    "elem_shape": [
+      6,
+      5200
+    ],
+    "surf_shape": [
+      3,
+      240
+    ]
+  },
+  "timings": {
+    "constitutive": {
+      "reduction": 0.0002924001310020685,
+      "stress": 3.3266276030335575,
+      "stress_tangent": 2.722808143356815,
+      "build_F": 0.704884760081768,
+      "build_F_K_tangent": 0.0,
+      "build_tangent_local": 24.110989578301087,
+      "local_strain": 0.5028724179137498,
+      "local_constitutive": 5.399255215656012,
+      "local_constitutive_comm": 0.0,
+      "local_force_assembly": 0.7031024573370814,
+      "local_force_gather": 0.0,
+      "potential": 0.0
+    },
+    "linear": {
+      "init_linear_iterations": 3,
+      "init_linear_solve_time": 0.010506872786208987,
+      "init_linear_preconditioner_time": 0.030468858079984784,
+      "init_linear_orthogonalization_time": 0.0,
+      "attempt_linear_iterations_total": 29556,
+      "attempt_linear_solve_time_total": 95.40020506014116,
+      "attempt_linear_preconditioner_time_total": 1.0500101721845567,
+      "attempt_linear_orthogonalization_time_total": 11.290556925581768
+    },
+    "continuation_total_wall_time": 145.28610960999504
+  }
+}

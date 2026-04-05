@@ -140,7 +140,7 @@ def _visualisation_controls_cell():
         EXECUTION_PROFILE = "smoke"
         MPI_RANKS = None
         JUPYTER_BACKEND_OVERRIDE = None  # set to "client", "trame", "server", "html", or "static"; None uses case.toml
-        SURFACE_SUBDIVISION_OVERRIDE = None  # set to 1, 2, 3, or 4 to trade quality for speed; None uses case.toml default
+        SURFACE_SUBDIVISION_OVERRIDE = None  # set to 0, 1, 2, 3, or 4 to trade preview fidelity for speed; None uses case.toml default
         SURFACE_DECIMATE_REDUCTION_OVERRIDE = None  # set e.g. 0.5, 0.75, or 0.9 for a lighter preview mesh
         BOUNDARY_EDGE_OVERLAY_OVERRIDE = None  # set to True to draw coarse tetra boundary edges over smooth surface colors
         """
@@ -159,6 +159,45 @@ def _artifacts_cell():
         print("Saved files:")
         for path in nb.list_saved_files(OUT_DIR):
             print(" ", path.relative_to(ROOT))
+        """
+    )
+
+
+def _section_markdown(title: str, description: str):
+    return _markdown_cell(
+        f"""
+        ## {title}
+
+        {description}
+        """
+    )
+
+
+def _visualisation_intro_cell():
+    return _markdown_cell(
+        """
+        ## Visualisation Workflow
+
+        These notebooks are post-processing oriented. By default they reuse the artifacts written by
+        `simulation.ipynb`, so rerunning the solver is only necessary when the stored outputs are missing or stale.
+        The cells below are grouped in a consistent order so comparable benchmarks expose the same kinds of views:
+
+        1. geometry and material layout
+        2. hydraulic fields when seepage is part of the problem
+        3. mechanical response for LL and SSR continuation cases
+        4. configured slice views when a benchmark defines MATLAB-style planes
+        """
+    )
+
+
+def _visualisation_controls_markdown():
+    return _markdown_cell(
+        """
+        ## Controls
+
+        Use the overrides in the next cell to switch artifact reuse behavior or tune the interactive PyVista previews.
+        Keep `RUN_MODE = "reuse"` for normal post-processing. The surface controls only affect display tessellation and
+        preview simplification; they do not change the stored finite-element solution.
         """
     )
 
@@ -191,38 +230,76 @@ def _family_cells(meta: dict[str, object]):
 
     cells = []
     if family.startswith("2d_"):
-        cells.append(_markdown_cell("## 2D Visualizations"))
-        if family == "2d_seepage_continuation" and palette:
-            cells.append(_code_cell(f"_ = nb.plot_2d_heterogeneity(CASE_TOML, palette_name={palette!r})"))
-            cells.append(_code_cell("_ = nb.plot_2d_mesh(CASE_TOML)"))
+        geometry_cells = []
+        if palette:
+            geometry_cells.append(_code_cell(f"_ = nb.plot_2d_heterogeneity(CASE_TOML, palette_name={palette!r})"))
+        geometry_cells.append(_code_cell("_ = nb.plot_2d_mesh(CASE_TOML)"))
+        cells.append(
+            _section_markdown(
+                "Geometry And Materials",
+                "Use the mesh and, when available, material zoning first to confirm the spatial setup before reading field plots.",
+            )
+        )
+        cells.extend(geometry_cells)
         if family in {"2d_seepage", "2d_seepage_continuation"}:
+            cells.append(
+                _section_markdown(
+                    "Hydraulic Fields",
+                    "These plots summarize seepage state. Pore pressure is shown as a continuous field, while saturation stays categorical.",
+                )
+            )
             cells.append(_code_cell("_ = nb.plot_2d_pore_pressure(artifacts, ACTIVE_CONFIG)"))
             cells.append(_code_cell("_ = nb.plot_2d_saturation(artifacts, ACTIVE_CONFIG)"))
         if family in {"2d_continuation", "2d_seepage_continuation"}:
+            cells.append(
+                _section_markdown(
+                    "Mechanical Response",
+                    "Displacement is plotted on the deformed shape, followed by deviatoric strain to highlight where shear localizes.",
+                )
+            )
             cells.append(_code_cell("_ = nb.plot_2d_displacement(artifacts, ACTIVE_CONFIG)"))
             cells.append(_code_cell("_ = nb.plot_2d_deviatoric_strain(artifacts, ACTIVE_CONFIG)"))
         return cells
 
     cells.append(
-        _markdown_cell(
-            """
-            ## 3D Visualizations
-
-            These cells use PyVista when the optional `.[viz]` extras are available. In a non-viz environment they
-            return a clear status message instead of failing import-time.
-            """
+        _section_markdown(
+            "Interactive 3D Views",
+            "These cells use PyVista when the optional `.[viz]` extras are available. In a non-viz environment they return a clear status message instead of failing import-time.",
         )
     )
     cells.append(_code_cell("nb.viz_support_status()"))
+    cells.append(
+        _section_markdown(
+            "Geometry And Materials",
+            "Start with the boundary geometry to confirm the mesh, orientation, and free-surface shape before looking at hydraulic or mechanical fields.",
+        )
+    )
+    cells.append(
+        _code_cell(
+            "_ = nb.show_3d_mesh_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+        )
+    )
     if family == "3d_seepage_continuation":
         cells.append(
-            _code_cell(
-                "_ = nb.show_3d_mesh_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            _section_markdown(
+                "Hydraulic Fields",
+                "Seepage quantities are shown before deformation so seepage-only and seepage-plus-continuation cases stay aligned.",
             )
         )
         cells.append(
             _code_cell(
                 "_ = nb.show_3d_pore_pressure_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
+        cells.append(
+            _code_cell(
+                "_ = nb.show_3d_saturation_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
+            )
+        )
+        cells.append(
+            _section_markdown(
+                "Mechanical Response",
+                "The displacement view uses the deformed surface, while deviatoric strain highlights shear concentration on the boundary.",
             )
         )
         cells.append(
@@ -236,6 +313,12 @@ def _family_cells(meta: dict[str, object]):
             )
         )
         if slice_planes_x or slice_planes_y or slice_planes_z:
+            cells.append(
+                _section_markdown(
+                    "Slice Views",
+                    "Configured slice planes follow the benchmark metadata so the 3D views line up with the MATLAB-style post-processing cuts.",
+                )
+            )
             cells.append(
                 _code_cell(
                     f"""
@@ -254,6 +337,12 @@ def _family_cells(meta: dict[str, object]):
         return cells
     if family == "3d_seepage":
         cells.append(
+            _section_markdown(
+                "Hydraulic Fields",
+                "These interactive surfaces focus on seepage state only, using the same field order as the seepage-continuation notebooks.",
+            )
+        )
+        cells.append(
             _code_cell(
                 "_ = nb.show_3d_pore_pressure_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
             )
@@ -265,6 +354,12 @@ def _family_cells(meta: dict[str, object]):
         )
         return cells
     cells.append(
+        _section_markdown(
+            "Mechanical Response",
+            "These continuation benchmarks focus on deformation. Displacement is shown on the warped surface and deviatoric strain highlights localization.",
+        )
+    )
+    cells.append(
         _code_cell(
             "_ = nb.show_3d_displacement_view(artifacts, ACTIVE_CONFIG, surface_subdivision=SURFACE_SUBDIVISION_OVERRIDE, surface_decimate_reduction=SURFACE_DECIMATE_REDUCTION_OVERRIDE, boundary_edge_overlay=BOUNDARY_EDGE_OVERLAY_OVERRIDE, jupyter_backend=JUPYTER_BACKEND_OVERRIDE)"
         )
@@ -275,6 +370,12 @@ def _family_cells(meta: dict[str, object]):
         )
     )
     if slice_planes_x or slice_planes_y or slice_planes_z:
+        cells.append(
+            _section_markdown(
+                "Slice Views",
+                "When slice planes are configured for the benchmark, this cell reconstructs the MATLAB-style cross-sections from the same VTU fields.",
+            )
+        )
         cells.append(
             _code_cell(
                 f"""
@@ -361,6 +462,8 @@ def build_visualisation_notebook(case_toml: Path):
             This notebook is post-processing oriented. By default it reuses the artifacts from `simulation.ipynb`.
             """
         ),
+        _visualisation_intro_cell(),
+        _visualisation_controls_markdown(),
         _visualisation_controls_cell(),
         _execution_cell(),
         _artifacts_cell(),

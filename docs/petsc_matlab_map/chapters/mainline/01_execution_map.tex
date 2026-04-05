@@ -1,0 +1,111 @@
+\chapter{Execution Map}
+
+This chapter follows only the committed default benchmark
+\code{benchmarks/3d\_hetero\_ssr\_default/case.toml}. In that benchmark the
+main path is:
+\[
+\text{3D hetero SSR} \rightarrow
+\text{indirect continuation} \rightarrow
+\text{owned-row assembly} \rightarrow
+\text{PMG shell backend}.
+\]
+
+\section{Benchmark Definition}
+
+For the current mainline reading path, the important settings are:
+\begin{itemize}
+\item \code{analysis = ssr},
+\item \code{method = indirect},
+\item \code{elem\_type = P4},
+\item \code{seepage = false},
+\item \code{node\_ordering = block\_metis},
+\item \code{mpi\_distribute\_by\_nodes = true},
+\item \code{constitutive\_mode = overlap},
+\item \code{tangent\_kernel = rows} by execution default,
+\item \code{solver\_type = PETSC\_MATLAB\_DFGMRES\_HYPRE\_NULLSPACE},
+\item \code{pc\_backend = pmg\_shell}.
+\end{itemize}
+
+Everything else in this document is organized around that exact path. Generic
+framework defaults and other runner surfaces are moved to
+Appendix~\ref{app:execution}.
+
+\section{MATLAB Driver to PETSc Runner}
+
+The MATLAB reference script
+\matlabpkg{slope\_stability\_3D\_hetero\_SSR.m} concentrated the whole solve in
+one file. The current PETSc path is the same algorithm broken into explicit
+stages:
+\begin{enumerate}
+\item \petscmod{core/run\_config.py} loads the TOML case and resolves paths.
+\item \petscmod{cli/run\_case\_from\_config.py} selects the 3D SSR runner.
+\item \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py::run\_capture} performs
+mesh preprocessing, constitutive-builder setup, solver construction, and
+continuation launch.
+\item \petscmod{continuation/indirect.py::SSR\_indirect\_continuation} drives
+the branch tracking.
+\item \petscmod{nonlinear/newton.py::newton\_ind\_ssr} performs the nested
+Newton solves used at each continuation step.
+\item \petscmod{linear/solver.py::SolverFactory.create} provides the PMG-shell
+preconditioned outer Krylov solve.
+\end{enumerate}
+
+\section{Mainline Call Chain}
+
+For the default 3D PMG benchmark, the runner sequence is:
+\begin{enumerate}
+\item load the mesh with \code{load\_mesh\_from\_file(...)},
+\item reorder nodes with \code{reorder\_mesh\_nodes(...)} using
+\code{block\_metis},
+\item expand material rows with \code{heterogenous\_materials(...)},
+\item choose the owned distributed assembly path through
+\petscmod{cli/assembly\_policy.py},
+\item build owned elastic rows with
+\code{assemble\_owned\_elastic\_rows\_for\_comm(...)},
+\item create \code{ConstitutiveOperator},
+\item prepare the owned tangent pattern with
+\code{prepare\_owned\_tangent\_pattern(...)},
+\item create the linear solver through \code{SolverFactory.create(...)},
+\item launch \code{SSR\_indirect\_continuation(...)}.
+\end{enumerate}
+
+That list is the modern replacement for reading the MATLAB script from top to
+bottom.
+
+\section{What Moved Out of the MATLAB Driver}
+
+The main structural change is not a new nonlinear algorithm. It is that the old
+driver responsibilities are now explicit modules:
+
+\begin{longtable}{@{}p{0.30\textwidth}p{0.30\textwidth}p{0.34\textwidth}@{}}
+\toprule
+MATLAB role & MATLAB location & Mainline PETSc location \\
+\midrule
+\endhead
+Case declaration & top of \matlabpkg{slope\_stability\_3D\_hetero\_SSR.m} & \code{case.toml} plus \petscmod{core/run\_config.py} \\
+Mesh and material preprocessing & script body plus \matlabpkg{+MESH/*} and \matlabpkg{+ASSEMBLY/*} & \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py}, \petscmod{mesh/*}, \petscmod{fem/*} \\
+Constitutive handle construction & \matlabpkg{+CONSTITUTIVE\_PROBLEM/CONSTITUTIVE.m} & \petscmod{constitutive/problem.py::ConstitutiveOperator} \\
+Linear solver setup & \matlabpkg{+LINEAR\_SOLVERS/set\_linear\_solver.m} & \petscmod{linear/solver.py::SolverFactory.create} \\
+Continuation launch & \matlabpkg{+CONTINUATION/SSR\_indirect\_continuation.m} & \petscmod{continuation/indirect.py::SSR\_indirect\_continuation} \\
+\bottomrule
+\end{longtable}
+
+\section{Shortest Reading Order}
+
+For the current mainline path, the shortest route through the PETSc code is:
+\begin{enumerate}
+\item \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py} for orchestration,
+\item \petscmod{cli/assembly\_policy.py} for the owned-path choice,
+\item \petscmod{fem/distributed\_elastic.py} and
+\petscmod{fem/distributed\_tangent.py} for matrix construction,
+\item \petscmod{constitutive/problem.py} for the constitutive builder,
+\item \petscmod{linear/solver.py} for the PMG-shell solver path,
+\item \petscmod{nonlinear/newton.py} and
+\petscmod{continuation/indirect.py} for branch advancement.
+\end{enumerate}
+
+\section{Where To Look For Inactive Paths}
+
+This chapter intentionally excludes generic framework defaults, seepage
+runners, and other entry points that are not used by the default parallel PMG
+benchmark. Those are collected in Appendix~\ref{app:execution}.

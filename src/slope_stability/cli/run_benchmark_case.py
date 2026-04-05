@@ -208,7 +208,9 @@ def _write_continuation_report(
     matlab_dir: Path,
     petsc_dir: Path,
 ) -> None:
-    figures_dir = case_dir / "figures"
+    archive_dir = case_dir / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    figures_dir = archive_dir / "figures"
     figures_dir.mkdir(exist_ok=True)
     continuation_fig = figures_dir / "continuation_history.png"
     _make_continuation_plot(matlab_summary, petsc_npz, continuation_fig)
@@ -221,7 +223,14 @@ def _write_continuation_report(
     lambda_p = np.asarray(petsc_npz["lambda_hist"], dtype=np.float64)
     omega_p = np.asarray(petsc_npz["omega_hist"], dtype=np.float64)
     umax_p = np.asarray(petsc_npz.get("Umax_hist", []), dtype=np.float64)
-    matched = min(lambda_m.size, lambda_p.size, omega_m.size, omega_p.size, umax_m.size if umax_m.size else 10**9, umax_p.size if umax_p.size else 10**9)
+    matched = min(
+        lambda_m.size,
+        lambda_p.size,
+        omega_m.size,
+        omega_p.size,
+        umax_m.size if umax_m.size else 10**9,
+        umax_p.size if umax_p.size else 10**9,
+    )
     lambda_rel = _relative_error(lambda_m[:matched], lambda_p[:matched]) if matched else float("nan")
     omega_rel = _relative_error(omega_m[:matched], omega_p[:matched]) if matched else float("nan")
     umax_rel = _relative_error(umax_m[:matched], umax_p[:matched]) if matched and umax_m.size and umax_p.size else float("nan")
@@ -253,34 +262,38 @@ def _write_continuation_report(
         )
 
     matlab_plot_dir = matlab_dir / "matlab_plots"
-    petsc_plot_candidates = [
+    plot_pairs = [
         ("Displacement", "matlab_displacements_2D.png", "petsc_displacements_2D.png"),
         ("Strain", "matlab_deviatoric_strain_2D.png", "petsc_deviatoric_strain_2D.png"),
         ("Curve", "matlab_omega_lambda_2D.png", "petsc_omega_lambda_2D.png"),
     ]
     if "3d" in str(meta["title"]).lower():
-        petsc_plot_candidates = [
+        plot_pairs = [
             ("Displacement", "matlab_displacements_3D.png", "petsc_displacements_3D.png"),
             ("Strain", "matlab_deviatoric_strain_3D.png", "petsc_deviatoric_strain_3D.png"),
             ("Curve", "matlab_omega_lambda.png", "petsc_omega_lambda.png"),
         ]
-    image_sections = []
     petsc_plot_dir = petsc_dir / "plots"
-    for label, matlab_name, petsc_name in petsc_plot_candidates:
-        matlab_path = matlab_plot_dir / matlab_name
-        petsc_path = petsc_plot_dir / petsc_name
-        if matlab_path.exists() and petsc_path.exists():
-            image_sections.append(
-                f"### {label}\n\n| MATLAB | PETSc |\n| --- | --- |\n| ![]({_rel(matlab_path, case_dir)}) | ![]({_rel(petsc_path, case_dir)}) |\n"
-            )
 
-    report = f"""# {meta['title']}
+    def image_sections_for(doc_path: Path) -> list[str]:
+        sections: list[str] = []
+        for label, matlab_name, petsc_name in plot_pairs:
+            matlab_path = matlab_plot_dir / matlab_name
+            petsc_path = petsc_plot_dir / petsc_name
+            if matlab_path.exists() and petsc_path.exists():
+                sections.append(
+                    f"### {label}\n\n| MATLAB | PETSc |\n| --- | --- |\n| ![]({_rel(matlab_path, doc_path.parent)}) | ![]({_rel(petsc_path, doc_path.parent)}) |\n"
+                )
+        return sections
+
+    def build_report(doc_path: Path) -> str:
+        report = f"""# {meta['title']}
 
 ## Setup
 
 - MATLAB script: `{meta['matlab_script']}`
-- PETSc config: [`case.toml`](case.toml)
-- Run command: [`run.sh`](run.sh)
+- PETSc config: [`case.toml`]({_rel(config_path, doc_path.parent)})
+- Run command: [`run.sh`]({_rel(case_dir / 'run.sh', doc_path.parent)})
 - MPI ranks: `{meta.get('mpi_ranks', 8)}`
 
 ## Summary
@@ -298,26 +311,28 @@ def _write_continuation_report(
 
 ## Generated Comparison
 
-![]({_rel(continuation_fig, case_dir)})
+![]({_rel(continuation_fig, doc_path.parent)})
 
 """
-    if has_iteration_fig:
-        report += f"![]({_rel(iteration_fig, case_dir)})\n\n"
-    report += """## Accepted-Step Table
+        if has_iteration_fig:
+            report += f"![]({_rel(iteration_fig, doc_path.parent)})\n\n"
+        report += """## Accepted-Step Table
 
 | Step | MATLAB lambda | PETSc lambda | MATLAB omega | PETSc omega | MATLAB Newton | PETSc Newton | MATLAB linear | PETSc linear |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 """
-    report += "\n".join(step_lines) + "\n\n"
-    if image_sections:
-        report += "## Side-by-Side Figures\n\n" + "\n".join(image_sections)
-    report += (
-        "## Raw Outputs\n\n"
-        f"- MATLAB artifacts: `{_rel(matlab_dir, case_dir)}`\n"
-        f"- PETSc artifacts: `{_rel(petsc_dir, case_dir)}`\n"
-    )
-    for name in ("report.md", "README.md"):
-        (case_dir / name).write_text(report, encoding="utf-8")
+        report += "\n".join(step_lines) + "\n\n"
+        image_sections = image_sections_for(doc_path)
+        if image_sections:
+            report += "## Side-by-Side Figures\n\n" + "\n".join(image_sections)
+        report += (
+            "## Raw Outputs\n\n"
+            f"- MATLAB artifacts: `{_rel(matlab_dir, doc_path.parent)}`\n"
+            f"- PETSc artifacts: `{_rel(petsc_dir, doc_path.parent)}`\n"
+        )
+        return report
+
+    (archive_dir / "report.md").write_text(build_report(archive_dir / "report.md"), encoding="utf-8")
 
 
 def _write_seepage_report(
@@ -347,26 +362,33 @@ def _write_seepage_report(
     matlab_runtime = float(matlab_summary["run_info"].get("runtime_seconds", 0.0))
     petsc_runtime = float(petsc_run_info["run_info"]["runtime_seconds"])
 
-    image_rows = []
+    archive_dir = case_dir / "archive"
+    archive_dir.mkdir(exist_ok=True)
+
     figure_pairs = [
         ("Pore pressure", matlab_dir / "matlab_pore_pressure_2D.png", petsc_dir / "plots" / "petsc_pore_pressure_2D.png"),
         ("Saturation", matlab_dir / "matlab_saturation_2D.png", petsc_dir / "plots" / "petsc_saturation_2D.png"),
         ("Pore pressure", matlab_dir / "matlab_pore_pressure_3D.png", petsc_dir / "plots" / "petsc_pore_pressure_3D.png"),
         ("Saturation", matlab_dir / "matlab_saturation_3D.png", petsc_dir / "plots" / "petsc_saturation_3D.png"),
     ]
-    for label, matlab_path, petsc_path in figure_pairs:
-        if matlab_path.exists() and petsc_path.exists():
-            image_rows.append(
-                f"### {label}\n\n| MATLAB | PETSc |\n| --- | --- |\n| ![]({_rel(matlab_path, case_dir)}) | ![]({_rel(petsc_path, case_dir)}) |\n"
-            )
+    def image_rows_for(doc_path: Path) -> list[str]:
+        rows: list[str] = []
+        for label, matlab_path, petsc_path in figure_pairs:
+            if matlab_path.exists() and petsc_path.exists():
+                rows.append(
+                    f"### {label}\n\n| MATLAB | PETSc |\n| --- | --- |\n| ![]({_rel(matlab_path, doc_path.parent)}) | ![]({_rel(petsc_path, doc_path.parent)}) |\n"
+                )
+        return rows
 
-    report = f"""# {meta['title']}
+    def build_report(doc_path: Path) -> str:
+        image_rows = image_rows_for(doc_path)
+        report = f"""# {meta['title']}
 
 ## Setup
 
 - MATLAB script: `{meta['matlab_script']}`
-- PETSc config: [`case.toml`](case.toml)
-- Run command: [`run.sh`](run.sh)
+- PETSc config: [`case.toml`]({_rel(case_dir / 'case.toml', doc_path.parent)})
+- Run command: [`run.sh`]({_rel(case_dir / 'run.sh', doc_path.parent)})
 - MPI ranks requested: `{meta.get('mpi_ranks', 8)}`
 - PETSc MPI mode: `{petsc_run_info['run_info'].get('mpi_mode', 'serial')}`
 
@@ -382,15 +404,16 @@ def _write_seepage_report(
 | Saturation mismatch count | {sat_mismatch} | - |
 
 """
-    if image_rows:
-        report += "## Side-by-Side Figures\n\n" + "\n".join(image_rows)
-    report += (
-        "## Raw Outputs\n\n"
-        f"- MATLAB artifacts: `{_rel(matlab_dir, case_dir)}`\n"
-        f"- PETSc artifacts: `{_rel(petsc_dir, case_dir)}`\n"
-    )
-    for name in ("report.md", "README.md"):
-        (case_dir / name).write_text(report, encoding="utf-8")
+        if image_rows:
+            report += "## Side-by-Side Figures\n\n" + "\n".join(image_rows)
+        report += (
+            "## Raw Outputs\n\n"
+            f"- MATLAB artifacts: `{_rel(matlab_dir, doc_path.parent)}`\n"
+            f"- PETSc artifacts: `{_rel(petsc_dir, doc_path.parent)}`\n"
+        )
+        return report
+
+    (archive_dir / "report.md").write_text(build_report(archive_dir / "report.md"), encoding="utf-8")
 
 
 def _fmt(arr: np.ndarray, idx: int, *, integer: bool = False) -> str:

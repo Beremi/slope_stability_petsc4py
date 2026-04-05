@@ -7,9 +7,12 @@ suite = true
 
 [notebook]
 family = "3d_continuation"
+slice_planes_y = [35.0]
+slice_planes_z = [43.30127019, 64.95190529]
+strain_clim_scale_max = 0.25
 
 [problem]
-name = "benchmark_3d_hetero_ssr"
+name = "run_3D_hetero_SSR_capture"
 case = "3d_hetero_ssr"
 analysis = "ssr"
 dimension = 3

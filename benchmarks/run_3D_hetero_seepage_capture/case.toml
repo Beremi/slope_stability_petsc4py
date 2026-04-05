@@ -10,7 +10,7 @@ notes = "Current PETSc seepage implementation is scalar; under MPI the benchmark
 family = "3d_seepage"
 
 [problem]
-name = "benchmark_3d_hetero_seepage"
+name = "run_3D_hetero_seepage_capture"
 case = "3d_hetero_seepage"
 analysis = "seepage"
 dimension = 3

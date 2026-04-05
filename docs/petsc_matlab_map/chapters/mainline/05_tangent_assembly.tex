@@ -1,0 +1,196 @@
+\chapter{Tangent Assembly}
+
+This is the chapter where the PETSc redesign differs most strongly from the old
+MATLAB implementation. The mathematical operator is still
+\[
+K_{\mathrm{tangent}} = B^T D_S B,
+\]
+but the default 3D PMG path no longer materializes that object as one globally
+rebuilt sparse matrix.
+
+\section{Mainline Path In One Line}
+
+For the committed benchmark, the normal tangent route is:
+\[
+\begin{aligned}
+\text{owned elastic rows}
+&\rightarrow \text{owned tangent pattern} \\
+&\rightarrow \text{overlap constitutive data} \\
+&\rightarrow \text{rows kernel} \\
+&\rightarrow \text{regularized free operator for PMG shell}.
+\end{aligned}
+\]
+
+That is the single path MATLAB authors should hold in mind first.
+
+\section{Why This Path Is Selected}
+
+\petscmod{cli/assembly\_policy.py} selects the owned distributed path because:
+\begin{itemize}
+\item \code{mpi\_distribute\_by\_nodes = true},
+\item the solver is not \code{DIRECT},
+\item \code{constitutive\_mode = overlap}.
+\end{itemize}
+
+As a result:
+\begin{itemize}
+\item the runner enables the owned tangent path,
+\item the runner enables the lightweight owned elastic path,
+\item the global MATLAB-style tangent rebuild is not used in the normal solve.
+\end{itemize}
+
+\section{Step 1: Owned Elastic Rows}
+
+The current path begins with
+\code{assemble\_owned\_elastic\_rows\_for\_comm(...)} in
+\petscmod{fem/distributed\_elastic.py}. This builds a PETSc-ready elastic
+precursor by rank-owned rows.
+
+\paragraph{What it stores.}
+The owned elastic object stores:
+\begin{itemize}
+\item the node interval owned by the rank,
+\item the overlap elements needed to assemble those rows,
+\item a local CSR matrix containing only the rank-owned global rows,
+\item the matching local right-hand-side contribution.
+\end{itemize}
+
+\paragraph{Why it matters.}
+On the mainline path, the elastic matrix is not just a one-time startup object.
+It becomes the structural template for later tangent regularization and for the
+owned-row sparsity pattern.
+
+\section{Step 2: Fixed Owned Tangent Pattern}
+
+The core PETSc object is \code{OwnedTangentPattern} in
+\petscmod{fem/distributed\_tangent.py}. For the current benchmark it is
+prepared with:
+\begin{itemize}
+\item \code{include\_unique = false},
+\item \code{include\_legacy\_scatter = false},
+\item \code{include\_overlap\_B = false}.
+\end{itemize}
+
+Those three booleans are the clearest summary of what the current path is
+\emph{not} doing.
+
+\paragraph{What the pattern precomputes.}
+For the mainline run, the pattern stores:
+\begin{itemize}
+\item the owned row interval and owned free-row mask,
+\item the overlap node and element patch needed for those rows,
+\item the fixed CSR sparsity pattern for those rows,
+\item elastic values projected onto that same pattern,
+\item overlap strain geometry data needed to re-evaluate the tangent each
+Newton step,
+\item constrained diagonal positions for Dirichlet rows.
+\end{itemize}
+
+This is the central architectural difference from MATLAB: the sparse pattern is
+prepared once, and only the values are refreshed during Newton.
+
+\section{Step 3: Overlap Constitutive Evaluation}
+
+Because the mainline constitutive mode is \code{overlap}, each rank evaluates
+stress and tangent data directly on the overlap integration points needed by its
+owned rows. In practical terms:
+\begin{itemize}
+\item there is no unique-owner recovery stage,
+\item there is no allgather of constitutive data,
+\item the tangent kernel receives local overlap data directly.
+\end{itemize}
+
+That is why the overlap mode and the owned-row tangent pattern fit together so
+well on the PMG path.
+
+\section{Step 4: Row-Slot Tangent Kernel}
+
+The mainline tangent kernel is \code{rows}. This is the normal production path
+for the committed benchmark because \code{tangent\_kernel = rows} by execution
+default and the benchmark does not override it.
+
+\paragraph{How the rows kernel thinks.}
+Instead of building a whole elemental matrix and scattering it afterward, the
+kernel walks the fixed owned CSR pattern row by row. Its metadata is organized
+around:
+\begin{itemize}
+\item \code{row\_slot\_ptr},
+\item \code{slot\_elem},
+\item \code{slot\_lrow},
+\item \code{slot\_pos}.
+\end{itemize}
+
+So the assembly order is no longer ``form \(k_e\), then scatter.'' It is
+``visit this owned sparse row, accumulate exactly the entries needed for this
+row.'' The bilinear form is unchanged. The dataflow is row-oriented instead of
+element-oriented.
+
+\section{Step 5: Internal Force And Tangent Refresh}
+
+At each Newton iteration the mainline path performs two distributed refreshes:
+\begin{itemize}
+\item \code{assemble\_owned\_force\_from\_local\_stress(...)} updates the owned
+internal-force rows,
+\item \code{assemble\_owned\_tangent\_values(...)} refreshes the tangent values
+on the fixed owned CSR pattern.
+\end{itemize}
+
+This is the PETSc replacement for rebuilding the global
+\code{B' * D\_p * B} matrix in MATLAB. The matrix structure stays fixed. Only
+the values derived from the current constitutive state change.
+
+\section{Step 6: Regularization On The Same Pattern}
+
+The regularized Newton matrix is still
+\[
+K_r = r K_{\mathrm{elast}} + (1-r) K_{\mathrm{tangent}}.
+\]
+
+On the mainline path, that blend happens directly on the owned pattern through
+\code{assemble\_owned\_regularized\_matrix(...)}:
+\begin{itemize}
+\item the elastic contribution comes from stored \code{elastic\_values},
+\item the tangent contribution comes from the current owned tangent refresh,
+\item the result keeps the same owned CSR structure.
+\end{itemize}
+
+This is why the elastic precursor is carried forward explicitly into the
+nonlinear solve.
+
+\section{Constrained Rows Stay Explicit}
+
+Dirichlet rows are enforced through stored
+\code{constrained\_diag\_positions}. After each tangent or regularized-matrix
+refresh, those positions are reset to \(1\). So constrained rows remain valid
+even though the unconstrained entries are overwritten every Newton step.
+
+\section{What The PMG Shell Solver Receives}
+
+The current PMG benchmark does not consume the whole operator family exposed by
+the constitutive layer. The practical flow is:
+\begin{enumerate}
+\item owned elastic rows and owned tangent rows are built in PETSc format,
+\item the regularized operator is formed on that owned-row pattern,
+\item the free-space operator is extracted for the Krylov solve,
+\item the PMG shell backend uses that reduced operator as its fine-grid system.
+\end{enumerate}
+
+So the default path is a distributed owned-row assembly underneath a reduced
+free-space Newton solve.
+
+\section{Where To Edit}
+
+\begin{itemize}
+\item \petscmod{cli/assembly\_policy.py} for path selection,
+\item \petscmod{fem/distributed\_elastic.py} for the elastic precursor,
+\item \petscmod{fem/distributed\_tangent.py} for the owned pattern and the
+\code{rows} kernel,
+\item \petscmod{constitutive/problem.py} for how the cached PETSc matrices are
+exposed to Newton.
+\end{itemize}
+
+\section{Where The Other Tangent Paths Went}
+
+Legacy scatter assembly, the global reference rebuild, unique-owner
+constitutive recovery, and BDDC local-subdomain matrices are moved to
+Appendix~\ref{app:tangent}.

@@ -150,6 +150,7 @@ def _build_case_row(case_dir: Path, artifacts_root: Path) -> tuple[str, str]:
         f"| `{case_dir.name}` | {title} | {kind or '-'} | done | "
         f"{matlab_runtime:.3f} | {petsc_runtime:.3f} | {summary} | "
         f"[README]({_rel(case_dir / 'README.md', case_dir.parent)}) | "
+        f"[report]({_rel(case_dir / 'archive' / 'report.md', case_dir.parent)}) | "
         f"[run.sh]({_rel(case_dir / 'run.sh', case_dir.parent)}) |"
     )
     detail = ""
@@ -195,6 +196,9 @@ Each case folder contains at least:
 - `run.sh`
 - `README.md`
 
+Per-case `README.md` files are descriptive only. Generated MATLAB-vs-PETSc comparison output for parity cases
+is kept in `archive/report.md`.
+
 The canonical MATLAB-parity benchmark suite is the subset with `[benchmark].suite = true` in `case.toml`.
 
 Run the full parity suite:
@@ -207,8 +211,8 @@ Run any single case from its folder with `./run.sh`.
 
 ## MATLAB-Parity Benchmarks
 
-| Case | Title | Kind | Status | MATLAB [s] | PETSc [s] | Parity summary | Results | Run |
-| --- | --- | --- | --- | ---: | ---: | --- | --- | --- |
+| Case | Title | Kind | Status | MATLAB [s] | PETSc [s] | Parity summary | README | Report | Run |
+| --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- |
 """
     report += "\n".join(rows) + "\n\n"
     if runnable_rows:

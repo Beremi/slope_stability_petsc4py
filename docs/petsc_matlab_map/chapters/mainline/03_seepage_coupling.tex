@@ -1,0 +1,38 @@
+\chapter{Seepage Coupling}
+
+For the committed default benchmark, this chapter is intentionally short because
+the seepage branch is \textbf{inactive}. The case file sets
+\code{seepage = false}, so the mainline 3D PMG solve does not run any hydraulic
+preprocessing or pore-pressure Newton loop.
+
+\section{What The Mainline Mechanical Path Uses Instead}
+
+On the default path:
+\begin{itemize}
+\item material properties come directly from the mechanical material table,
+\item the body-force field comes directly from the mechanical
+\code{gamma}-based volume load,
+\item no pore-pressure field \code{pw} is solved,
+\item no pressure gradient \code{grad\_p} is transferred into the mechanical
+forcing,
+\item no saturation update changes the material state before the mechanical
+solve.
+\end{itemize}
+
+This is exactly why the current benchmark can go straight from mesh/material
+preprocessing to constitutive setup and SSR continuation.
+
+\section{Where The Branch Would Enter If Enabled}
+
+If seepage were enabled, it would branch \emph{before} the mechanical load and
+constitutive setup:
+\[
+\begin{aligned}
+\text{mesh and material load} &\rightarrow \text{seepage solve} \\
+&\rightarrow (\texttt{pw}, \texttt{grad\_p}, \texttt{mater\_sat}) \\
+&\rightarrow \text{mechanical load and constitutive state}.
+\end{aligned}
+\]
+
+That whole path is documented in Appendix~\ref{app:seepage}. It is real code,
+but it is not part of the default parallel PMG run.

@@ -174,6 +174,15 @@ def test_newton_postsolve_cleanup_preserves_builder_cached_mats(monkeypatch) -> 
     assert regularized_token not in destroyed
 
 
+def test_cached_regularized_fallback_ignores_missing_cached_tangent() -> None:
+    class _NoCachedTangentBuilder:
+        def build_K_regularized(self, r):
+            raise ValueError("DS must have shape (36, n_int) for owned tangent assembly")
+
+    builder = _NoCachedTangentBuilder()
+    assert newton_module._build_regularized_from_cached_if_available(builder, 1.0e-4) is None
+
+
 def test_newton_ind_ssr_applies_first_iteration_warm_start_then_restores_basis(monkeypatch) -> None:
     observed_basis: list[np.ndarray] = []
 

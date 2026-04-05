@@ -1,0 +1,52 @@
+\chapter{Linear Solvers and PETSc: Inactive Backends and Policies}
+\label{app:linear}
+
+This appendix chapter collects solver families, preconditioner backends, and
+policy knobs that exist in the repository but are not part of the committed
+parallel PMG benchmark.
+
+\section{Other Solver Families}
+
+The factory in \petscmod{linear/solver.py} also supports:
+\begin{itemize}
+\item direct solvers,
+\item pure Python deflated FGMRES,
+\item PETSc Krylov solves without the MATLAB-style wrapper,
+\item experimental PETSc-native deflation variants.
+\end{itemize}
+
+These are useful for debugging, comparison, or research, but not the default
+benchmark path.
+
+\section{Other Backends}
+
+The same outer solver family can run with several backends:
+\begin{itemize}
+\item \code{hypre},
+\item \code{gamg},
+\item \code{bddc},
+\item built-in PETSc \code{pmg},
+\item LU/direct factorization.
+\end{itemize}
+
+Only \code{pmg\_shell} is mainline in the committed 3D benchmark.
+
+\section{Why BDDC Is Separate}
+
+The BDDC backend changes more than a PETSc option. It changes the matrix shape
+needed by the preconditioner, because it wants the local subdomain operators
+built through \code{BDDCSubdomainPattern}. That is why BDDC is kept out of the
+mainline text.
+
+\section{Other Explicit Policy Controls}
+
+The broader solver framework exposes policies that the PMG-shell mainline path
+does not vary:
+\begin{itemize}
+\item \code{preconditioner\_matrix\_source} other than \code{tangent},
+\item lagged or accepted-step matrix policies,
+\item rebuild intervals other than every Newton iteration,
+\item full-system preconditioning modes.
+\end{itemize}
+
+Those options remain relevant for alternative backends and experiments.

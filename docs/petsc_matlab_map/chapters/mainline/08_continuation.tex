@@ -1,0 +1,100 @@
+\chapter{Continuation Algorithms}
+
+The committed 3D benchmark follows one continuation path only:
+\[
+\text{SSR} \rightarrow \text{indirect method} \rightarrow \text{classic mode}
+\rightarrow \text{secant predictor} \rightarrow \text{legacy omega controller}.
+\]
+
+This chapter now follows only that path.
+
+\section{Mainline Continuation Contract}
+
+The benchmark defines or inherits the following effective continuation settings:
+\begin{itemize}
+\item \code{analysis = ssr},
+\item \code{method = indirect},
+\item \code{predictor = secant},
+\item \code{omega\_step\_controller = legacy},
+\item \code{continuation\_mode = classic},
+\item \code{continuation\_secant\_correction\_mode = none},
+\item \code{continuation\_first\_newton\_warm\_start\_mode = none},
+\item \code{step\_length\_cap\_mode = none},
+\item \code{fine\_switch\_mode = none}.
+\end{itemize}
+
+That list is the main reason the continuation chapter is cleaner than before:
+many repository features exist, but the default benchmark uses a fairly narrow
+subset of them.
+
+\section{Mainline Call Chain}
+
+The active continuation chain is:
+\begin{enumerate}
+\item \code{SSR\_indirect\_continuation(...)} in
+\petscmod{continuation/indirect.py},
+\item initialization of the first accepted points,
+\item a secant predictor for the next candidate state,
+\item a nested Newton solve through \code{newton\_ind\_ssr(...)},
+\item acceptance or rejection of the candidate point,
+\item update of continuation history and the solver deflation basis.
+\end{enumerate}
+
+This is the modern PETSc equivalent of MATLAB
+\matlabpkg{+CONTINUATION/SSR\_indirect\_continuation.m}.
+
+\section{Accepted-Step Lifecycle}
+
+One accepted continuation step on the current path is:
+\begin{enumerate}
+\item choose the next target \(\omega\),
+\item build the secant predictor \((U_{\mathrm{ini}}, \lambda_{\mathrm{ini}})\),
+\item solve the nested Newton problem for that target,
+\item accept the point if Newton succeeds,
+\item append the accepted state to the branch history,
+\item update the solver recycle basis.
+\end{enumerate}
+
+Rejected attempts still exist, but the basic branch-tracking logic is the same
+one MATLAB authors already know.
+
+\section{What The Legacy Controller Means Here}
+
+Because the benchmark keeps \code{omega\_step\_controller = legacy}, the current
+default path uses the older, simpler continuation-step adaptation logic rather
+than the newer adaptive controller family. In practical terms:
+\begin{itemize}
+\item step growth and shrinkage are still driven by continuation success and
+Newton effort,
+\item there is no separate adaptive efficiency controller active,
+\item there is no fine-switch phase transition active.
+\end{itemize}
+
+\section{Mainline History Output}
+
+The current path still records the accepted branch history familiar from MATLAB:
+\begin{itemize}
+\item \(\lambda\) history,
+\item \(\omega\) history,
+\item displacement history,
+\item accepted-step and attempt statistics,
+\item linear and nonlinear work counters.
+\end{itemize}
+
+The difference is that PETSc stores these in explicit structured outputs rather
+than a mostly monolithic MATLAB struct.
+
+\section{Where To Edit}
+
+\begin{itemize}
+\item \petscmod{continuation/indirect.py} for the mainline SSR driver,
+\item \petscmod{nonlinear/newton.py} for the nested Newton solve it calls,
+\item \petscmod{core/run\_config.py} if the mainline continuation controls
+should be exposed differently through TOML.
+\end{itemize}
+
+\section{Where The Other Continuation Features Went}
+
+Direct SSR, limit load, adaptive controllers, reduced predictors, secant
+corrections, fine-switch logic, first-Newton warm starts, and streaming
+microsteps are moved to Appendix~\ref{app:continuation}.

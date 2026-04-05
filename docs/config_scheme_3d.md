@@ -77,8 +77,8 @@ The implemented config file sections are:
 
 The example file is:
 
-- [3d_hetero_ssr_default/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/3d_hetero_ssr_default/case.toml)
-- [3d_homo_ssr_default/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/3d_homo_ssr_default/case.toml)
+- [slope_stability_3D_hetero_SSR_default/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/slope_stability_3D_hetero_SSR_default/case.toml)
+- [slope_stability_3D_homo_SSR_default/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/slope_stability_3D_homo_SSR_default/case.toml)
 
 ## Implemented Interface
 

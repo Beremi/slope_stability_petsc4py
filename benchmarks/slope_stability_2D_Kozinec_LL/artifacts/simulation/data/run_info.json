@@ -1,0 +1,150 @@
+{
+  "run_info": {
+    "timestamp": "2026-04-04T05:09:47",
+    "runtime_seconds": 208.9333251551725,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "analysis": "ll",
+    "continuation_method": "indirect",
+    "case_name": "kozinec",
+    "rank_count": 8,
+    "step_count": 42
+  },
+  "params": {
+    "case_name": "kozinec",
+    "analysis": "ll",
+    "continuation_method": "indirect",
+    "elem_type": "P2",
+    "davis_type": "B",
+    "material_rows": [
+      [
+        9.0,
+        26.0,
+        0.0,
+        16000.0,
+        0.4,
+        20.3,
+        20.7
+      ],
+      [
+        2.0,
+        33.0,
+        0.0,
+        16000.0,
+        0.4,
+        19.0,
+        20.5
+      ],
+      [
+        5.0,
+        27.0,
+        0.0,
+        16000.0,
+        0.4,
+        19.4,
+        21.4
+      ],
+      [
+        3.0,
+        13.0,
+        0.0,
+        16000.0,
+        0.4,
+        20.0,
+        20.5
+      ],
+      [
+        5.0,
+        27.0,
+        0.0,
+        16000.0,
+        0.4,
+        19.4,
+        21.4
+      ],
+      [
+        3.0,
+        13.0,
+        0.0,
+        16000.0,
+        0.4,
+        20.0,
+        20.5
+      ],
+      [
+        1.0,
+        45.0,
+        0.0,
+        16000.0,
+        0.4,
+        20.5,
+        20.6
+      ]
+    ],
+    "hydraulic_conductivity": null,
+    "node_ordering": "none",
+    "lambda_init": 1.0,
+    "d_lambda_init": 0.1,
+    "d_lambda_min": 0.001,
+    "d_lambda_diff_scaled_min": 0.001,
+    "lambda_ell": 1.0,
+    "d_omega_ini_scale": 0.03333333333333333,
+    "d_t_min": 0.001,
+    "omega_max_stop": 200000.0,
+    "step_max": 100,
+    "it_newt_max": 200,
+    "it_damp_max": 10,
+    "tol": 0.0001,
+    "r_min": 0.0001,
+    "linear_tolerance": 0.1,
+    "linear_max_iter": 100,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "pc_hypre_coarsen_type": "HMIS",
+    "pc_hypre_interp_type": "ext+i",
+    "pc_hypre_strong_threshold": null,
+    "recycle_preconditioner": true,
+    "constitutive_mode": "overlap",
+    "tangent_kernel": "rows",
+    "mesh_dir": "/home/beremi/repos/slope_stability-1/meshes/2d_kozinec"
+  },
+  "mesh": {
+    "coord_shape": [
+      2,
+      14337
+    ],
+    "elem_shape": [
+      6,
+      7026
+    ],
+    "surf_shape": [
+      3,
+      284
+    ]
+  },
+  "timings": {
+    "constitutive": {
+      "reduction": 0.0011565920431166887,
+      "stress": 12.487002733396366,
+      "stress_tangent": 12.392426241422072,
+      "build_F": 1.4859817922115326,
+      "build_F_K_tangent": 0.0,
+      "build_tangent_local": 75.07706745900214,
+      "local_strain": 2.3559498195536435,
+      "local_constitutive": 22.390157852787524,
+      "local_constitutive_comm": 0.0,
+      "local_force_assembly": 1.483807566575706,
+      "local_force_gather": 0.0,
+      "potential": 0.0
+    },
+    "linear": {
+      "init_linear_iterations": 3,
+      "init_linear_solve_time": 0.014935512095689774,
+      "init_linear_preconditioner_time": 0.06322227604687214,
+      "init_linear_orthogonalization_time": 0.0,
+      "attempt_linear_iterations_total": 6152,
+      "attempt_linear_solve_time_total": 27.73488429491408,
+      "attempt_linear_preconditioner_time_total": 1.1905281024519354,
+      "attempt_linear_orthogonalization_time_total": 65.1767167437356
+    },
+    "continuation_total_wall_time": 208.8459148220718
+  }
+}

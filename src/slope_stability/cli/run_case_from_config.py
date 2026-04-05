@@ -256,7 +256,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "linear_max_iter": cfg.seepage.linear_max_iter,
         }
         return run_3d_hetero_seepage_capture, kwargs
-    if cfg.problem.case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr"}:
+    if cfg.problem.case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
         kwargs = {
             "mesh_path": cfg.problem.mesh_path,
             "elem_type": cfg.problem.elem_type,

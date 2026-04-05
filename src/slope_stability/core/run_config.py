@@ -75,6 +75,8 @@ class ContinuationConfig:
     method: str = "indirect"
     predictor: str = "secant"
     omega_step_controller: str = "legacy"
+    secant_correction_mode: str = "none"
+    first_newton_warm_start_mode: str = "none"
     lambda_init: float = 1.0
     d_lambda_init: float = 0.1
     d_lambda_min: float = 1e-3
@@ -310,6 +312,8 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         method=str(continuation_data.get("method", "indirect")),
         predictor=str(continuation_data.get("predictor", "secant")),
         omega_step_controller=str(continuation_data.get("omega_step_controller", "legacy")),
+        secant_correction_mode=str(continuation_data.get("secant_correction_mode", "none")),
+        first_newton_warm_start_mode=str(continuation_data.get("first_newton_warm_start_mode", "none")),
         lambda_init=float(continuation_data.get("lambda_init", 1.0)),
         d_lambda_init=float(continuation_data.get("d_lambda_init", 0.1)),
         d_lambda_min=float(continuation_data.get("d_lambda_min", 1e-3)),

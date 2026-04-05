@@ -1,0 +1,59 @@
+\chapter{Seepage Coupling: Inactive Branch}
+\label{app:seepage}
+
+This appendix chapter covers the hydro-mechanical branch used by seepage
+variants, especially
+\matlabpkg{slope\_stability\_3D\_hetero\_seepage\_SSR.m}. It is not active in
+the committed default 3D PMG benchmark, but it is still a supported branch in
+the repository.
+
+\section{Exact Seepage-to-Mechanics Sequence}
+
+The preserved numerical sequence is:
+\[
+\begin{aligned}
+\texttt{conduct0} &\rightarrow \texttt{boundary conditions} \rightarrow \texttt{seepage solve} \\
+&\rightarrow (\texttt{pw}, \texttt{grad\_p}, \texttt{mater\_sat}) \\
+&\rightarrow \texttt{mechanical } \gamma \texttt{ and } \texttt{f\_V}.
+\end{aligned}
+\]
+
+\begin{longtable}{@{}p{0.28\textwidth}p{0.35\textwidth}p{0.31\textwidth}@{}}
+\toprule
+Stage & MATLAB location & PETSc location \\
+\midrule
+\endhead
+Mesh and labels & \texttt{+MESH/load\_mesh\_gmsh\_waterlevels.m} and related helpers & \petscmod{mesh/gmsh\_waterlevels.py}, \petscmod{mesh/comsol\_p2.py} \\
+Conductivity build & \texttt{+SEEPAGE/heter\_conduct.m} & \petscmod{seepage/flow.py} \\
+Boundary conditions & seepage boundary helpers under \texttt{+MESH} & seepage-specific mesh loaders \\
+Seepage Newton solve & \texttt{+SEEPAGE/seepage\_problem\_3D.m}, \texttt{newton\_flow.m} & \petscmod{seepage/flow.py} \\
+Transfer into mechanics & script-local coupling logic & \petscmod{cli/run\_3D\_hetero\_seepage\_SSR\_comsol\_capture.py} \\
+\bottomrule
+\end{longtable}
+
+\section{What The PETSc Split Changed}
+
+The seepage branch is no longer embedded inside one large driver script. PETSc
+separates:
+\begin{itemize}
+\item seepage mesh and boundary loading,
+\item seepage assembly and Newton flow,
+\item transfer of \code{pw}, \code{grad\_p}, and saturation into the
+mechanical stage,
+\item the final SSR mechanical solve.
+\end{itemize}
+
+The mathematics is unchanged. The packaging is modular so seepage can be run
+and debugged independently.
+
+\section{Main Edit Points}
+
+\begin{itemize}
+\item \petscmod{seepage/flow.py} for seepage numerics,
+\item \petscmod{mesh/gmsh\_waterlevels.py} and
+\petscmod{mesh/comsol\_p2.py} for seepage geometry and boundary rules,
+\item \petscmod{cli/run\_3D\_hetero\_seepage\_capture.py} for standalone
+seepage,
+\item \petscmod{cli/run\_3D\_hetero\_seepage\_SSR\_comsol\_capture.py} for the
+coupled branch.
+\end{itemize}

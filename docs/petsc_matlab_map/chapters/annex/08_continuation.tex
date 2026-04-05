@@ -1,0 +1,59 @@
+\chapter{Continuation Algorithms: Inactive Modes and Extensions}
+\label{app:continuation}
+
+This appendix chapter collects continuation branches and control-flow extensions
+that remain in the repository but are not active in the committed default PMG
+benchmark.
+
+\section{Direct SSR}
+
+The direct SSR path is still implemented through:
+\begin{itemize}
+\item \petscmod{continuation/direct.py},
+\item \petscmod{continuation/omega.py}.
+\end{itemize}
+
+It remains the closest PETSc analogue of the simpler MATLAB direct continuation
+scripts, but it is not the current default path.
+
+\section{Limit Load}
+
+The limit-load branch remains available through
+\petscmod{continuation/limit\_load.py}. It solves a different continuation
+problem with the load multiplier \(t\) instead of the SSR reduction factor
+\(\lambda\). This is active code, but outside the current benchmark.
+
+\section{Predictor Families Beyond Secant}
+
+\petscmod{continuation/indirect.py} supports predictor families beyond the
+mainline \code{secant} mode:
+\begin{itemize}
+\item \code{reduced\_newton\_all\_prev},
+\item \code{reduced\_newton\_affine\_all\_prev},
+\item \code{reduced\_newton\_window},
+\item \code{reduced\_newton\_increment\_power}.
+\end{itemize}
+
+These change the quality of the initial guess, not the continuation equations.
+
+\section{Additional Control-Flow Extensions}
+
+The inactive feature set also includes:
+\begin{itemize}
+\item adaptive omega-step control,
+\item secant correction modes,
+\item history-box step-length caps,
+\item fine-switch logic,
+\item temporary first-Newton warm starts,
+\item \code{streaming\_microstep} continuation mode.
+\end{itemize}
+
+These are real PETSc-era extensions, but they are not part of the committed
+default 3D benchmark configuration.
+
+\section{Why They Were Moved Out Of The Main Text}
+
+The mainline continuation chapter now follows the exact benchmark settings:
+\code{indirect + secant + legacy + classic}. The alternatives remain documented
+here so the document stays useful for future feature work without obscuring what
+the default benchmark actually does today.

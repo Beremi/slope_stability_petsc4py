@@ -1,0 +1,54 @@
+\chapter{Mesh, Materials, and Load Assembly: Inactive Paths}
+\label{app:mesh}
+
+This appendix chapter collects preprocessing routes that remain in the codebase
+but are not part of the default parallel PMG benchmark path.
+
+\section{Global Reference Assembly}
+
+The repository still contains the more MATLAB-like route:
+\begin{enumerate}
+\item \code{assemble\_strain\_operator(...)},
+\item \code{build\_elastic\_stiffness\_matrix(...)},
+\item \code{vector\_volume(...)}.
+\end{enumerate}
+
+That path builds the global \code{B} matrix, global \code{WEIGHT}, global
+\code{K\_elast}, and global \code{f\_V} exactly in the MATLAB style. It remains
+important for validation, serial comparison, and direct formula tracing, but it
+is not the normal PMG startup path.
+
+\section{Alternative Mesh Loaders}
+
+Additional loaders exist for cases outside the current benchmark:
+\begin{itemize}
+\item \petscmod{mesh/gmsh\_waterlevels.py} for water-level seepage meshes,
+\item \petscmod{mesh/comsol\_p2.py} for COMSOL-derived seepage input,
+\item other file-type branches inside \petscmod{mesh/loader.py}.
+\end{itemize}
+
+These matter for seepage and coupled workflows, not for the default dry
+mechanical SSR benchmark.
+
+\section{Alternative Node Orderings}
+
+\petscmod{mesh/reorder.py} still supports orderings beyond
+\code{block\_metis}:
+\begin{itemize}
+\item \code{xyz},
+\item \code{morton},
+\item \code{rcm}.
+\end{itemize}
+
+Those orderings remain useful for experiments and diagnostics, but the committed
+3D PMG benchmark is written around \code{block\_metis}.
+
+\section{Why The Global Path Remains Important}
+
+Although the owned-row path is mainline, the global path still serves three
+purposes:
+\begin{itemize}
+\item it is the shortest conceptual bridge back to MATLAB,
+\item it is the easiest correctness reference for distributed assembly,
+\item it is the cleanest serial debugging path.
+\end{itemize}

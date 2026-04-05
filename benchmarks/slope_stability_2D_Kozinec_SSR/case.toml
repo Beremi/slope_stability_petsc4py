@@ -1,0 +1,125 @@
+[benchmark]
+title = "2D Kozinec SSR"
+matlab_script = "slope_stability_2D_Kozinec_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 8
+suite = false
+
+[problem]
+name = "slope_stability_2D_Kozinec_SSR"
+case = "2d_kozinec_ssr"
+analysis = "ssr"
+dimension = 2
+variant = "hetero"
+elem_type = "P2"
+davis_type = "B"
+seepage = false
+
+[case_data]
+mesh_dir = "../../meshes/2d_kozinec"
+
+[execution]
+node_ordering = "none"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+
+[continuation]
+method = "indirect"
+lambda_init = 0.7
+d_lambda_init = 0.1
+d_lambda_min = 1e-5
+d_lambda_diff_scaled_min = 1e-3
+omega_max = 7.0e7
+step_max = 100
+
+[newton]
+it_max = 50
+it_damp_max = 10
+tol = 1e-4
+r_min = 1e-4
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 1e-1
+max_iterations = 100
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+recycle_preconditioner = true
+
+[export]
+write_custom_debug_bundle = true
+write_history_json = true
+write_solution_vtu = true
+
+[notebook]
+family = "2d_continuation"
+
+[[materials]]
+name = "subdomain_1"
+c0 = 9.0
+phi = 26.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.3
+gamma_unsat = 20.7
+
+[[materials]]
+name = "subdomain_2"
+c0 = 2.0
+phi = 33.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 19.0
+gamma_unsat = 20.5
+
+[[materials]]
+name = "subdomain_3"
+c0 = 5.0
+phi = 27.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 19.4
+gamma_unsat = 21.4
+
+[[materials]]
+name = "subdomain_4"
+c0 = 3.0
+phi = 13.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.0
+gamma_unsat = 20.5
+
+[[materials]]
+name = "subdomain_5"
+c0 = 5.0
+phi = 27.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 19.4
+gamma_unsat = 21.4
+
+[[materials]]
+name = "subdomain_6"
+c0 = 3.0
+phi = 13.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.0
+gamma_unsat = 20.5
+
+[[materials]]
+name = "subdomain_7"
+c0 = 1.0
+phi = 45.0
+psi = 0.0
+young = 16000.0
+poisson = 0.4
+gamma_sat = 20.5
+gamma_unsat = 20.6

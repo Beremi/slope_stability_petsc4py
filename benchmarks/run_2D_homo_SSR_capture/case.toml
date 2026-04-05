@@ -9,7 +9,7 @@ suite = true
 family = "2d_continuation"
 
 [problem]
-name = "benchmark_2d_homo_ssr"
+name = "run_2D_homo_SSR_capture"
 case = "2d_homo_ssr"
 analysis = "ssr"
 dimension = 2
