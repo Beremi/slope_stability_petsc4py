@@ -1,6 +1,7 @@
 LATEXMK ?= latexmk
 LATEXMKFLAGS ?= -pdf -interaction=nonstopmode -halt-on-error
-MAIN = main.tex
+REPORT_BASENAME = petsc_to_matlab_solution_map
+MAIN = $(REPORT_BASENAME).tex
 
 .PHONY: pdf clean
 
