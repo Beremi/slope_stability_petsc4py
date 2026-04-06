@@ -31,17 +31,27 @@ if [[ "$(id -u)" == "0" ]]; then
 fi
 
 python - <<'PY'
+import json
+from pathlib import Path
 from petsc4py import PETSc
 import pyvista as pv
 import nbclient
+import ipykernel
 import notebook_support as nb
 import slope_stability
 
 status = nb.viz_support_status()
+kernel_path = Path.home() / ".local" / "share" / "jupyter" / "kernels" / "slope-stability" / "kernel.json"
+assert kernel_path.exists(), f"Missing Jupyter kernel spec: {kernel_path}"
+kernel = json.loads(kernel_path.read_text(encoding="utf-8"))
+assert kernel["argv"][0].endswith("/.venv/bin/python"), kernel["argv"][0]
+assert kernel.get("env", {}).get("PETSC_ARCH") == "linux-c-opt"
 print("PETSc ranks:", PETSc.COMM_WORLD.getSize())
 print("PyVista version:", pv.__version__)
 print("nbclient version:", nbclient.__version__)
+print("ipykernel version:", ipykernel.__version__)
 print("Package version:", slope_stability.__version__)
+print("Kernel spec:", kernel_path)
 print("Viz status:", status)
 assert status["pyvista"] and status["ipywidgets"] and status["trame"]
 PY

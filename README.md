@@ -57,6 +57,22 @@ Run the whole benchmark suite:
 ./.venv/bin/python -m slope_stability.cli.run_benchmark_suite
 ```
 
+## Codespaces and devcontainer
+
+The repository ships a prebuild-friendly devcontainer under [`.devcontainer/`](/home/beremi/repos/slope_stability-1/.devcontainer).
+
+- slow setup runs in `onCreateCommand` and `updateContentCommand`, so Codespaces prebuilds can absorb:
+  - local PETSc compilation under `./.build`
+  - `petsc4py` installation against that PETSc
+  - editable project install with `test`, `viz`, `cython`, and `partition` extras
+  - Jupyter kernel registration for `Slope Stability (.venv)`
+- the attached editor then opens against the ready `.venv` interpreter with the PETSc runtime environment already exported
+- validation entrypoint:
+
+```bash
+bash .devcontainer/validate.sh --imports-only
+```
+
 ## Benchmark contract
 
 Each case folder under `benchmarks/` contains:
@@ -65,7 +81,14 @@ Each case folder under `benchmarks/` contains:
 - `run.sh`
 - `README.md`
 
-Canonical MATLAB-parity benchmark folders additionally contain `report.md`.
+Generated benchmark reports and archived comparison material live under `archive/`.
+
+Reusable full-run plotting artifacts live under:
+
+- `artifacts/simulation/generated_case.toml`
+- `artifacts/simulation/data/run_info.json`
+- `artifacts/simulation/data/petsc_run.npz`
+- `artifacts/simulation/exports/final_solution.vtu`
 
 Generated outputs go under `artifacts/...` and stay out of git.
 
