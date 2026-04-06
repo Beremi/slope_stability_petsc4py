@@ -1638,6 +1638,7 @@ def init_phase_SSR_indirect_continuation(
     constitutive_matrix_builder,
     linear_system_solver,
     *,
+    progress_callback: Callable[[dict], None] | None = None,
     newton_stopping_criterion: str = "relative_residual",
     newton_stopping_tol: float | None = None,
     init_newton_stopping_criterion: str | None = None,
@@ -1664,9 +1665,31 @@ def init_phase_SSR_indirect_continuation(
         else str(init_newton_stopping_criterion)
     )
     init_stop_tol = default_init_stop_tol if init_newton_stopping_tol is None else init_newton_stopping_tol
+    init_attempt = 0
+
+    def _init_progress(stage: str, lambda_before: float, omega_target: float | None = None):
+        if progress_callback is None:
+            return None
+
+        def _callback(event: dict) -> None:
+            progress_callback(
+                {
+                    "continuation_kind": "ssr_indirect",
+                    "phase": "init",
+                    "init_stage": str(stage),
+                    "init_attempt": int(init_attempt),
+                    "lambda_before": float(lambda_before),
+                    "omega_target": None if omega_target is None else float(omega_target),
+                    **event,
+                }
+            )
+
+        return _callback
 
     while True:
+        init_attempt += 1
         constitutive_matrix_builder.reduction(lambda1)
+        basis_before_attempt = _basis_snapshot(linear_system_solver)
         U_it, flag_N, it_newt = newton(
             U_ini,
             tol,
@@ -1678,12 +1701,14 @@ def init_phase_SSR_indirect_continuation(
             f,
             constitutive_matrix_builder,
             linear_system_solver,
+            progress_callback=_init_progress("seed", lambda1),
             stopping_criterion=str(init_stop_criterion),
             stopping_tol=init_stop_tol,
         )
         all_newton_its.append(it_newt)
         if flag_N == 0:
             break
+        _basis_restore(linear_system_solver, basis_before_attempt)
         lambda1 *= 0.5
         d_lambda *= 0.5
         if d_lambda < d_lambda_min:
@@ -1696,8 +1721,10 @@ def init_phase_SSR_indirect_continuation(
         linear_system_solver.expand_deflation_basis(_free(U_it, Q))
 
     while True:
+        init_attempt += 1
         lambda_it = lambda1 + d_lambda
         constitutive_matrix_builder.reduction(lambda_it)
+        basis_before_attempt = _basis_snapshot(linear_system_solver)
 
         U_it, flag_N, it_newt = newton(
             U1,
@@ -1710,12 +1737,14 @@ def init_phase_SSR_indirect_continuation(
             f,
             constitutive_matrix_builder,
             linear_system_solver,
+            progress_callback=_init_progress("advance", lambda_it, omega1),
             stopping_criterion=str(init_stop_criterion),
             stopping_tol=init_stop_tol,
         )
         all_newton_its.append(it_newt)
 
         if flag_N == 1:
+            _basis_restore(linear_system_solver, basis_before_attempt)
             d_lambda /= 2.0
         else:
             U2 = U_it
@@ -1891,6 +1920,7 @@ def _SSR_indirect_continuation_streaming_microstep(
         f,
         constitutive_matrix_builder,
         linear_system_solver.copy(),
+        progress_callback=progress_callback,
         newton_stopping_criterion=str(newton_stopping_criterion),
         newton_stopping_tol=newton_stopping_tol,
         init_newton_stopping_criterion=init_newton_stopping_criterion,
@@ -1903,6 +1933,19 @@ def _SSR_indirect_continuation_streaming_microstep(
     stats["init_linear_solve_time"] = delta_init["solve_time"]
     stats["init_linear_preconditioner_time"] = delta_init["preconditioner_time"]
     stats["init_linear_orthogonalization_time"] = delta_init["orthogonalization_time"]
+    _emit(
+        "init_complete",
+        phase="init",
+        accepted_steps=2,
+        lambda_hist=[float(lambda_old), float(lambda_value)],
+        omega_hist=[float(omega_old), float(omega)],
+        init_newton_iterations=[int(v) for v in init_newton_its],
+        init_linear_iterations=int(delta_init["iterations"]),
+        init_linear_solve_time=float(delta_init["solve_time"]),
+        init_linear_preconditioner_time=float(delta_init["preconditioner_time"]),
+        init_linear_orthogonalization_time=float(delta_init["orthogonalization_time"]),
+        total_wall_time=float(perf_counter() - t_total),
+    )
 
     if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
         linear_system_solver.expand_deflation_basis(_free(U_old, Q))
@@ -2629,6 +2672,7 @@ def SSR_indirect_continuation(
         f,
         constitutive_matrix_builder,
         linear_system_solver.copy(),
+        progress_callback=progress_callback,
         newton_stopping_criterion=str(newton_stopping_criterion),
         newton_stopping_tol=newton_stopping_tol,
         init_newton_stopping_criterion=init_newton_stopping_criterion,

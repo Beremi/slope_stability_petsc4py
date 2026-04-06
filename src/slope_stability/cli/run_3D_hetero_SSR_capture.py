@@ -542,6 +542,7 @@ def run_capture(
     newton_stopping_tol: float | None = None,
     linear_tolerance: float = 1e-1,
     linear_max_iter: int = 100,
+    preconditioner_threads: int = 16,
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     factor_solver_type: str | None = None,
     pc_backend: str | None = "hypre",
@@ -843,7 +844,7 @@ def run_capture(
             const_builder.set_bddc_subdomain_pattern(bddc_pattern)
 
     preconditioner_options = {
-        "threads": 16,
+        "threads": int(preconditioner_threads),
         "print_level": 0,
         "use_as_preconditioner": True,
         "factor_solver_type": factor_solver_type,
@@ -1702,6 +1703,7 @@ def main() -> None:
     parser.add_argument("--fine_switch_distance_factor", type=float, default=2.0)
     parser.add_argument("--linear_tolerance", type=float, default=1e-1)
     parser.add_argument("--linear_max_iter", type=int, default=100)
+    parser.add_argument("--preconditioner_threads", type=int, default=16)
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")
     parser.add_argument("--factor_solver_type", type=str, default=None)
     parser.add_argument("--pc_backend", type=str, default="hypre", choices=["hypre", "gamg", "bddc", "pmg", "pmg_shell"])
@@ -1842,6 +1844,7 @@ def main() -> None:
         fine_switch_distance_factor=args.fine_switch_distance_factor,
         linear_tolerance=args.linear_tolerance,
         linear_max_iter=args.linear_max_iter,
+        preconditioner_threads=args.preconditioner_threads,
         solver_type=args.solver_type,
         factor_solver_type=args.factor_solver_type,
         pc_backend=args.pc_backend,

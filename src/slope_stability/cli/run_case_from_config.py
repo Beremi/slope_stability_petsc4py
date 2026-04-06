@@ -22,7 +22,7 @@ from .run_2D_textmesh_case_capture import run_capture as run_2d_textmesh_case_ca
 from .run_2D_sloan2013_seepage_capture import run_capture as run_2d_sloan2013_seepage_capture
 from .run_3D_hetero_SSR_capture import run_capture as run_3d_ssr_capture
 from .run_3D_hetero_seepage_capture import run_capture as run_3d_hetero_seepage_capture
-from .run_3D_hetero_seepage_SSR_comsol_capture import run_capture as run_3d_comsol_ssr_capture
+from .run_3D_seepage_SSR_capture import run_capture as run_3d_seepage_ssr_capture
 
 
 def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
@@ -259,6 +259,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
     if cfg.problem.case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
         kwargs = {
             "mesh_path": cfg.problem.mesh_path,
+            "boundary_mode": "comsol" if cfg.problem.case == "3d_hetero_seepage_ssr_comsol" else "waterlevels",
             "elem_type": cfg.problem.elem_type,
             "node_ordering": cfg.execution.node_ordering,
             "lambda_init": cfg.continuation.lambda_init,
@@ -268,28 +269,15 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "omega_max_stop": cfg.continuation.omega_max,
             "continuation_predictor": cfg.continuation.predictor,
             "omega_step_controller": cfg.continuation.omega_step_controller,
-            "omega_no_increase_newton_threshold": cfg.continuation.omega_no_increase_newton_threshold,
-            "omega_half_newton_threshold": cfg.continuation.omega_half_newton_threshold,
-            "omega_target_newton_iterations": cfg.continuation.omega_target_newton_iterations,
-            "omega_adapt_min_scale": cfg.continuation.omega_adapt_min_scale,
-            "omega_adapt_max_scale": cfg.continuation.omega_adapt_max_scale,
-            "omega_hard_newton_threshold": cfg.continuation.omega_hard_newton_threshold,
-            "omega_hard_linear_threshold": cfg.continuation.omega_hard_linear_threshold,
-            "omega_efficiency_floor": cfg.continuation.omega_efficiency_floor,
-            "omega_efficiency_drop_ratio": cfg.continuation.omega_efficiency_drop_ratio,
-            "omega_efficiency_window": cfg.continuation.omega_efficiency_window,
-            "omega_hard_shrink_scale": cfg.continuation.omega_hard_shrink_scale,
             "step_max": cfg.continuation.step_max,
             "it_newt_max": cfg.newton.it_max,
             "it_damp_max": cfg.newton.it_damp_max,
             "tol": cfg.newton.tol,
             "r_min": cfg.newton.r_min,
+            "newton_stopping_criterion": cfg.newton.stopping_criterion,
+            "newton_stopping_tol": cfg.newton.stopping_tol,
             "mpi_distribute_by_nodes": cfg.execution.mpi_distribute_by_nodes,
             "pc_backend": linear.pc_backend,
-            "preconditioner_matrix_source": linear.preconditioner_matrix_source,
-            "preconditioner_matrix_policy": linear.preconditioner_matrix_policy,
-            "preconditioner_rebuild_policy": linear.preconditioner_rebuild_policy,
-            "preconditioner_rebuild_interval": linear.preconditioner_rebuild_interval,
             "pc_hypre_coarsen_type": linear.pc_hypre_coarsen_type or "HMIS",
             "pc_hypre_interp_type": linear.pc_hypre_interp_type or "ext+i",
             "pc_hypre_strong_threshold": linear.pc_hypre_strong_threshold,
@@ -297,33 +285,16 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "pc_hypre_P_max": linear.pc_hypre_P_max,
             "pc_hypre_agg_nl": linear.pc_hypre_agg_nl,
             "pc_hypre_nongalerkin_tol": linear.pc_hypre_nongalerkin_tol,
-            "pc_bddc_symmetric": linear.pc_bddc_symmetric,
-            "pc_bddc_dirichlet_ksp_type": linear.pc_bddc_dirichlet_ksp_type,
-            "pc_bddc_dirichlet_pc_type": linear.pc_bddc_dirichlet_pc_type,
-            "pc_bddc_neumann_ksp_type": linear.pc_bddc_neumann_ksp_type,
-            "pc_bddc_neumann_pc_type": linear.pc_bddc_neumann_pc_type,
-            "pc_bddc_coarse_ksp_type": linear.pc_bddc_coarse_ksp_type,
-            "pc_bddc_coarse_pc_type": linear.pc_bddc_coarse_pc_type,
-            "pc_bddc_dirichlet_approximate": linear.pc_bddc_dirichlet_approximate,
-            "pc_bddc_neumann_approximate": linear.pc_bddc_neumann_approximate,
-            "pc_bddc_monolithic": linear.pc_bddc_monolithic,
-            "pc_bddc_coarse_redundant_pc_type": linear.pc_bddc_coarse_redundant_pc_type,
-            "pc_bddc_switch_static": linear.pc_bddc_switch_static,
-            "pc_bddc_use_deluxe_scaling": linear.pc_bddc_use_deluxe_scaling,
-            "pc_bddc_use_vertices": linear.pc_bddc_use_vertices,
-            "pc_bddc_use_edges": linear.pc_bddc_use_edges,
-            "pc_bddc_use_faces": linear.pc_bddc_use_faces,
-            "pc_bddc_use_change_of_basis": linear.pc_bddc_use_change_of_basis,
-            "pc_bddc_use_change_on_faces": linear.pc_bddc_use_change_on_faces,
-            "pc_bddc_check_level": linear.pc_bddc_check_level,
             "recycle_preconditioner": linear.recycle_preconditioner,
             "constitutive_mode": cfg.execution.constitutive_mode,
             "tangent_kernel": cfg.execution.tangent_kernel,
             "seepage_linear_tolerance": cfg.seepage.linear_tolerance,
             "seepage_linear_max_iter": cfg.seepage.linear_max_iter,
+            "water_unit_weight": cfg.seepage.water_unit_weight,
+            "conductivity": list(cfg.seepage.conductivity) if cfg.seepage.conductivity else None,
             **common_linear,
         }
-        return run_3d_comsol_ssr_capture, kwargs
+        return run_3d_seepage_ssr_capture, kwargs
     raise KeyError(f"Unsupported case id {cfg.problem.case!r}")
 
 

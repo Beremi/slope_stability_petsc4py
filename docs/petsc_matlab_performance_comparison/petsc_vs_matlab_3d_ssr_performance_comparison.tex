@@ -1,0 +1,115 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper,margin=1.6cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{xurl}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage{bookmark}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+  pdftitle={PETSc vs MATLAB 3D SSR Performance Comparison},
+  pdfauthor={OpenAI Codex}
+}
+
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0pt}
+\renewcommand{\arraystretch}{1.15}
+\setlist[itemize]{leftmargin=1.5em, itemsep=0.2em, topsep=0.2em}
+\sisetup{
+  round-mode=places,
+  round-precision=3,
+  scientific-notation=true,
+  table-number-alignment=center,
+}
+
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\newcommand{\StudyFigure}[2]{%
+  \IfFileExists{#1}{%
+    \begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{#1}
+    \caption{#2}
+    \end{figure}
+  }{%
+    \begin{figure}[H]
+    \centering
+    \fbox{\parbox{0.92\textwidth}{\centering Figure not generated yet: \code{#1}}}
+    \caption{#2}
+    \end{figure}
+  }%
+}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large PETSc vs MATLAB 3D SSR Performance Comparison\par}
+\vspace{0.8cm}
+{\large slope\_stability\par}
+\vspace{1.0cm}
+{\large Indirect SSR, P2 elements, MPI-8 PETSc vs OMP-8 MATLAB\par}
+\vfill
+\begin{tabular}{rl}
+Repository: & \code{/home/beremi/repos/slope\_stability-1} \\
+Study root: & \code{docs/petsc\_matlab\_performance\_comparison} \\
+Raw artifacts: & \code{artifacts/petsc\_matlab\_performance\_comparison} \\
+\end{tabular}
+\vfill
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+\section{Methodology}
+The comparison uses indirect SSR only and P2 elements only. The three primary cases are homogeneous 3D SSR, heterogeneous 3D SSR, and heterogeneous 3D seepage SSR on the concave mesh ladder.
+
+PETSc runs use \code{mpirun -n 8} with \code{OMP\_NUM\_THREADS=1}. MATLAB runs use \code{OMP\_NUM\_THREADS=8} and the BoomerAMG MATLAB path with 8 threads. All main PETSc and MATLAB runs for a given case share the same continuation horizon, estimated by a PETSc smoke run on the coarsest physical mesh with \code{d\_lambda\_diff\_scaled\_min = 0.01}. Main runs then disable the continuation delta-lambda stop and terminate on \(\omega_{\max}\). The seepage case also uses a case-specific continuation seed \code{lambda\_init = 0.00546875} and \code{d\_lambda\_init = 0.01} in both codes to avoid repeated failed initialization solves on the waterlevels ladder.
+
+The heterogeneous 3D case adds one appendix variant where PETSc Newton stopping changes from relative residual to absolute delta-lambda with tolerance \(10^{-4}\).
+
+The homogeneous and heterogeneous dry cases use the requested relative-residual Newton tolerance \(10^{-4}\). For the waterlevels seepage ladder, repeated smoke attempts showed that the original \(10^{-4}\) init-phase target was not attainable on the chosen meshes with the shared study formulation, so the seepage comparison uses the same relative-residual criterion in both codes with a case-specific tolerance \(5\times 10^{-2}\). This keeps PETSc and MATLAB aligned within the seepage case while preserving the original \(10^{-4}\) setting for the two dry reference cases.
+
+\section{Environment And Outputs}
+The report consumes only normalized CSV files under \code{data/}. Figures are generated as vector PDFs under \code{figures/}, and table fragments are generated under \code{generated/}. Long-running raw solver outputs remain under \code{artifacts/petsc\_matlab\_performance\_comparison}. Figures and tables include only completed PETSc/MATLAB runs captured in those CSV files.
+
+\section{Homogeneous 3D SSR}
+\StudyFigure{figures/homo_3d_continuation.pdf}{Continuation curves by mesh level for the homogeneous 3D SSR case.}
+\StudyFigure{figures/homo_3d_timings.pdf}{Runtime comparison by mesh level for the homogeneous 3D SSR case.}
+\IfFileExists{generated/homo_3d_table.tex}{\input{generated/homo_3d_table.tex}}{\textit{Homogeneous summary table not generated yet.}}
+
+\section{Heterogeneous 3D SSR}
+\StudyFigure{figures/hetero_3d_continuation.pdf}{Continuation curves by mesh level for the heterogeneous 3D SSR case.}
+\StudyFigure{figures/hetero_3d_timings.pdf}{Runtime comparison by mesh level for the heterogeneous 3D SSR case.}
+\IfFileExists{generated/hetero_3d_table.tex}{\input{generated/hetero_3d_table.tex}}{\textit{Heterogeneous summary table not generated yet.}}
+
+\section{Heterogeneous 3D Seepage SSR}
+\StudyFigure{figures/seepage_3d_continuation.pdf}{Continuation curves by mesh level for the heterogeneous 3D seepage SSR case.}
+\StudyFigure{figures/seepage_3d_timings.pdf}{Runtime comparison by mesh level for the heterogeneous 3D seepage SSR case.}
+\IfFileExists{generated/seepage_3d_table.tex}{\input{generated/seepage_3d_table.tex}}{\textit{Seepage summary table not generated yet.}}
+
+Only the \code{concave\_L2} seepage level completed under the requested mixed PMG-shell study setup. The next seepage level, \code{concave}, reproducibly failed on the PETSc side after hierarchy construction and outer-solver setup, with a rank-4 SIGSEGV in the mixed \code{P2(LN)->P1(LN)->P1(Lc)} shell hierarchy. Same-mesh fallback diagnostics avoided the crash but did not yield a usable converged benchmark within the locked study protocol, so the seepage section reports the completed \code{concave\_L2} comparison only.
+
+\appendix
+\section{Heterogeneous 3D Newton Stopping Appendix}
+\StudyFigure{figures/hetero_3d_delta_lambda_continuation.pdf}{Continuation curves for heterogeneous 3D SSR with the PETSc delta-lambda appendix variant.}
+\StudyFigure{figures/hetero_3d_delta_lambda_timings.pdf}{Timing comparison for heterogeneous 3D SSR with the PETSc delta-lambda appendix variant.}
+\IfFileExists{generated/hetero_3d_delta_lambda_table.tex}{\input{generated/hetero_3d_delta_lambda_table.tex}}{\textit{Delta-lambda appendix table not generated yet.}}
+
+\end{document}

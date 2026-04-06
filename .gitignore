@@ -51,3 +51,7 @@ src/slope_stability.egg-info/
 convert_eol.fish
 poznamky.docx
 poznamky_MB.docx
+
+# Local study manifests
+docs/petsc_matlab_performance_comparison/mesh_manifest.local.toml
+!docs/petsc_matlab_performance_comparison/petsc_vs_matlab_3d_ssr_performance_comparison.pdf

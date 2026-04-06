@@ -1,0 +1,11 @@
+mesh_manifest.local.toml
+generated/*.tex
+figures/*.pdf
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.pdf
+*.toc
+!petsc_vs_matlab_3d_ssr_performance_comparison.pdf

@@ -12,7 +12,7 @@ from scipy.sparse import coo_matrix, csr_matrix
 from ..core.simplex_lagrange import tetra_reference_nodes
 from ..fem.basis import local_basis_volume_3d
 from ..fem.distributed_elastic import find_overlap_partition
-from ..mesh import MaterialSpec, load_mesh_from_file, reorder_mesh_nodes
+from ..mesh import MaterialSpec, load_mesh_from_file, load_mesh_gmsh_waterlevels, reorder_mesh_nodes
 from ..problem_assets import load_material_rows_for_path
 from ..utils import owned_block_range, q_to_free_indices
 
@@ -302,7 +302,11 @@ def _build_level(
     boundary_type: int,
     comm,
 ) -> PMGLevel:
-    mesh = load_mesh_from_file(mesh_path, boundary_type=boundary_type, elem_type=elem_type)
+    mesh_path_lower = mesh_path.as_posix().lower()
+    if "waterlevels" in mesh_path_lower and str(elem_type).strip().upper() in {"P1", "P2"}:
+        mesh = load_mesh_gmsh_waterlevels(mesh_path, elem_type=elem_type)
+    else:
+        mesh = load_mesh_from_file(mesh_path, boundary_type=boundary_type, elem_type=elem_type)
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,

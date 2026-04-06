@@ -1,0 +1,204 @@
+[study]
+title = "PETSc vs MATLAB 3D SSR Performance Comparison"
+artifact_root = "../../artifacts/petsc_matlab_performance_comparison"
+petsc_python = "../../.venv/bin/python"
+matlab_bin = "/usr/local/bin/matlab"
+mpi_ranks = 8
+petsc_runtime_limit_seconds = 1000.0
+
+[defaults]
+elem_type = "P2"
+continuation_method = "indirect"
+continuation_predictor = "secant"
+omega_step_controller = "legacy"
+d_lambda_init = 0.1
+d_lambda_diff_scaled_min_smoke = 0.01
+d_lambda_diff_scaled_min_main = 0.0
+step_max = 100
+tol = 1e-4
+r_min = 1e-4
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+tangent_kernel = "rows"
+petsc_solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+petsc_linear_tolerance = 1e-1
+petsc_linear_max_iter = 100
+petsc_preconditioner_threads = 1
+petsc_pc_backend = "pmg_shell"
+petsc_seepage_linear_tolerance = 1e-10
+petsc_seepage_linear_max_iter = 500
+matlab_solver_type = "DFGMRES_HYPRE_BOOMERAMG"
+matlab_boomeramg_threads = 8
+matlab_omp_threads = 8
+
+[defaults.newton]
+criterion = "relative_residual"
+delta_lambda_criterion = "absolute_delta_lambda"
+delta_lambda_tol = 1e-4
+
+[defaults.pmg]
+fine_hierarchy_mode = "default"
+petsc_opt = [
+  "manualmg_coarse_operator_source=direct_elastic_full_system",
+  "mg_levels_ksp_type=chebyshev",
+  "mg_levels_ksp_max_it=3",
+  "mg_levels_pc_type=jacobi",
+  "mg_coarse_ksp_type=cg",
+  "mg_coarse_max_it=4",
+  "mg_coarse_rtol=0.0",
+  "pc_hypre_boomeramg_numfunctions=3",
+  "pc_hypre_boomeramg_nodal_coarsen=6",
+  "pc_hypre_boomeramg_nodal_coarsen_diag=1",
+  "pc_hypre_boomeramg_vec_interp_variant=3",
+  "pc_hypre_boomeramg_vec_interp_qmax=4",
+  "pc_hypre_boomeramg_vec_interp_smooth=true",
+  "pc_hypre_boomeramg_coarsen_type=HMIS",
+  "pc_hypre_boomeramg_interp_type=ext+i",
+  "pc_hypre_boomeramg_P_max=4",
+  "pc_hypre_boomeramg_strong_threshold=0.5",
+  "pc_hypre_boomeramg_max_iter=4",
+  "pc_hypre_boomeramg_tol=0.0",
+  "pc_hypre_boomeramg_relax_type_all=symmetric-SOR/Jacobi",
+]
+
+[[cases]]
+id = "homo_3d"
+label = "Homogeneous 3D SSR"
+report_slug = "homo_3d"
+petsc_module = "slope_stability.cli.run_3D_homo_SSR_capture"
+matlab_script = "run_3D_homo_SSR_study_capture"
+boundary_mode = "none"
+lambda_init = 0.9
+d_lambda_min = 1e-5
+omega_smoke_seed = 1.0e6
+it_newt_max = 50
+it_damp_max = 10
+appendix_delta_lambda = false
+
+[[cases.levels]]
+id = "L1"
+label = "L1"
+petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+matlab_mesh_key = "homo_l1"
+
+[[cases.levels]]
+id = "L2"
+label = "L2"
+petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L2.msh"
+matlab_mesh_key = "homo_l2"
+pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+
+[[cases.levels]]
+id = "L3"
+label = "L3"
+petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L3.msh"
+matlab_mesh_key = "homo_l3"
+pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+
+[[cases.levels]]
+id = "L4"
+label = "L4"
+petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L4.msh"
+matlab_mesh_key = "homo_l4"
+pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+
+[[cases.levels]]
+id = "L5"
+label = "L5"
+petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L5.msh"
+matlab_mesh_key = "homo_l5"
+pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+
+[[cases]]
+id = "hetero_3d"
+label = "Heterogeneous 3D SSR"
+report_slug = "hetero_3d"
+petsc_module = "slope_stability.cli.run_3D_hetero_SSR_capture"
+matlab_script = "run_3D_hetero_SSR_study_capture"
+boundary_mode = "none"
+lambda_init = 1.0
+d_lambda_min = 1e-3
+omega_smoke_seed = 1.2e7
+it_newt_max = 200
+it_damp_max = 10
+appendix_delta_lambda = true
+
+[[cases.levels]]
+id = "L1"
+label = "L1"
+petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+matlab_mesh_key = "hetero_l1"
+
+[[cases.levels]]
+id = "L2"
+label = "L2"
+petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L2.msh"
+matlab_mesh_key = "hetero_l2"
+pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+
+[[cases.levels]]
+id = "L3"
+label = "L3"
+petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L3.msh"
+matlab_mesh_key = "hetero_l3"
+pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+
+[[cases.levels]]
+id = "L4"
+label = "L4"
+petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L4.msh"
+matlab_mesh_key = "hetero_l4"
+pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+
+[[cases.levels]]
+id = "L5"
+label = "L5"
+petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L5.msh"
+matlab_mesh_key = "hetero_l5"
+pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+
+[[cases]]
+id = "seepage_3d"
+label = "Heterogeneous 3D Seepage SSR"
+report_slug = "seepage_3d"
+petsc_module = "slope_stability.cli.run_3D_seepage_SSR_capture"
+matlab_script = "run_3D_hetero_seepage_SSR_study_capture"
+boundary_mode = "waterlevels"
+lambda_init = 0.00546875
+d_lambda_init = 0.01
+d_lambda_min = 1e-5
+omega_smoke_seed = 7.0e7
+it_newt_max = 50
+it_damp_max = 10
+tol = 5e-2
+appendix_delta_lambda = false
+water_unit_weight = 9.81
+conductivity = [1.0, 1.0, 1.0, 1.0]
+
+[[cases.levels]]
+id = "concave_L2"
+label = "concave L2"
+petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
+matlab_mesh_key = "seepage_concave_l2"
+
+[[cases.levels]]
+id = "concave"
+label = "concave"
+petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave.msh"
+matlab_mesh_key = "seepage_concave"
+pmg_coarse_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
+
+[[cases.levels]]
+id = "concave_L3"
+label = "concave L3"
+petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L3.msh"
+matlab_mesh_key = "seepage_concave_l3"
+pmg_coarse_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
+
+[[cases.levels]]
+id = "concave_L4"
+label = "concave L4"
+petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L4.msh"
+matlab_mesh_key = "seepage_concave_l4"
+pmg_coarse_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
