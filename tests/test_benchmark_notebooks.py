@@ -246,6 +246,137 @@ def test_display_jupyter_backend_reads_notebook_setting_and_honors_override() ->
     assert module._display_jupyter_backend(case_toml, override="static") == "static"  # noqa: SLF001
 
 
+def test_display_jupyter_backend_honors_env_override(monkeypatch) -> None:
+    module = _support()
+    case_toml = BENCHMARKS_DIR / "slope_stability_3D_homo_SSR" / "case.toml"
+
+    monkeypatch.setenv("SLOPE_STABILITY_JUPYTER_BACKEND", "html")
+
+    assert module._display_jupyter_backend(case_toml) == "html"  # noqa: SLF001
+
+
+def test_codespaces_backend_autoswitches_interactive_backend_to_html(monkeypatch) -> None:
+    module = _support()
+
+    monkeypatch.setenv("CODESPACES", "true")
+
+    assert module._codespaces_backend_autoswitch("trame") == "html"  # noqa: SLF001
+    assert module._codespaces_backend_autoswitch("client") == "html"  # noqa: SLF001
+    assert module._codespaces_backend_autoswitch("static") == "static"  # noqa: SLF001
+
+
+def test_profile_mpi_ranks_caps_to_cpu_count_in_codespaces(monkeypatch) -> None:
+    module = _support()
+    metadata = {"mpi_ranks": 8}
+
+    monkeypatch.setenv("CODESPACES", "true")
+    monkeypatch.delenv("SLOPE_STABILITY_MPI_RANKS", raising=False)
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 2)
+
+    assert module._profile_mpi_ranks(metadata, "benchmark") == 2  # noqa: SLF001
+
+
+def test_profile_mpi_ranks_honors_env_override(monkeypatch) -> None:
+    module = _support()
+    metadata = {"mpi_ranks": 8}
+
+    monkeypatch.setenv("SLOPE_STABILITY_MPI_RANKS", "5")
+
+    assert module._profile_mpi_ranks(metadata, "benchmark") == 5  # noqa: SLF001
+
+
+def test_should_use_mpi_oversubscribe_for_codespaces_and_env_override(monkeypatch) -> None:
+    module = _support()
+
+    monkeypatch.setenv("CODESPACES", "true")
+    monkeypatch.delenv("SLOPE_STABILITY_MPI_OVERSUBSCRIBE", raising=False)
+    assert module._should_use_mpi_oversubscribe(2) is True  # noqa: SLF001
+
+    monkeypatch.setenv("SLOPE_STABILITY_MPI_OVERSUBSCRIBE", "0")
+    assert module._should_use_mpi_oversubscribe(8) is False  # noqa: SLF001
+
+    monkeypatch.setenv("SLOPE_STABILITY_MPI_OVERSUBSCRIBE", "1")
+    assert module._should_use_mpi_oversubscribe(1) is True  # noqa: SLF001
+
+
+def test_show_plotter_html_backend_exports_iframe(monkeypatch) -> None:
+    module = _support()
+
+    class DummyBuffer:
+        def getvalue(self):
+            return "<html><body>vtk</body></html>"
+
+    class DummyPlotter:
+        def __init__(self):
+            self.closed = False
+
+        def export_html(self, filename):
+            assert filename is None
+            return DummyBuffer()
+
+        def close(self):
+            self.closed = True
+
+    plotter = DummyPlotter()
+    rendered = module._show_plotter(plotter, jupyter_backend="html")  # noqa: SLF001
+
+    assert "iframe" in rendered.data
+    assert "srcdoc=" in rendered.data
+    assert plotter.closed is True
+
+
+def test_run_parallel_case_tolerates_sigterm_after_artifacts_written(tmp_path, monkeypatch) -> None:
+    module = _support()
+    out_dir = tmp_path / "out"
+    data_dir = out_dir / "data"
+    exports_dir = out_dir / "exports"
+    data_dir.mkdir(parents=True)
+    exports_dir.mkdir(parents=True)
+    (data_dir / "run_info.json").write_text("{}", encoding="utf-8")
+    np.savez(data_dir / "petsc_run.npz", lambda_hist=np.array([1.0]), omega_hist=np.array([2.0]))
+    (exports_dir / "final_solution.vtu").write_text("<VTKFile/>", encoding="utf-8")
+    config_path = tmp_path / "case.toml"
+    config_path.write_text("[problem]\nname='x'\n", encoding="utf-8")
+
+    class DummyProcess:
+        def __init__(self):
+            self.stdout = iter(["done\n"])
+            self._poll_calls = 0
+
+        def poll(self):
+            self._poll_calls += 1
+            return None if self._poll_calls == 1 else 143
+
+        def wait(self):
+            return 143
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: DummyProcess())
+    monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "_drain_progress", lambda path, offset: offset)
+    monkeypatch.setattr(
+        module,
+        "load_run_artifacts",
+        lambda _out_dir: SimpleNamespace(
+            data_dir=data_dir,
+            vtu_path=exports_dir / "final_solution.vtu",
+            run_info={"run_info": {"runtime_seconds": 1.0, "step_count": 1}},
+            npz={"lambda_hist": np.array([1.0]), "omega_hist": np.array([2.0])},
+        ),
+    )
+
+    with pytest.warns(RuntimeWarning, match="Treating this as a successful"):
+        result = module.run_parallel_case(
+            config_path=config_path,
+            out_dir=out_dir,
+            mpi_ranks=2,
+            clean_out_dir=False,
+        )
+
+    assert result["step_count"] == 1
+    assert result["lambda_last"] == 1.0
+    assert result["omega_last"] == 2.0
+
+
 def test_slope_stability_3D_hetero_SSR_default_visualisation_includes_deviatoric_slices() -> None:
     source = _notebook_sources(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "visualisation.ipynb")
 

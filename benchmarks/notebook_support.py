@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import importlib.util
+from html import escape as html_escape
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import sys
 import threading
 import time
 import tomllib
+import warnings
 from queue import Empty, Queue
 from textwrap import dedent
 from typing import Any
@@ -132,6 +134,14 @@ class NotebookExecution:
     run_result: dict[str, Any] | None
 
 
+@dataclass(frozen=True)
+class InlineHtml:
+    data: str
+
+    def _repr_html_(self) -> str:
+        return self.data
+
+
 def benchmark_case_tomls(root: Path = BENCHMARKS_DIR) -> list[Path]:
     return sorted(path for path in root.glob("*/case.toml") if path.is_file())
 
@@ -165,6 +175,33 @@ def load_case_metadata(case_toml: Path) -> dict[str, Any]:
         "surface_decimate_reduction": float(notebook.get("surface_decimate_reduction", 0.0)),
         "boundary_edge_overlay": bool(notebook.get("boundary_edge_overlay", False)),
     }
+
+
+def _codespaces_active() -> bool:
+    return str(os.environ.get("CODESPACES", "")).strip().lower() == "true"
+
+
+def _env_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not str(value).strip():
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except ValueError:
+        return None
+    return max(parsed, 1)
+
+
+def _env_flag(name: str, *, default: bool | None = None) -> bool | None:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def load_case_sections(case_toml: Path) -> dict[str, dict[str, Any]]:
@@ -367,6 +404,7 @@ def run_parallel_case(
 
     cmd = [
         str(mpiexec),
+        *(["--oversubscribe"] if _should_use_mpi_oversubscribe(mpi_ranks) else []),
         "-n",
         str(int(mpi_ranks)),
         str(python_executable),
@@ -426,7 +464,7 @@ def run_parallel_case(
     stdout_thread.join(timeout=1.0)
     _drain_progress(progress_path, progress_position)
     return_code = int(process.wait())
-    if return_code != 0:
+    if return_code != 0 and not _tolerate_sigterm_success(out_dir, return_code):
         raise RuntimeError(f"Parallel solve failed with exit code {return_code}.")
 
     artifacts = load_run_artifacts(out_dir)
@@ -451,6 +489,31 @@ def run_parallel_case(
         "omega_last": omega_last,
         "runtime_seconds": runtime,
     }
+
+
+def _should_use_mpi_oversubscribe(mpi_ranks: int) -> bool:
+    forced = _env_flag("SLOPE_STABILITY_MPI_OVERSUBSCRIBE")
+    if forced is not None:
+        return forced
+    cpu_count = os.cpu_count() or 1
+    return _codespaces_active() or int(mpi_ranks) > int(cpu_count)
+
+
+def _tolerate_sigterm_success(out_dir: Path, return_code: int) -> bool:
+    if int(return_code) != 143:
+        return False
+    out_dir = Path(out_dir)
+    if not ((out_dir / "data" / "run_info.json").exists() and (out_dir / "data" / "petsc_run.npz").exists()):
+        return False
+    warnings.warn(
+        (
+            f"MPI runner exited with code 143 after writing solver artifacts under {out_dir}. "
+            "Treating this as a successful containerized shutdown."
+        ),
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return True
 
 
 def _run_completion_summary(artifacts: RunArtifacts) -> dict[str, Any]:
@@ -1383,6 +1446,9 @@ def _display_surface_decimate_reduction(case_toml: Path, *, override: float | No
 def _display_jupyter_backend(case_toml: Path, *, override: str | None = None) -> str:
     if override is not None:
         return str(override)
+    env_override = os.environ.get("SLOPE_STABILITY_JUPYTER_BACKEND")
+    if env_override is not None and str(env_override).strip():
+        return str(env_override)
     metadata = load_case_metadata(case_toml)
     return str(metadata.get("jupyter_backend", "trame"))
 
@@ -1713,7 +1779,14 @@ def _profile_mpi_ranks(metadata: dict[str, Any], execution_profile: str) -> int:
     profile = str(execution_profile).strip().lower()
     if profile == "smoke":
         return 1
-    return int(metadata.get("mpi_ranks", 8))
+    env_override = _env_int("SLOPE_STABILITY_MPI_RANKS")
+    if env_override is not None:
+        return env_override
+    configured = int(metadata.get("mpi_ranks", 8))
+    if _codespaces_active():
+        cpu_count = os.cpu_count() or 1
+        return max(1, min(configured, int(cpu_count)))
+    return configured
 
 
 def _import_pyvista():
@@ -1728,6 +1801,15 @@ def _import_pyvista():
     return pv
 
 
+def _codespaces_backend_autoswitch(backend: str) -> str:
+    normalized = str(backend).strip().lower()
+    if not _codespaces_active():
+        return normalized
+    if normalized in {"client", "server", "trame", "auto", ""}:
+        return "html"
+    return normalized
+
+
 def _new_plotter(pv, *, title: str):
     plotter = pv.Plotter(notebook=True)
     plotter.add_title(title, font_size=12)
@@ -1740,6 +1822,19 @@ def _show_plotter(plotter, case_toml: Path | None = None, *, jupyter_backend: st
         backend = _display_jupyter_backend(case_toml)
     if backend is None:
         backend = "trame" if _module_available("ipywidgets") and _module_available("trame") else "static"
+    backend = _codespaces_backend_autoswitch(str(backend))
+    if backend == "html":
+        try:
+            exported = plotter.export_html(None)
+            html_doc = exported.getvalue() if hasattr(exported, "getvalue") else str(exported)
+            iframe = (
+                '<iframe '
+                'style="width: 100%; height: 720px; border: 0;" '
+                f'srcdoc="{html_escape(html_doc, quote=True)}"></iframe>'
+            )
+            return InlineHtml(iframe)
+        finally:
+            plotter.close()
     return plotter.show(jupyter_backend=backend)
 
 
