@@ -1,0 +1,17 @@
+{
+  "artifact_dir": "/home/beremi/repos/slope_stability-1/artifacts/heterogeneous_3d_ssr_integration_point_study/p4_q45_no_dlambda_scaled",
+  "runtime_seconds": 13106.133148722001,
+  "step_count": 10,
+  "lambda_last": 1.5734398638500362,
+  "omega_last": 6700000.0,
+  "umax_last": 6.0313269341123235,
+  "omega_monotone": true,
+  "lambda_monotone": false,
+  "reached_target": true,
+  "stop_reason": "omega_max_stop",
+  "attempt_count_total": 8,
+  "step_newton_total": 98.0,
+  "step_linear_total": 11636.0,
+  "max_step_newton": 49.0,
+  "max_step_linear": 7676.0
+}
