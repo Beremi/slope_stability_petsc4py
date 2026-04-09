@@ -48,6 +48,9 @@ def init_phase_SSR_direct_continuation(
     f: np.ndarray,
     constitutive_matrix_builder,
     linear_system_solver,
+    *,
+    newton_stopping_criterion: str = "relative_residual",
+    newton_stopping_tol: float | None = None,
 ):
     """Initial two-step phase for the direct continuation algorithm."""
 
@@ -70,6 +73,8 @@ def init_phase_SSR_direct_continuation(
         f,
         constitutive_matrix_builder,
         linear_system_solver.copy(),
+        stopping_criterion=str(newton_stopping_criterion),
+        stopping_tol=newton_stopping_tol,
     )
     if flag == 1:
         raise RuntimeError("Initial choice of lambda seems to be too large.")
@@ -96,6 +101,8 @@ def init_phase_SSR_direct_continuation(
             f,
             constitutive_matrix_builder,
             linear_system_solver.copy(),
+            stopping_criterion=str(newton_stopping_criterion),
+            stopping_tol=newton_stopping_tol,
         )
         if flag == 1:
             d_lambda /= 2.0
@@ -131,6 +138,10 @@ def SSR_direct_continuation(
     f: np.ndarray,
     constitutive_matrix_builder,
     linear_system_solver,
+    *,
+    omega_max_stop: float | None = None,
+    newton_stopping_criterion: str = "relative_residual",
+    newton_stopping_tol: float | None = None,
 ):
     """Direct continuation loop over the reduction factor ``lambda``."""
 
@@ -156,6 +167,8 @@ def SSR_direct_continuation(
         f,
         constitutive_matrix_builder,
         linear_system_solver,
+        newton_stopping_criterion=str(newton_stopping_criterion),
+        newton_stopping_tol=newton_stopping_tol,
     )
 
     if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
@@ -170,6 +183,13 @@ def SSR_direct_continuation(
     omega_hist[1] = omega
     Umax_hist[1] = np.max(np.linalg.norm(U, axis=0))
     work_hist[1] = float(np.dot(U.ravel(order="F"), f.ravel(order="F")))
+
+    if omega_max_stop is not None and max(float(omega_old), float(omega)) >= float(omega_max_stop):
+        lambda_hist = lambda_hist[:2]
+        omega_hist = omega_hist[:2]
+        Umax_hist = Umax_hist[:2]
+        work_hist = work_hist[:2]
+        return U, lambda_hist, omega_hist, Umax_hist, work_hist
 
     d_omega = omega - omega_old
     d_lambda = lambda_it - lambda_init
@@ -192,6 +212,8 @@ def SSR_direct_continuation(
             f,
             constitutive_matrix_builder,
             linear_system_solver,
+            stopping_criterion=str(newton_stopping_criterion),
+            stopping_tol=newton_stopping_tol,
         )
         _basis_restore(linear_system_solver, basis_before_attempt)
         _notify_attempt(linear_system_solver, success=(flag == 0))
@@ -212,7 +234,13 @@ def SSR_direct_continuation(
             if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
                 linear_system_solver.expand_deflation_basis(U.reshape(-1, order="F")[q_to_free_indices(Q)])
 
-            if (d_lambda / d_omega_test) * (omega_hist[step - 1] - omega_hist[0]) < d_lambda_diff_scaled_min:
+            if omega_max_stop is not None and float(omega) >= float(omega_max_stop):
+                break
+
+            if (
+                d_lambda_diff_scaled_min > 0.0
+                and (d_lambda / d_omega_test) * (omega_hist[step - 1] - omega_hist[0]) < d_lambda_diff_scaled_min
+            ):
                 break
 
             if d_omega_test > 1.5 * d_omega:

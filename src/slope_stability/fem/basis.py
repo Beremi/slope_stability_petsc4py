@@ -202,6 +202,9 @@ def local_basis_volume_3d(elem_type: str, xi: np.ndarray):
         )
         return hatp, dhat1, dhat2, dhat3
 
+    if elem_type == "P3":
+        return evaluate_tetra_lagrange_basis(3, xi)
+
     if elem_type == "P4":
         return evaluate_tetra_lagrange_basis(4, xi)
 

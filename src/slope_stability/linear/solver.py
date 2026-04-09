@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Callable
@@ -872,6 +873,24 @@ def _basis_diagnostics(basis: np.ndarray, A=None, *, basis_A: np.ndarray | None 
     }
 
 
+def _petsc_garbage_cleanup(comm=None) -> None:
+    if PETSc is None:
+        return
+    cleanup = getattr(PETSc, "garbage_cleanup", None)
+    if not callable(cleanup):
+        return
+    try:
+        if comm is None:
+            cleanup()
+        else:
+            cleanup(comm)
+    except TypeError:
+        cleanup()
+    except Exception:
+        # Cleanup is a best-effort mitigation for petsc4py object-lifetime issues.
+        return
+
+
 class DirectSolver:
     """Direct solver wrapper using PETSc LU (or dense NumPy fallback)."""
 
@@ -1392,15 +1411,15 @@ class PetscKSPFGMRESSolver:
         self._preconditioner_diagnostics.preconditioner_apply_time_last = float(elapsed)
         self._preconditioner_diagnostics.preconditioner_apply_time_total += float(elapsed)
         if self._pc_backend == "pmg" and self._pmg_state is not None:
-            self._pmg_last_apply_info = self._pmg_collect_pc_diagnostics(
-                apply_elapsed_s=float(elapsed),
-                phase="solve",
-            )
+            self._pmg_last_apply_info = {
+                "pmg_last_pc_apply_time_s": float(elapsed),
+                "pmg_last_phase": "solve",
+            }
         if self._pc_backend == "pmg_shell" and self._manualmg_context is not None:
-            self._manualmg_last_apply_info = self._manualmg_context.diagnostics(
-                apply_elapsed_s=float(elapsed),
-                phase="solve",
-            )
+            self._manualmg_last_apply_info = {
+                "manualmg_last_pc_apply_time_s": float(elapsed),
+                "manualmg_last_phase": "solve",
+            }
 
     def _destroy_owned_petsc_matrix(self, A, owns: bool) -> None:
         if A is not None and owns:
@@ -2680,10 +2699,7 @@ class _ProjectedMatlabDeflationPC:
     def apply(self, pc, x, y) -> None:
         if self._tmp is None:
             self._tmp = self.solver._A_petsc.createVecRight()
-        self._tmp.set(0.0)
-        t0 = perf_counter()
-        self.solver._inner_ksp.solve(x, self._tmp)
-        self.solver._record_preconditioner_apply_time(perf_counter() - t0)
+        self.solver._apply_inner_preconditioner_vecs(x, self._tmp)
         z_local = np.asarray(self._tmp.getArray(readonly=True), dtype=np.float64)
         y_local = self.solver._project_local_vector(z_local)
         y_arr = y.getArray(readonly=False)
@@ -2963,6 +2979,15 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
             return
         b_local = np.asarray(b.getArray(readonly=True), dtype=np.float64)
         x_arr[...] = self._coarse_initial_guess_local(b_local)
+
+    def _apply_inner_preconditioner_vecs(self, rhs_vec, out_vec) -> None:
+        out_vec.set(0.0)
+        t0 = perf_counter()
+        if self._pc_backend == "pmg_shell" and self._manualmg_context is not None:
+            self._manualmg_context.apply(None, rhs_vec, out_vec)
+        else:
+            self._inner_ksp.solve(rhs_vec, out_vec)
+        self._record_preconditioner_apply_time(perf_counter() - t0)
 
     def setup_preconditioner(
         self,
@@ -3401,54 +3426,100 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         self._record_preconditioner_setup_time(perf_counter() - t0)
 
     def _apply_inner_preconditioner(self, x: np.ndarray) -> np.ndarray:
-        if self._prec_in is None or self._prec_out is None:
-            self._prec_in = self._A_petsc.createVecRight()
-            self._prec_out = self._A_petsc.createVecRight()
-        rhs_arr = self._prec_in.getArray(readonly=False)
-        x_arr = np.asarray(x, dtype=np.float64)
-        if x_arr.size != rhs_arr.size:
-            r0, r1 = self._ownership_range if self._ownership_range is not None else (0, rhs_arr.size)
-            x_arr = x_arr[r0:r1]
-        rhs_arr[...] = x_arr
-        self._prec_out.set(0.0)
-        t0 = perf_counter()
-        self._inner_ksp.getPC().apply(self._prec_in, self._prec_out)
-        self._record_preconditioner_apply_time(perf_counter() - t0)
-        return petsc_vec_to_global_array(self._prec_out)
+        use_transient_vecs = self._pc_backend == "pmg_shell"
+        if use_transient_vecs:
+            prec_in = self._A_petsc.createVecRight()
+            prec_out = self._A_petsc.createVecRight()
+        else:
+            if self._prec_in is None or self._prec_out is None:
+                self._prec_in = self._A_petsc.createVecRight()
+                self._prec_out = self._A_petsc.createVecRight()
+            prec_in = self._prec_in
+            prec_out = self._prec_out
+        try:
+            rhs_arr = prec_in.getArray(readonly=False)
+            x_arr = np.asarray(x, dtype=np.float64)
+            if x_arr.size != rhs_arr.size:
+                r0, r1 = self._ownership_range if self._ownership_range is not None else (0, rhs_arr.size)
+                x_arr = x_arr[r0:r1]
+            rhs_arr[...] = x_arr
+            self._apply_inner_preconditioner_vecs(prec_in, prec_out)
+            result = petsc_vec_to_global_array(prec_out)
+            return result
+        finally:
+            if use_transient_vecs:
+                prec_out.destroy()
+                prec_in.destroy()
 
     def _apply_inner_preconditioner_local(self, x_local: np.ndarray) -> np.ndarray:
-        if self._prec_in is None or self._prec_out is None:
-            self._prec_in = self._A_petsc.createVecRight()
-            self._prec_out = self._A_petsc.createVecRight()
-        rhs_arr = self._prec_in.getArray(readonly=False)
-        rhs_arr[...] = np.asarray(x_local, dtype=np.float64)
-        self._prec_out.set(0.0)
-        t0 = perf_counter()
-        self._inner_ksp.getPC().apply(self._prec_in, self._prec_out)
-        self._record_preconditioner_apply_time(perf_counter() - t0)
-        return np.asarray(self._prec_out.getArray(readonly=True), dtype=np.float64).copy()
+        use_transient_vecs = self._pc_backend == "pmg_shell"
+        if use_transient_vecs:
+            prec_in = self._A_petsc.createVecRight()
+            prec_out = self._A_petsc.createVecRight()
+        else:
+            if self._prec_in is None or self._prec_out is None:
+                self._prec_in = self._A_petsc.createVecRight()
+                self._prec_out = self._A_petsc.createVecRight()
+            prec_in = self._prec_in
+            prec_out = self._prec_out
+        try:
+            rhs_arr = prec_in.getArray(readonly=False)
+            rhs_arr[...] = np.asarray(x_local, dtype=np.float64)
+            self._apply_inner_preconditioner_vecs(prec_in, prec_out)
+            result = np.asarray(prec_out.getArray(readonly=True), dtype=np.float64).copy()
+            return result
+        finally:
+            if use_transient_vecs:
+                prec_out.destroy()
+                prec_in.destroy()
 
     def _petsc_matvec(self, x: np.ndarray) -> np.ndarray:
-        if self._matvec_in is None or self._matvec_out is None:
-            self._matvec_in = self._A_petsc.createVecRight()
-            self._matvec_out = self._A_petsc.createVecLeft()
-        x_arr = self._matvec_in.getArray(readonly=False)
-        x_global = np.asarray(x, dtype=np.float64)
-        if x_global.size != x_arr.size:
-            r0, r1 = self._ownership_range if self._ownership_range is not None else (0, x_arr.size)
-            x_global = x_global[r0:r1]
-        x_arr[...] = x_global
-        self._A_petsc.mult(self._matvec_in, self._matvec_out)
-        return petsc_vec_to_global_array(self._matvec_out)
+        use_transient_vecs = self._pc_backend == "pmg_shell"
+        if use_transient_vecs:
+            matvec_in = self._A_petsc.createVecRight()
+            matvec_out = self._A_petsc.createVecLeft()
+        else:
+            if self._matvec_in is None or self._matvec_out is None:
+                self._matvec_in = self._A_petsc.createVecRight()
+                self._matvec_out = self._A_petsc.createVecLeft()
+            matvec_in = self._matvec_in
+            matvec_out = self._matvec_out
+        try:
+            x_arr = matvec_in.getArray(readonly=False)
+            x_global = np.asarray(x, dtype=np.float64)
+            if x_global.size != x_arr.size:
+                r0, r1 = self._ownership_range if self._ownership_range is not None else (0, x_arr.size)
+                x_global = x_global[r0:r1]
+            x_arr[...] = x_global
+            self._A_petsc.mult(matvec_in, matvec_out)
+            result = petsc_vec_to_global_array(matvec_out)
+            return result
+        finally:
+            if use_transient_vecs:
+                matvec_out.destroy()
+                matvec_in.destroy()
 
     def _petsc_matvec_local(self, x_local: np.ndarray) -> np.ndarray:
-        if self._matvec_in is None or self._matvec_out is None:
-            self._matvec_in = self._A_petsc.createVecRight()
-            self._matvec_out = self._A_petsc.createVecLeft()
-        x_arr = self._matvec_in.getArray(readonly=False)
-        x_arr[...] = np.asarray(x_local, dtype=np.float64)
-        self._A_petsc.mult(self._matvec_in, self._matvec_out)
-        return np.asarray(self._matvec_out.getArray(readonly=True), dtype=np.float64).copy()
+        use_transient_vecs = self._pc_backend == "pmg_shell"
+        if use_transient_vecs:
+            matvec_in = self._A_petsc.createVecRight()
+            matvec_out = self._A_petsc.createVecLeft()
+        else:
+            if self._matvec_in is None or self._matvec_out is None:
+                self._matvec_in = self._A_petsc.createVecRight()
+                self._matvec_out = self._A_petsc.createVecLeft()
+            matvec_in = self._matvec_in
+            matvec_out = self._matvec_out
+        try:
+            x_arr = matvec_in.getArray(readonly=False)
+            x_arr[...] = np.asarray(x_local, dtype=np.float64)
+            self._A_petsc.mult(matvec_in, matvec_out)
+            result = np.asarray(matvec_out.getArray(readonly=True), dtype=np.float64).copy()
+            return result
+        finally:
+            if use_transient_vecs:
+                matvec_out.destroy()
+                matvec_in.destroy()
 
     def solve(self, A, b, *, full_rhs=None, local_rhs=None, free_indices: np.ndarray | None = None):
         if PETSc is None:
@@ -3459,110 +3530,136 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
 
         t0 = perf_counter()
         timing_stats: dict[str, float] = {}
+        gc_guard_enabled = bool(self._pc_backend == "pmg_shell")
+        gc_was_enabled = gc.isenabled()
+        if gc_guard_enabled and gc_was_enabled:
+            gc.disable()
 
-        use_distributed_local = bool(self._mpi_comm is not None and int(self._A_petsc.getComm().getSize()) > 1)
-        rhs_arr = None
+        try:
+            use_distributed_local = bool(self._mpi_comm is not None and int(self._A_petsc.getComm().getSize()) > 1)
+            rhs_arr = None
 
-        def _timed_matvec(v: np.ndarray) -> np.ndarray:
-            t_mat = perf_counter()
-            out = self._petsc_matvec(v)
-            timing_stats["matvec_s"] = timing_stats.get("matvec_s", 0.0) + (perf_counter() - t_mat)
-            return out
-
-        def _timed_prec(v: np.ndarray) -> np.ndarray:
-            t_prec = perf_counter()
-            out = self._apply_inner_preconditioner(v)
-            timing_stats["preconditioner_apply_s"] = timing_stats.get("preconditioner_apply_s", 0.0) + (perf_counter() - t_prec)
-            return out
-
-        if use_distributed_local:
-            r0, r1 = self._ownership_range
-            if local_rhs is not None:
-                rhs_local = np.asarray(local_rhs, dtype=np.float64).reshape(-1)
-            else:
-                rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
-                rhs_local = np.asarray(rhs_arr[r0:r1], dtype=np.float64)
-            basis_local = self._basis_local if self._basis_local.size else np.empty((rhs_local.size, 0), dtype=np.float64)
-
-            def _timed_matvec_local(v_local: np.ndarray) -> np.ndarray:
+            def _timed_matvec(v: np.ndarray) -> np.ndarray:
                 t_mat = perf_counter()
-                out = self._petsc_matvec_local(v_local)
+                out = self._petsc_matvec(v)
                 timing_stats["matvec_s"] = timing_stats.get("matvec_s", 0.0) + (perf_counter() - t_mat)
                 return out
 
-            def _timed_prec_local(v_local: np.ndarray) -> np.ndarray:
+            def _timed_prec(v: np.ndarray) -> np.ndarray:
                 t_prec = perf_counter()
-                out = self._apply_inner_preconditioner_local(v_local)
+                out = self._apply_inner_preconditioner(v)
                 timing_stats["preconditioner_apply_s"] = timing_stats.get("preconditioner_apply_s", 0.0) + (perf_counter() - t_prec)
                 return out
 
-            compiled_outer = bool(self.preconditioner_options.get("compiled_outer", False))
-            if compiled_outer:
-                x_local, nit, res_hist = dfgmres_matlab_exact_distributed_compiled(
-                    _timed_matvec_local,
-                    rhs_local,
-                    _timed_prec_local,
-                    basis_local,
-                    self.max_iterations,
-                    self.tolerance,
-                    self._mpi_comm,
-                    None,
-                    stats=timing_stats,
-                )
+            if use_distributed_local:
+                r0, r1 = self._ownership_range
+                if local_rhs is not None:
+                    rhs_local = np.asarray(local_rhs, dtype=np.float64).reshape(-1)
+                else:
+                    rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
+                    rhs_local = np.asarray(rhs_arr[r0:r1], dtype=np.float64)
+                basis_local = self._basis_local if self._basis_local.size else np.empty((rhs_local.size, 0), dtype=np.float64)
+
+                def _timed_matvec_local(v_local: np.ndarray) -> np.ndarray:
+                    t_mat = perf_counter()
+                    out = self._petsc_matvec_local(v_local)
+                    timing_stats["matvec_s"] = timing_stats.get("matvec_s", 0.0) + (perf_counter() - t_mat)
+                    return out
+
+                def _timed_prec_local(v_local: np.ndarray) -> np.ndarray:
+                    t_prec = perf_counter()
+                    out = self._apply_inner_preconditioner_local(v_local)
+                    timing_stats["preconditioner_apply_s"] = timing_stats.get("preconditioner_apply_s", 0.0) + (perf_counter() - t_prec)
+                    return out
+
+                compiled_outer = bool(self.preconditioner_options.get("compiled_outer", False))
+                if compiled_outer:
+                    x_local, nit, res_hist = dfgmres_matlab_exact_distributed_compiled(
+                        _timed_matvec_local,
+                        rhs_local,
+                        _timed_prec_local,
+                        basis_local,
+                        self.max_iterations,
+                        self.tolerance,
+                        self._mpi_comm,
+                        None,
+                        stats=timing_stats,
+                    )
+                else:
+                    x_local, nit, res_hist = dfgmres_matlab_exact_distributed(
+                        _timed_matvec_local,
+                        rhs_local,
+                        _timed_prec_local,
+                        basis_local,
+                        self.max_iterations,
+                        self.tolerance,
+                        self._mpi_comm,
+                        None,
+                        stats=timing_stats,
+                    )
+                x_total = np.concatenate(self._mpi_comm.allgather(np.asarray(x_local, dtype=np.float64)))
+                if self._diagnostics_enabled:
+                    rhs_arr = np.concatenate(self._mpi_comm.allgather(rhs_local))
             else:
-                x_local, nit, res_hist = dfgmres_matlab_exact_distributed(
-                    _timed_matvec_local,
-                    rhs_local,
-                    _timed_prec_local,
-                    basis_local,
+                rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
+                basis = self.deflation_basis if self.deflation_basis.size else np.empty((rhs_arr.size, 0), dtype=np.float64)
+                x_total, nit, res_hist = dfgmres_matlab_exact(
+                    _timed_matvec,
+                    rhs_arr,
+                    _timed_prec,
+                    basis,
                     self.max_iterations,
                     self.tolerance,
-                    self._mpi_comm,
                     None,
                     stats=timing_stats,
                 )
-            x_total = np.concatenate(self._mpi_comm.allgather(np.asarray(x_local, dtype=np.float64)))
+            elapsed = perf_counter() - t0
+            self.iteration_collector.store_iteration(self.instance_id, int(nit), elapsed)
             if self._diagnostics_enabled:
-                rhs_arr = np.concatenate(self._mpi_comm.allgather(rhs_local))
-        else:
-            rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
-            basis = self.deflation_basis if self.deflation_basis.size else np.empty((rhs_arr.size, 0), dtype=np.float64)
-            x_total, nit, res_hist = dfgmres_matlab_exact(
-                _timed_matvec,
-                rhs_arr,
-                _timed_prec,
-                basis,
-                self.max_iterations,
-                self.tolerance,
-                None,
-                stats=timing_stats,
-            )
-        elapsed = perf_counter() - t0
-        self.iteration_collector.store_iteration(self.instance_id, int(nit), elapsed)
-        if self._diagnostics_enabled:
-            if rhs_arr is None:
-                rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
-            basis = self.deflation_basis if self.deflation_basis.size else np.empty((rhs_arr.size, 0), dtype=np.float64)
-            rhs_norm = float(np.linalg.norm(rhs_arr))
-            if rhs_norm == 0.0:
-                rhs_norm = 1.0
-            resid = rhs_arr - self._petsc_matvec(x_total)
-            coarse_guess = basis @ (basis.T @ rhs_arr) if basis.size else np.zeros_like(rhs_arr)
-            self._last_solve_info = {
-                "iterations": int(nit),
-                "time_s": float(elapsed),
-                "basis_cols": int(basis.shape[1]) if basis.ndim == 2 else 0,
-                "rhs_norm": rhs_norm,
-                "coarse_initial_guess_norm": float(np.linalg.norm(coarse_guess)),
-                "reported_residual_history": np.asarray(res_hist, dtype=np.float64).tolist(),
-                "true_residual_history": np.asarray(res_hist, dtype=np.float64).tolist(),
-                "true_residual_final": float(np.linalg.norm(resid) / rhs_norm),
-                "reported_residual_final": float(np.asarray(res_hist, dtype=np.float64).reshape(-1)[-1]) if np.asarray(res_hist).size else None,
-                "hit_max_iterations": bool(int(nit) >= int(self.max_iterations)),
-                "converged": bool(float(np.linalg.norm(resid) / rhs_norm) <= float(self.tolerance)),
-                "converged_reason": None,
-                "timings": {k: float(v) for k, v in timing_stats.items()},
-            }
+                if rhs_arr is None:
+                    rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
+                basis = self.deflation_basis if self.deflation_basis.size else np.empty((rhs_arr.size, 0), dtype=np.float64)
+                res_hist_arr = np.asarray(res_hist, dtype=np.float64).reshape(-1)
+                rhs_norm = float(np.linalg.norm(rhs_arr))
+                if rhs_norm == 0.0:
+                    rhs_norm = 1.0
+                coarse_guess_norm = 0.0
+                if basis.size:
+                    coarse_guess_norm = float(np.linalg.norm(basis @ (basis.T @ rhs_arr)))
+                use_residual_history_as_true = bool(use_distributed_local and self._pc_backend == "pmg_shell")
+                if use_residual_history_as_true:
+                    true_residual_history = res_hist_arr.tolist()
+                    true_residual_final = float(res_hist_arr[-1]) if res_hist_arr.size else None
+                else:
+                    resid = rhs_arr - self._petsc_matvec(x_total)
+                    true_residual_history = res_hist_arr.tolist()
+                    true_residual_final = float(np.linalg.norm(resid) / rhs_norm)
+                self._last_solve_info = {
+                    "iterations": int(nit),
+                    "time_s": float(elapsed),
+                    "basis_cols": int(basis.shape[1]) if basis.ndim == 2 else 0,
+                    "rhs_norm": rhs_norm,
+                    "coarse_initial_guess_norm": float(coarse_guess_norm),
+                    "reported_residual_history": res_hist_arr.tolist(),
+                    "true_residual_history": true_residual_history,
+                    "true_residual_final": true_residual_final,
+                    "reported_residual_final": float(res_hist_arr[-1]) if res_hist_arr.size else None,
+                    "hit_max_iterations": bool(int(nit) >= int(self.max_iterations)),
+                    "converged": bool(
+                        (true_residual_final is not None and float(true_residual_final) <= float(self.tolerance))
+                    ),
+                    "converged_reason": None,
+                    "timings": {k: float(v) for k, v in timing_stats.items()},
+                }
+        finally:
+            if gc_guard_enabled:
+                if gc_was_enabled:
+                    gc.enable()
+                gc.collect()
+                if self._A_petsc is not None:
+                    _petsc_garbage_cleanup(self._A_petsc.getComm())
+                else:
+                    _petsc_garbage_cleanup()
         if self.verbose:
             print(f"{nit}|", end="")
         return self._restrict_solution(x_total)

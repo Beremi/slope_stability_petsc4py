@@ -118,12 +118,12 @@ def _orient_connectivity(connectivity: np.ndarray, valid_nodes_per_entity: tuple
 
 
 def _load_lagrange_tet_mesh(path: Path, *, boundary_type: int = 0) -> MeshData:
-    """Load a MATLAB-exported HDF5 tetrahedral mesh for P1/P2/P4 families."""
+    """Load a MATLAB-exported HDF5 tetrahedral mesh for P1/P2/P3/P4 families."""
 
     with h5py.File(str(path), "r") as h5:
         boundary = np.asarray(h5["boundary"][:], dtype=np.int64).ravel()
-        elem = _orient_connectivity(_to_zero_based(np.asarray(h5["elem"][:])), (4, 10, 35))
-        face = _orient_connectivity(_to_zero_based(np.asarray(h5["face"][:])), (3, 6, 15))
+        elem = _orient_connectivity(_to_zero_based(np.asarray(h5["elem"][:])), (4, 10, 20, 35))
+        face = _orient_connectivity(_to_zero_based(np.asarray(h5["face"][:])), (3, 6, 10, 15))
         material = np.asarray(h5["material"][:], dtype=np.int64).ravel()
         node = np.asarray(h5["node"][:], dtype=np.float64)
     if node.ndim == 2 and node.shape[1] < node.shape[0]:
@@ -273,6 +273,64 @@ def _elevate_tet4_mesh_to_tet10(
     else:
         coord_new = coord_arr.copy()
     return coord_new, tet10, tri6
+
+
+def _elevate_tet4_mesh_to_tet20(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    surf: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    tet4 = np.asarray(elem, dtype=np.int64)
+    tri3 = np.asarray(surf, dtype=np.int64)
+    if tet4.shape[0] != 4:
+        raise ValueError(f"tet20 elevation expects 4-node tetrahedra, got shape {tet4.shape}.")
+    if tri3.size and tri3.shape[0] != 3:
+        raise ValueError(f"tet20 elevation expects 3-node surface triangles, got shape {tri3.shape}.")
+
+    edge_map: dict[tuple[int, int], tuple[int, ...]] = {}
+    face_map: dict[tuple[int, int, int], dict[tuple[int, int, int], int]] = {}
+    extra_points: list[np.ndarray] = []
+
+    tet20 = np.empty((20, tet4.shape[1]), dtype=np.int64)
+    tet20[:4, :] = tet4
+    for idx in range(tet4.shape[1]):
+        v0, v1, v2, v3 = (int(v) for v in tet4[:, idx])
+
+        tet20[4:6, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v1, order=3)
+        tet20[6:8, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v1, v2, order=3)
+        tet20[8:10, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v2, order=3)
+        tet20[10:12, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v1, v3, order=3)
+        tet20[12:14, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v2, v3, order=3)
+        tet20[14:16, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v3, order=3)
+
+        faces = (
+            (v0, v1, v2),
+            (v0, v1, v3),
+            (v0, v2, v3),
+            (v1, v2, v3),
+        )
+        cursor = 16
+        for face in faces:
+            interior = _face_interior_node_indices(coord_arr, face_map, extra_points, face, order=3)
+            tet20[cursor : cursor + len(interior), idx] = interior
+            cursor += len(interior)
+
+    tri10 = np.empty((10, tri3.shape[1]), dtype=np.int64)
+    if tri3.shape[1]:
+        tri10[:3, :] = tri3
+        for idx in range(tri3.shape[1]):
+            v0, v1, v2 = (int(v) for v in tri3[:, idx])
+            tri10[3:5, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v1, order=3)
+            tri10[5:7, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v1, v2, order=3)
+            tri10[7:9, idx] = _edge_lagrange_node_indices(coord_arr, edge_map, extra_points, v0, v2, order=3)
+            tri10[9:10, idx] = _face_interior_node_indices(coord_arr, face_map, extra_points, (v0, v1, v2), order=3)
+
+    if extra_points:
+        coord_new = np.hstack((coord_arr, np.column_stack(extra_points)))
+    else:
+        coord_new = coord_arr.copy()
+    return coord_new, tet20, tri10
 
 
 def _edge_lagrange_node_indices(
@@ -444,6 +502,18 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
             boundary=boundary,
             elem_type="P2",
         )
+    if target == "P3":
+        coord_p3, elem_p3, surf_p3 = _elevate_tet4_mesh_to_tet20(coord, elem, surf)
+        q_mask = _build_dirichlet_mask(3, coord_p3.shape[1], surf_p3, boundary, path=path, boundary_type=boundary_type)
+        return MeshData(
+            coord=coord_p3,
+            elem=elem_p3,
+            surf=surf_p3,
+            q_mask=q_mask,
+            material=material,
+            boundary=boundary,
+            elem_type="P3",
+        )
     if target == "P4":
         coord_p4, elem_p4, surf_p4 = _elevate_tet4_mesh_to_tet35(coord, elem, surf)
         q_mask = _build_dirichlet_mask(3, coord_p4.shape[1], surf_p4, boundary, path=path, boundary_type=boundary_type)
@@ -457,7 +527,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
             elem_type="P4",
         )
     raise NotImplementedError(
-        f"Gmsh simplex loader currently supports P1 source meshes elevated to P2/P4; requested {target!r}."
+        f"Gmsh simplex loader currently supports P1 source meshes elevated to P2/P3/P4; requested {target!r}."
     )
 
 

@@ -943,6 +943,7 @@ def prepare_owned_tangent_pattern(
     owned_node_range: tuple[int, int],
     *,
     elem_type: str = "P2",
+    quadrature_rule: int | str | None = None,
     include_unique: bool = True,
     include_legacy_scatter: bool = True,
     include_overlap_B: bool = True,
@@ -961,6 +962,7 @@ def prepare_owned_tangent_pattern(
             materials,
             owned_node_range,
             elem_type=elem_type,
+            quadrature_rule=quadrature_rule,
         )
         t_elastic = perf_counter() - t0
     else:
@@ -983,11 +985,22 @@ def prepare_owned_tangent_pattern(
     node_lids[overlap_nodes] = np.arange(overlap_nodes.size, dtype=np.int64)
     coord_overlap = np.asarray(coord, dtype=np.float64)[:, overlap_nodes]
     elem_overlap = node_lids[np.asarray(elem, dtype=np.int64)[:, overlap_elements]]
-    overlap_asm = (
-        assemble_strain_operator(coord_overlap, elem_overlap, elem_type, dim=dim)
-        if include_overlap_B
-        else assemble_strain_geometry(coord_overlap, elem_overlap, elem_type, dim=dim)
-    )
+    if include_overlap_B:
+        overlap_asm = assemble_strain_operator(
+            coord_overlap,
+            elem_overlap,
+            elem_type,
+            dim=dim,
+            quadrature_rule=quadrature_rule,
+        )
+    else:
+        overlap_asm = assemble_strain_geometry(
+            coord_overlap,
+            elem_overlap,
+            elem_type,
+            dim=dim,
+            quadrature_rule=quadrature_rule,
+        )
     overlap_B = None if overlap_asm.B is None else overlap_asm.B.tocsr()
     overlap_global_dofs = _global_dofs_for_nodes(overlap_nodes, dim)
     n_local_dof = dim * int(elem.shape[0])
@@ -1013,7 +1026,7 @@ def prepare_owned_tangent_pattern(
             unique_node_lids[unique_nodes] = np.arange(unique_nodes.size, dtype=np.int64)
             coord_unique = np.asarray(coord, dtype=np.float64)[:, unique_nodes]
             elem_unique = unique_node_lids[np.asarray(elem, dtype=np.int64)[:, unique_elements]]
-            unique_asm = assemble_strain_operator(coord_unique, elem_unique, elem_type, dim=dim)
+            unique_asm = assemble_strain_operator(coord_unique, elem_unique, elem_type, dim=dim, quadrature_rule=quadrature_rule)
             unique_global_dofs = _global_dofs_for_nodes(unique_nodes, dim)
             unique_local_int_indices = (
                 unique_elements[:, None] * overlap_asm.n_q + np.arange(overlap_asm.n_q, dtype=np.int64)[None, :]

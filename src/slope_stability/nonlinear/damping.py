@@ -57,6 +57,7 @@ def damping(
     f_local_free: np.ndarray | None = None,
     dU_local_free: np.ndarray | None = None,
     comm=None,
+    alpha_upper: float = 1.0,
 ) -> float:
     """Line-search damping for plain Newton updates.
 
@@ -96,9 +97,12 @@ def damping(
     ):
         return 0.0
 
-    alpha = 1.0
+    alpha_upper = float(alpha_upper)
+    if not np.isfinite(alpha_upper) or alpha_upper <= 0.0:
+        return 0.0
+    alpha = min(alpha_upper, 1.0)
     alpha_min = 0.0
-    alpha_max = 1.0
+    alpha_max = float(alpha)
 
     for _ in range(int(it_damp_max)):
         U_alpha = U_it + alpha * dU

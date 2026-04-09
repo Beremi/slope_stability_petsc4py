@@ -903,6 +903,18 @@ def _gather_owned_free_rows(local_rows: np.ndarray, global_size: int, comm) -> n
     return gathered
 
 
+def _sum_scalar_over_comm(value: float, comm) -> float:
+    mpi_comm = comm.tompi4py() if comm is not None and hasattr(comm, "tompi4py") else comm
+    if mpi_comm is None:
+        return float(value)
+    size = int(mpi_comm.getSize()) if hasattr(mpi_comm, "getSize") else int(mpi_comm.Get_size())
+    if size == 1:
+        return float(value)
+    if PYMPI is not None:
+        return float(mpi_comm.allreduce(float(value), op=PYMPI.SUM))
+    return float(mpi_comm.allreduce(float(value)))
+
+
 def _owned_force_from_local_stress(
     pattern: OwnedTangentPattern,
     stress_local: np.ndarray,
@@ -2147,12 +2159,64 @@ class ConstitutiveOperator:
 
     def potential_energy(self, U):
         t0 = perf_counter()
-        E = self._strain(U)
-        if self.dim == 2:
-            Psi = potential_2D(E, self.c_bar, self.sin_phi, self.shear, self.bulk, self.lame)
+        if self.B is not None:
+            E = self._strain(U)
+            if self.dim == 2:
+                Psi = potential_2D(E, self.c_bar, self.sin_phi, self.shear, self.bulk, self.lame)
+            else:
+                Psi = potential_3D(E, self.c_bar, self.sin_phi, self.shear, self.bulk, self.lame)
+            Psi_integrated = float(np.dot(self.WEIGHT, Psi))
+        elif self._use_owned_constitutive():
+            pattern = self.owned_tangent_pattern
+            if pattern is None:
+                raise RuntimeError("Owned tangent pattern is not available for local potential-energy evaluation")
+
+            unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
+            if unique_idx.size and getattr(pattern, "unique_B", None) is not None:
+                u_flat = np.asarray(U, dtype=np.float64).reshape(-1, order="F")
+                u_unique = u_flat[np.asarray(pattern.unique_global_dofs, dtype=np.int64)]
+                E_local = np.asarray(pattern.unique_B @ u_unique, dtype=np.float64).reshape(self.n_strain, -1, order="F")
+                c_bar_local = self._owned_unique_c_bar
+                sin_phi_local = self._owned_unique_sin_phi
+            else:
+                local_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
+                E_local = assemble_overlap_strain(
+                    pattern,
+                    U,
+                    use_compiled=self.use_compiled_owned_constitutive,
+                )
+                unique_idx = local_idx
+                c_bar_local = self._owned_overlap_c_bar
+                sin_phi_local = self._owned_overlap_sin_phi
+
+            if c_bar_local is None or sin_phi_local is None:
+                if self.c_bar is None or self.sin_phi is None:
+                    raise ValueError("Material reduction not set. Call reduction(lambda) first.")
+                c_bar_local = np.asarray(self.c_bar[unique_idx], dtype=np.float64)
+                sin_phi_local = np.asarray(self.sin_phi[unique_idx], dtype=np.float64)
+
+            if self.dim == 2:
+                Psi_local = potential_2D(
+                    E_local,
+                    np.asarray(c_bar_local, dtype=np.float64),
+                    np.asarray(sin_phi_local, dtype=np.float64),
+                    self.shear[unique_idx],
+                    self.bulk[unique_idx],
+                    self.lame[unique_idx],
+                )
+            else:
+                Psi_local = potential_3D(
+                    E_local,
+                    np.asarray(c_bar_local, dtype=np.float64),
+                    np.asarray(sin_phi_local, dtype=np.float64),
+                    self.shear[unique_idx],
+                    self.bulk[unique_idx],
+                    self.lame[unique_idx],
+                )
+            local_energy = float(np.dot(np.asarray(self.WEIGHT[unique_idx], dtype=np.float64), np.asarray(Psi_local, dtype=np.float64)))
+            Psi_integrated = _sum_scalar_over_comm(local_energy, self._local_comm())
         else:
-            Psi = potential_3D(E, self.c_bar, self.sin_phi, self.shear, self.bulk, self.lame)
-        Psi_integrated = float(np.dot(self.WEIGHT, Psi))
+            raise RuntimeError("Global strain operator B is not available for this constitutive path")
         self.time_potential.append(perf_counter() - t0)
         return Psi_integrated
 

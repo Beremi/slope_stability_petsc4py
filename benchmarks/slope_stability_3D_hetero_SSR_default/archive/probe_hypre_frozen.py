@@ -66,6 +66,31 @@ def _parse_petsc_opt_entries(entries: list[str] | None) -> dict[str, str]:
     return parsed
 
 
+def _coerce_preconditioner_option_value(value):
+    if isinstance(value, str):
+        text = value.strip()
+        lowered = text.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        if re.fullmatch(r"[+-]?\d+", text):
+            try:
+                return int(text)
+            except ValueError:
+                return value
+        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?", text):
+            try:
+                return float(text)
+            except ValueError:
+                return value
+    return value
+
+
+def _coerce_preconditioner_option_map(options: dict[str, object]) -> dict[str, object]:
+    return {str(key): _coerce_preconditioner_option_value(value) for key, value in options.items()}
+
+
 def _is_global_petsc_option(key: str) -> bool:
     normalized = str(key).strip().lower()
     return normalized.startswith("log_") or normalized in {
@@ -153,6 +178,11 @@ def _native_ksp_norm_type(name: str):
     if normalized not in mapping:
         raise ValueError(f"Unsupported native KSP norm type {name!r}")
     return mapping[normalized]
+
+
+def _supports_repo_pmg_solver_type(solver_type: str) -> bool:
+    solver_type_upper = str(solver_type).strip().upper()
+    return "PETSC_MATLAB_DFGMRES" in solver_type_upper or solver_type_upper.startswith("KSPFGMRES")
 
 
 def _build_native_petsc_ksp(args, *, operator_matrix: PETSc.Mat, preconditioning_matrix: PETSc.Mat) -> tuple[PETSc.KSP, float]:
@@ -579,7 +609,7 @@ def _build_preconditioner_options(args, problem: dict[str, object]) -> dict[str,
         options["pc_hypre_boomeramg_agg_nl"] = int(args.pc_hypre_agg_nl)
     if args.pc_hypre_nongalerkin_tol is not None:
         options["pc_hypre_boomeramg_nongalerkin_tol"] = float(args.pc_hypre_nongalerkin_tol)
-    options.update(_parse_petsc_opt_entries(args.petsc_opt))
+    options.update(_coerce_preconditioner_option_map(_parse_petsc_opt_entries(args.petsc_opt)))
     return options
 
 
@@ -634,8 +664,10 @@ def run_probe(args) -> dict[str, object]:
             raise ValueError(f"{args.pc_backend} backend currently supports only pmat_source=tangent.")
         if outer_solver_family != "repo":
             raise ValueError(f"{args.pc_backend} backend is only available through the repo solver path.")
-        if "PETSC_MATLAB_DFGMRES" not in str(args.solver_type).upper():
-            raise ValueError(f"{args.pc_backend} backend currently requires a PETSC_MATLAB_DFGMRES* solver_type.")
+        if not _supports_repo_pmg_solver_type(args.solver_type):
+            raise ValueError(
+                f"{args.pc_backend} backend currently requires a PETSC_MATLAB_DFGMRES* or KSPFGMRES* solver_type."
+            )
     elif bool(args.pmg_microbenchmark_only):
         raise ValueError("--pmg-microbenchmark-only requires --pc-backend pmg.")
 

@@ -35,11 +35,50 @@ def test_parse_petsc_opt_entries_accepts_key_value_pairs() -> None:
     }
 
 
+def test_build_preconditioner_options_coerces_bool_and_numeric_petsc_opts() -> None:
+    module = _load_module()
+    args = SimpleNamespace(
+        pc_backend="pmg_shell",
+        pmat_source="tangent",
+        max_deflation_basis_vectors=16,
+        pc_hypre_coarsen_type=None,
+        pc_hypre_interp_type=None,
+        pc_hypre_strong_threshold=None,
+        pc_hypre_boomeramg_max_iter=None,
+        pc_hypre_P_max=None,
+        pc_hypre_agg_nl=None,
+        pc_hypre_nongalerkin_tol=None,
+        petsc_opt=[
+            "full_system_preconditioner=false",
+            "mg_levels_ksp_max_it=5",
+            "pc_hypre_boomeramg_tol=0.0",
+            "mg_levels_ksp_type=chebyshev",
+        ],
+    )
+    problem = {"pmg_hierarchy": object()}
+
+    options = module._build_preconditioner_options(args, problem)
+
+    assert options["full_system_preconditioner"] is False
+    assert options["mg_levels_ksp_max_it"] == 5
+    assert options["pc_hypre_boomeramg_tol"] == 0.0
+    assert options["mg_levels_ksp_type"] == "chebyshev"
+
+
 def test_native_pc_type_accepts_hmg_and_gamg() -> None:
     module = _load_module()
 
     assert module._native_pc_type("hmg") is not None
     assert module._native_pc_type("gamg") is not None
+
+
+def test_repo_pmg_solver_type_guard_accepts_plain_kspfgmres() -> None:
+    module = _load_module()
+
+    assert module._supports_repo_pmg_solver_type("PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE") is True
+    assert module._supports_repo_pmg_solver_type("KSPFGMRES") is True
+    assert module._supports_repo_pmg_solver_type("KSPFGMRES_hypre") is True
+    assert module._supports_repo_pmg_solver_type("GMRES") is False
 
 
 def test_rank_hint_from_path_reads_rank_component() -> None:

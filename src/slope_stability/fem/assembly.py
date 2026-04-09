@@ -29,22 +29,82 @@ class Assembly:
     dphi: dict[str, np.ndarray]
 
 
-def assemble_strain_operator(coord: np.ndarray, elem: np.ndarray, elem_type: str, dim: int) -> Assembly:
+def _quadrature_override(
+    quadrature_override: tuple[np.ndarray, np.ndarray] | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if quadrature_override is None:
+        return None
+    xi, wf = quadrature_override
+    xi_arr = np.asarray(xi, dtype=np.float64)
+    wf_arr = np.asarray(wf, dtype=np.float64).ravel()
+    return xi_arr, wf_arr
+
+
+def assemble_strain_operator(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    elem_type: str,
+    dim: int,
+    *,
+    quadrature_rule: int | str | None = None,
+    quadrature_override: tuple[np.ndarray, np.ndarray] | None = None,
+) -> Assembly:
     if dim == 2:
         return _assemble_2d(coord, elem, elem_type)
     if dim == 3:
-        return _assemble_3d(coord, elem, elem_type, build_matrix=True)
+        return _assemble_3d(
+            coord,
+            elem,
+            elem_type,
+            build_matrix=True,
+            quadrature_rule=quadrature_rule,
+            quadrature_override=_quadrature_override(quadrature_override),
+        )
     raise ValueError("dim must be 2 or 3")
 
 
-def assemble_strain_geometry(coord: np.ndarray, elem: np.ndarray, elem_type: str, dim: int) -> Assembly:
+def assemble_strain_geometry(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    elem_type: str,
+    dim: int,
+    *,
+    quadrature_rule: int | str | None = None,
+    quadrature_override: tuple[np.ndarray, np.ndarray] | None = None,
+) -> Assembly:
     if dim == 3:
-        return _assemble_3d(coord, elem, elem_type, build_matrix=False)
-    return assemble_strain_operator(coord, elem, elem_type, dim)
+        return _assemble_3d(
+            coord,
+            elem,
+            elem_type,
+            build_matrix=False,
+            quadrature_rule=quadrature_rule,
+            quadrature_override=_quadrature_override(quadrature_override),
+        )
+    return assemble_strain_operator(
+        coord,
+        elem,
+        elem_type,
+        dim,
+        quadrature_rule=quadrature_rule,
+        quadrature_override=quadrature_override,
+    )
 
 
 def _point_ids(n_nodes_per_elem: int, n_elem: int, n_q: int) -> np.ndarray:
     return (np.tile(np.arange(n_q), n_elem) + np.repeat(np.arange(n_elem) * n_q, n_q)).astype(np.int64)
+
+
+def _expand_constant_derivatives(derivatives: tuple[np.ndarray, ...], n_q: int) -> tuple[np.ndarray, ...]:
+    expanded: list[np.ndarray] = []
+    for deriv in derivatives:
+        arr = np.asarray(deriv, dtype=np.float64)
+        if arr.ndim != 2:
+            raise ValueError(f"Expected derivative array with shape (n_p, n_q), got {arr.shape}.")
+        if arr.shape[1] == 1 and int(n_q) > 1:
+            arr = np.tile(arr, (1, int(n_q)))
+        expanded.append(arr)
+    return tuple(expanded)
 
 
 def _assemble_2d(coord: np.ndarray, elem: np.ndarray, elem_type: str) -> Assembly:
@@ -59,6 +119,7 @@ def _assemble_2d(coord: np.ndarray, elem: np.ndarray, elem_type: str) -> Assembl
     xi, wf = quadrature_volume_2d(elem_type)
     n_q = xi.shape[1]
     hatp, dhat1, dhat2 = local_basis_volume_2d(elem_type, xi)
+    dhat1, dhat2 = _expand_constant_derivatives((dhat1, dhat2), n_q)
 
     if elem_type == "P1":
         n_p = 3
@@ -136,7 +197,15 @@ def _assemble_2d(coord: np.ndarray, elem: np.ndarray, elem_type: str) -> Assembl
     )
 
 
-def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str, *, build_matrix: bool) -> Assembly:
+def _assemble_3d(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    elem_type: str,
+    *,
+    build_matrix: bool,
+    quadrature_rule: int | str | None = None,
+    quadrature_override: tuple[np.ndarray, np.ndarray] | None = None,
+) -> Assembly:
     coord = _as_float(coord)
     elem = np.asarray(elem, dtype=np.int64)
 
@@ -145,7 +214,10 @@ def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str, *, build_m
     n_nodes = coord.shape[1]
     n_elem = elem.shape[1]
 
-    xi, wf = quadrature_volume_3d(elem_type)
+    if quadrature_override is None:
+        xi, wf = quadrature_volume_3d(elem_type, quadrature_rule)
+    else:
+        xi, wf = quadrature_override
     n_q = xi.shape[1]
 
     if elem_type == "P1":
@@ -154,6 +226,9 @@ def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str, *, build_m
     elif elem_type == "P2":
         hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
         n_p = 10
+    elif elem_type == "P3":
+        hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
+        n_p = 20
     elif elem_type == "P4":
         hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
         n_p = 35
@@ -162,6 +237,7 @@ def _assemble_3d(coord: np.ndarray, elem: np.ndarray, elem_type: str, *, build_m
         n_p = 8
     else:
         raise ValueError(f"Unsupported 3D elem_type={elem_type}")
+    dhat1, dhat2, dhat3 = _expand_constant_derivatives((dhat1, dhat2, dhat3), n_q)
 
     n_int = n_elem * n_q
     coord_x = coord[0, elem]
@@ -322,8 +398,10 @@ def vector_volume(assembly: Assembly, f_int: np.ndarray, weight: np.ndarray | No
     if hatp is None:
         raise ValueError("assembly must contain quadrature basis in dphi['hatp']")
     n_p = hatp.shape[0]
-    if n_p not in {3, 4, 6, 8, 10, 15, 35}:
-        raise ValueError(f"Unexpected number of basis functions {n_p}")
+    if assembly.elem.shape[0] != n_p:
+        raise ValueError(
+            f"Basis width {n_p} does not match element connectivity width {assembly.elem.shape[0]}."
+        )
 
     n_nodes = assembly.n_nodes
     n_int = assembly.n_int

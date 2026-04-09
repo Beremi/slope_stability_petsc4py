@@ -230,7 +230,11 @@ def _is_builder_cached_matrix(A, constitutive_matrix_builder) -> bool:
 def _cleanup_pre_solve_iteration_mats(*, K_tangent, K_r, use_full_operator: bool, constitutive_matrix_builder=None) -> None:
     if not _is_builder_cached_matrix(K_tangent, constitutive_matrix_builder):
         _destroy_petsc_mat(K_tangent)
-    if not bool(use_full_operator) and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
+    if (
+        K_r is not None
+        and K_r is not K_tangent
+        and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder)
+    ):
         _destroy_petsc_mat(K_r)
 
 
@@ -342,6 +346,386 @@ def _local_comm_from_operator(A_full):
     return A_full.getComm().tompi4py()
 
 
+def _normalize_nonlinear_policy(nonlinear_policy: str | None) -> str:
+    raw = "residual" if nonlinear_policy is None else str(nonlinear_policy).strip().lower()
+    aliases = {
+        "residual": "residual",
+        "directional_residual": "residual",
+        "energy": "energy_armijo",
+        "armijo": "energy_armijo",
+        "energy_armijo": "energy_armijo",
+    }
+    mode = aliases.get(raw)
+    if mode is None:
+        raise ValueError(f"Unsupported nonlinear policy {nonlinear_policy!r}")
+    return mode
+
+
+def _resolve_combined_stopping(combined_stopping: dict[str, float] | None) -> dict[str, float]:
+    if not combined_stopping:
+        return {}
+    aliases = {
+        "residual": "relative_residual",
+        "rel_residual": "relative_residual",
+        "relative_residual": "relative_residual",
+        "correction": "relative_correction",
+        "rel_correction": "relative_correction",
+        "relative_correction": "relative_correction",
+        "relative_newton_correction": "relative_correction",
+        "energy": "energy_change",
+        "energy_change": "energy_change",
+        "denergy": "energy_change",
+    }
+    resolved: dict[str, float] = {}
+    for raw_key, raw_value in dict(combined_stopping).items():
+        key = aliases.get(str(raw_key).strip().lower())
+        if key is None:
+            raise ValueError(f"Unsupported combined stopping metric {raw_key!r}")
+        value = float(raw_value)
+        if value < 0.0:
+            raise ValueError("Combined stopping tolerances must be non-negative.")
+        resolved[key] = value
+    return resolved
+
+
+def _combined_stop_requires_post_step(combined_stopping: dict[str, float]) -> bool:
+    return bool({"relative_correction", "energy_change"} & set(combined_stopping.keys()))
+
+
+def _combined_stop_satisfied(
+    combined_stopping: dict[str, float],
+    *,
+    relative_residual: float | None,
+    relative_correction: float | None,
+    energy_change: float | None,
+) -> bool:
+    if not combined_stopping:
+        return True
+    checks = {
+        "relative_residual": relative_residual,
+        "relative_correction": relative_correction,
+        "energy_change": energy_change,
+    }
+    for key, tol in combined_stopping.items():
+        value = checks.get(key)
+        if value is None or not np.isfinite(value) or float(value) >= float(tol):
+            return False
+    return True
+
+
+def _newton_history_template(
+    *,
+    stop_mode: str,
+    stop_tol: float,
+    tol: float,
+    nonlinear_policy: str,
+    combined_stopping: dict[str, float],
+) -> dict[str, object]:
+    return {
+        "criterion": [],
+        "residual": [],
+        "r": [],
+        "alpha": [],
+        "accepted_correction_norm": [],
+        "iterate_free_norm": [],
+        "accepted_relative_correction_norm": [],
+        "linear_iterations": [],
+        "linear_solve_time": [],
+        "linear_preconditioner_time": [],
+        "linear_orthogonalization_time": [],
+        "iteration_wall_time": [],
+        "linear_true_residual_final": [],
+        "linear_hit_max_iterations": [],
+        "linear_converged_reason": [],
+        "descent_direction": [],
+        "guarded_max_it_accept": [],
+        "regularization_retry_count": [],
+        "regularization_r_try": [],
+        "energy": [],
+        "accepted_energy": [],
+        "energy_change": [],
+        "stop_criterion": str(stop_mode),
+        "stop_tolerance": float(stop_tol),
+        "residual_tolerance": float(tol),
+        "nonlinear_policy": str(nonlinear_policy),
+        "combined_stopping": dict(combined_stopping),
+    }
+
+
+def _history_append(
+    history: dict[str, object],
+    *,
+    criterion_abs: float,
+    rel_residual: float,
+    r_value: float,
+    alpha: float | None,
+    accepted_correction_norm: float | None,
+    iterate_free_norm: float | None,
+    accepted_relative_correction_norm: float | None,
+    linear_iterations: int,
+    linear_solve_time: float,
+    linear_preconditioner_time: float,
+    linear_orthogonalization_time: float,
+    iteration_wall_time: float,
+    linear_true_residual_final: float | None,
+    linear_hit_max_iterations: bool,
+    linear_converged_reason: int | None,
+    descent_direction: bool | None,
+    guarded_max_it_accept: bool,
+    regularization_retry_count: int,
+    regularization_r_try: float,
+    energy_value: float | None,
+    accepted_energy: float | None,
+    energy_change: float | None,
+) -> None:
+    history["criterion"].append(float(criterion_abs))
+    history["residual"].append(float(rel_residual))
+    history["r"].append(float(r_value))
+    history["alpha"].append(np.nan if alpha is None else float(alpha))
+    history["accepted_correction_norm"].append(
+        np.nan if accepted_correction_norm is None else float(accepted_correction_norm)
+    )
+    history["iterate_free_norm"].append(np.nan if iterate_free_norm is None else float(iterate_free_norm))
+    history["accepted_relative_correction_norm"].append(
+        np.nan if accepted_relative_correction_norm is None else float(accepted_relative_correction_norm)
+    )
+    history["linear_iterations"].append(int(linear_iterations))
+    history["linear_solve_time"].append(float(linear_solve_time))
+    history["linear_preconditioner_time"].append(float(linear_preconditioner_time))
+    history["linear_orthogonalization_time"].append(float(linear_orthogonalization_time))
+    history["iteration_wall_time"].append(float(iteration_wall_time))
+    history["linear_true_residual_final"].append(
+        np.nan if linear_true_residual_final is None else float(linear_true_residual_final)
+    )
+    history["linear_hit_max_iterations"].append(bool(linear_hit_max_iterations))
+    history["linear_converged_reason"].append(np.nan if linear_converged_reason is None else float(linear_converged_reason))
+    history["descent_direction"].append(np.nan if descent_direction is None else float(bool(descent_direction)))
+    history["guarded_max_it_accept"].append(bool(guarded_max_it_accept))
+    history["regularization_retry_count"].append(int(regularization_retry_count))
+    history["regularization_r_try"].append(float(regularization_r_try))
+    history["energy"].append(np.nan if energy_value is None else float(energy_value))
+    history["accepted_energy"].append(np.nan if accepted_energy is None else float(accepted_energy))
+    history["energy_change"].append(np.nan if energy_change is None else float(energy_change))
+
+
+def _finalize_newton_history(history: dict[str, object], *, iterations: int, flag_N: int) -> dict[str, object]:
+    finalized = dict(history)
+    finalized["iterations"] = int(iterations)
+    finalized["flag_N"] = int(flag_N)
+    bool_fields = {"linear_hit_max_iterations", "guarded_max_it_accept"}
+    int_fields = {"linear_iterations", "regularization_retry_count"}
+    for key, value in tuple(finalized.items()):
+        if not isinstance(value, list):
+            continue
+        if key in bool_fields:
+            finalized[key] = np.asarray(value, dtype=bool)
+        elif key in int_fields:
+            finalized[key] = np.asarray(value, dtype=np.int64)
+        else:
+            finalized[key] = np.asarray(value, dtype=np.float64)
+    return finalized
+
+
+def _maybe_enable_solver_diagnostics(linear_system_solver) -> None:
+    backend = str(getattr(linear_system_solver, "_pc_backend", "")).strip().lower()
+    if type(linear_system_solver).__name__ == "PetscMatlabExactDFGMRESSolver" and backend == "pmg_shell":
+        return
+    enable = getattr(linear_system_solver, "enable_diagnostics", None)
+    if callable(enable):
+        enable(True)
+
+
+def _last_solve_info(linear_system_solver) -> dict[str, object]:
+    getter = getattr(linear_system_solver, "get_last_solve_info", None)
+    if callable(getter):
+        return dict(getter())
+    return {}
+
+
+def _linear_tolerance(linear_system_solver) -> float:
+    try:
+        return float(getattr(linear_system_solver, "tolerance"))
+    except Exception:
+        return np.nan
+
+
+def _regularization_retry_values(r: float, enabled: bool) -> list[float]:
+    if not enabled:
+        return [float(r)]
+    values = [float(r), float(min(4.0 * r, 1.0)), float(min(16.0 * r, 1.0))]
+    deduped: list[float] = []
+    for value in values:
+        if not deduped or abs(float(value) - float(deduped[-1])) > 1.0e-15:
+            deduped.append(float(value))
+    return deduped
+
+
+def _energy_merit(
+    constitutive_matrix_builder,
+    U: np.ndarray,
+    f: np.ndarray,
+    Q: np.ndarray,
+    *,
+    external_load_scale: float,
+) -> float:
+    return float(
+        constitutive_matrix_builder.potential_energy(U)
+        - float(external_load_scale) * _free_dot(f, U, Q)
+    )
+
+
+def _armijo_backtracking(
+    U_it: np.ndarray,
+    dU: np.ndarray,
+    *,
+    phi_it: float,
+    gradient_dot_direction: float,
+    constitutive_matrix_builder,
+    f: np.ndarray,
+    Q: np.ndarray,
+    armijo_alpha0: float,
+    armijo_c1: float,
+    armijo_shrink: float,
+    armijo_max_ls: int,
+    external_load_scale: float,
+) -> dict[str, float | bool | None]:
+    if (
+        armijo_max_ls <= 0
+        or not np.isfinite(phi_it)
+        or not np.isfinite(gradient_dot_direction)
+        or gradient_dot_direction >= 0.0
+    ):
+        return {
+            "alpha": 0.0,
+            "accepted": False,
+            "accepted_energy": None,
+            "energy_change": None,
+            "last_tried_alpha": 0.0,
+            "line_search_evaluations": 0,
+        }
+
+    def _energy_at_alpha(alpha_value: float) -> float:
+        return _energy_merit(
+            constitutive_matrix_builder,
+            U_it + float(alpha_value) * dU,
+            f,
+            Q,
+            external_load_scale=external_load_scale,
+        )
+
+    def _bounded_armijo(alpha_lo: float, alpha_hi: float, directional_derivative: float):
+        alpha_lo = float(alpha_lo)
+        alpha_hi = float(alpha_hi)
+        if (
+            not np.isfinite(alpha_lo)
+            or not np.isfinite(alpha_hi)
+            or not np.isfinite(float(armijo_shrink))
+            or float(armijo_shrink) <= 0.0
+            or float(armijo_shrink) >= 1.0
+            or alpha_hi <= max(alpha_lo, 0.0) + 1.0e-14
+        ):
+            return 0.0, np.inf, 0, False, 0.0
+        alpha_trial = min(
+            max(float(armijo_alpha0), max(alpha_lo, 1.0e-12)),
+            float(alpha_hi),
+        )
+        n_eval = 0
+        last_tried_alpha = 0.0
+        for _ in range(max(1, int(armijo_max_ls))):
+            last_tried_alpha = float(alpha_trial)
+            trial_value = _energy_at_alpha(alpha_trial)
+            n_eval += 1
+            if (
+                np.isfinite(trial_value)
+                and trial_value <= phi_it + float(armijo_c1) * alpha_trial * directional_derivative
+            ):
+                return float(alpha_trial), float(trial_value), int(n_eval), True, float(last_tried_alpha)
+            next_alpha = alpha_trial * float(armijo_shrink)
+            floor_alpha = max(alpha_lo, 1.0e-12)
+            if next_alpha <= floor_alpha + 1.0e-16:
+                alpha_trial = floor_alpha
+                if alpha_trial <= floor_alpha + 1.0e-16:
+                    break
+            else:
+                alpha_trial = next_alpha
+        return 0.0, np.inf, int(n_eval), False, float(last_tried_alpha)
+
+    alpha, phi_alpha, n_eval, accepted, last_tried_alpha = _bounded_armijo(
+        0.0,
+        1.0,
+        float(gradient_dot_direction),
+    )
+    if accepted:
+        return {
+            "alpha": float(alpha),
+            "accepted": True,
+            "accepted_energy": float(phi_alpha),
+            "energy_change": float(phi_alpha - phi_it),
+            "last_tried_alpha": float(last_tried_alpha),
+            "line_search_evaluations": int(n_eval),
+        }
+
+    return {
+        "alpha": 0.0,
+        "accepted": False,
+        "accepted_energy": None,
+        "energy_change": None,
+        "last_tried_alpha": float(last_tried_alpha),
+        "line_search_evaluations": int(n_eval),
+    }
+
+
+def _solve_direction_once(
+    linear_system_solver,
+    K_r,
+    rhs: np.ndarray,
+    *,
+    use_full_operator: bool,
+    free_idx: np.ndarray,
+    b_full=None,
+    local_rhs=None,
+    preconditioning_matrix=None,
+):
+    snap_before = _collector_snapshot(linear_system_solver)
+    K_free = None
+    try:
+        if use_full_operator:
+            _setup_linear_system(
+                linear_system_solver,
+                K_r,
+                A_full=K_r,
+                free_idx=free_idx,
+                preconditioning_matrix=preconditioning_matrix,
+            )
+            if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                linear_system_solver.A_orthogonalize(K_r)
+            if local_rhs is not None:
+                dU_free = _solve_linear_system_local(
+                    linear_system_solver,
+                    K_r,
+                    rhs,
+                    b_full=b_full,
+                    local_rhs=local_rhs,
+                    free_idx=free_idx,
+                )
+            else:
+                dU_free = _solve_linear_system(linear_system_solver, K_r, rhs, b_full=b_full, free_idx=free_idx)
+        else:
+            K_free = extract_submatrix_free(K_r, free_idx)
+            _setup_linear_system(linear_system_solver, K_free, A_full=K_r, free_idx=free_idx)
+            if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
+                linear_system_solver.A_orthogonalize(K_free)
+            dU_free = _solve_linear_system(linear_system_solver, K_free, rhs, b_full=b_full, free_idx=free_idx)
+    finally:
+        _release_iteration_resources(linear_system_solver)
+        _destroy_petsc_mat(K_free)
+    return (
+        np.asarray(dU_free, dtype=np.float64).reshape(-1),
+        _collector_delta(snap_before, _collector_snapshot(linear_system_solver)),
+        _last_solve_info(linear_system_solver),
+    )
+
+
 def newton(
     U_ini: np.ndarray,
     tol: float,
@@ -357,10 +741,21 @@ def newton(
     progress_callback: Callable[[dict], None] | None = None,
     stopping_criterion: str = "relative_residual",
     stopping_tol: float | None = None,
+    return_history: bool = False,
+    nonlinear_policy: str = "residual",
+    combined_stopping: dict[str, float] | None = None,
+    armijo_alpha0: float = 1.0,
+    armijo_c1: float = 1.0e-4,
+    armijo_shrink: float = 0.5,
+    armijo_max_ls: int | None = None,
+    inner_regularization_retry: bool = False,
+    guarded_max_it_accept: bool = False,
+    energy_force_scale: float = 1.0,
 ):
     """Plain Newton solver for ``F(U) = f``.
 
-    Returns ``(U_it, flag_N, it)``.
+    Returns ``(U_it, flag_N, it)`` unless ``return_history=True``, in which case
+    it returns ``(U_it, flag_N, it, history)``.
     """
 
     U_it = _to_float_matrix(U_ini)
@@ -369,6 +764,19 @@ def newton(
 
     free_idx = q_to_free_indices(Q)
     if free_idx.size == 0:
+        if return_history:
+            empty_history = _finalize_newton_history(
+                _newton_history_template(
+                    stop_mode=_normalize_stopping_criterion(stopping_criterion),
+                    stop_tol=_resolve_stopping_tolerance(tol, stopping_tol),
+                    tol=tol,
+                    nonlinear_policy=_normalize_nonlinear_policy(nonlinear_policy),
+                    combined_stopping=_resolve_combined_stopping(combined_stopping),
+                ),
+                iterations=0,
+                flag_N=0,
+            )
+            return U_it, 0, 0, empty_history
         return U_it, 0, 0
     f_free = _to_free_vector(f, Q)
 
@@ -379,29 +787,38 @@ def newton(
     if stop_mode == "absolute_delta_lambda":
         raise ValueError("Newton stopping_criterion='absolute_delta_lambda' is only supported by newton_ind_ssr.")
     stop_tol = _resolve_stopping_tolerance(tol, stopping_tol)
+    nonlinear_mode = _normalize_nonlinear_policy(nonlinear_policy)
+    combined_stop = _resolve_combined_stopping(combined_stopping)
+    post_step_stop_required = _combined_stop_requires_post_step(combined_stop)
+    armijo_max_ls_effective = int(it_damp_max if armijo_max_ls is None else armijo_max_ls)
+    if return_history or guarded_max_it_accept or inner_regularization_retry or nonlinear_mode == "energy_armijo":
+        _maybe_enable_solver_diagnostics(linear_system_solver)
 
     it = 0
     flag_N = 0
-    dU = np.zeros_like(U_it)
     r = float(r_min)
     compute_diffs = True
+    history = _newton_history_template(
+        stop_mode=stop_mode,
+        stop_tol=stop_tol,
+        tol=tol,
+        nonlinear_policy=nonlinear_mode,
+        combined_stopping=combined_stop,
+    )
 
     while True:
         it += 1
         iter_t0 = perf_counter()
-        snap_before_iter = _collector_snapshot(linear_system_solver)
 
         use_full_operator = _prefers_full_system_operator(linear_system_solver, K_elast)
         use_free_build = _supports_free_builder(constitutive_matrix_builder, "build_F_reduced_free")
         use_local_build = use_full_operator and _supports_local_builder(constitutive_matrix_builder, "build_F_reduced_local")
         comm = _local_comm_from_operator(K_elast) if use_local_build else None
         K_tangent = None
-        K_r = None
         F = None
         F_local = None
         F_free_local = None
         f_free_local = None
-        temporary_basis_snapshot = None
 
         if compute_diffs:
             if use_local_build:
@@ -409,18 +826,6 @@ def newton(
                 F_local = np.asarray(constitutive_matrix_builder.build_F_local(), dtype=np.float64).reshape(-1)
                 F_free_local = np.asarray(constitutive_matrix_builder.build_F_free_local(), dtype=np.float64).reshape(-1)
                 F_free = F_free_local
-                K_r = constitutive_matrix_builder.build_K_regularized(r)
-            elif use_full_operator and _supports_free_builder(constitutive_matrix_builder, "build_F_K_regularized_reduced_free"):
-                F_free, K_r = constitutive_matrix_builder.build_F_K_regularized_reduced_free(U_it, r)
-                F_free = np.asarray(F_free, dtype=np.float64).reshape(-1)
-            elif use_full_operator:
-                regularized_pair = _build_regularized_if_available(constitutive_matrix_builder, U=U_it, r=r)
-                if regularized_pair is not None:
-                    F, K_r = regularized_pair
-                    F_free = _to_free_vector(F, Q)
-                else:
-                    F, K_tangent = constitutive_matrix_builder.build_F_K_tangent_reduced(U_it)
-                    F_free = _to_free_vector(F, Q)
             elif _supports_free_builder(constitutive_matrix_builder, "build_F_K_tangent_reduced_free"):
                 F_free, K_tangent = constitutive_matrix_builder.build_F_K_tangent_reduced_free(U_it)
                 F_free = np.asarray(F_free, dtype=np.float64).reshape(-1)
@@ -444,8 +849,28 @@ def newton(
         else:
             criterion_abs = float(np.linalg.norm(F_free - f_free))
         criterion = criterion_abs / norm_f
+        energy_value = None
+        if nonlinear_mode == "energy_armijo":
+            energy_value = _energy_merit(
+                constitutive_matrix_builder,
+                U_it,
+                f,
+                Q,
+                external_load_scale=float(energy_force_scale),
+            )
 
-        if compute_diffs and stop_mode == "relative_residual" and criterion < stop_tol:
+        early_residual_stop = (
+            stop_mode == "relative_residual"
+            and criterion < stop_tol
+            and not post_step_stop_required
+            and _combined_stop_satisfied(
+                combined_stop,
+                relative_residual=criterion,
+                relative_correction=None,
+                energy_change=None,
+            )
+        )
+        if compute_diffs and early_residual_stop:
             _emit_progress(
                 progress_callback,
                 event="newton_iteration",
@@ -468,11 +893,44 @@ def newton(
                 iterate_free_norm=float(_free_norm(U_it, Q)),
                 accepted_correction_norm=None,
                 accepted_relative_correction_norm=None,
+                linear_true_residual_final=None,
+                linear_hit_max_iterations=False,
+                linear_converged_reason=None,
+                descent_direction=None,
+                guarded_max_it_accept=False,
+                energy_value=(None if energy_value is None else float(energy_value)),
+                accepted_energy=(None if energy_value is None else float(energy_value)),
+                energy_change=0.0 if energy_value is not None else None,
                 status="converged",
+            )
+            _history_append(
+                history,
+                criterion_abs=float(criterion_abs),
+                rel_residual=float(criterion),
+                r_value=float(r),
+                alpha=None,
+                accepted_correction_norm=None,
+                iterate_free_norm=float(_free_norm(U_it, Q)),
+                accepted_relative_correction_norm=None,
+                linear_iterations=0,
+                linear_solve_time=0.0,
+                linear_preconditioner_time=0.0,
+                linear_orthogonalization_time=0.0,
+                iteration_wall_time=float(perf_counter() - iter_t0),
+                linear_true_residual_final=None,
+                linear_hit_max_iterations=False,
+                linear_converged_reason=None,
+                descent_direction=None,
+                guarded_max_it_accept=False,
+                regularization_retry_count=0,
+                regularization_r_try=float(r),
+                energy_value=energy_value,
+                accepted_energy=energy_value,
+                energy_change=(0.0 if energy_value is not None else None),
             )
             _cleanup_pre_solve_iteration_mats(
                 K_tangent=K_tangent,
-                K_r=K_r,
+                K_r=None,
                 use_full_operator=use_full_operator,
                 constitutive_matrix_builder=constitutive_matrix_builder,
             )
@@ -485,10 +943,17 @@ def newton(
             rhs_local = None
             F_free_local = None
             rhs = f_free - F_free
-        if K_r is None:
-            cached_regularized = _build_regularized_from_cached_if_available(constitutive_matrix_builder, r) if use_full_operator else None
+        retry_values = _regularization_retry_values(r, bool(inner_regularization_retry))
+        basis_snapshot = _basis_snapshot(linear_system_solver) if len(retry_values) > 1 else None
+        linear_tol = _linear_tolerance(linear_system_solver)
+        chosen_attempt = None
+        last_attempt = None
+        for retry_index, r_try in enumerate(retry_values):
+            if retry_index > 0 and basis_snapshot is not None:
+                _basis_restore(linear_system_solver, basis_snapshot)
+            cached_regularized = _build_regularized_from_cached_if_available(constitutive_matrix_builder, r_try)
             if cached_regularized is not None:
-                K_r = cached_regularized
+                K_r_try = cached_regularized
             else:
                 K_tangent = _ensure_tangent_matrix_for_regularization(
                     constitutive_matrix_builder,
@@ -496,81 +961,201 @@ def newton(
                     K_tangent=K_tangent,
                     use_free_build=use_free_build,
                 )
-                K_r = _combine_matrices(r, K_elast, 1.0 - r, K_tangent)
-        preconditioning_matrix = None
-        if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
-            if _needs_preconditioning_matrix_refresh(linear_system_solver):
-                preconditioning_matrix = _explicit_preconditioning_matrix(
-                    constitutive_matrix_builder,
-                    linear_system_solver,
-                    regularization_r=r,
-                    K_elast=K_elast,
-                )
-        K_free = None
-        try:
-            if use_full_operator:
-                _setup_linear_system(
-                    linear_system_solver,
-                    K_r,
-                    A_full=K_r,
-                    free_idx=free_idx,
-                    preconditioning_matrix=preconditioning_matrix,
-                )
-                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
-                    linear_system_solver.A_orthogonalize(K_r)
-                if use_local_build:
-                    dU_free = _solve_linear_system_local(
+                K_r_try = _combine_matrices(r_try, K_elast, 1.0 - r_try, K_tangent)
+            preconditioning_matrix = None
+            if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
+                if _needs_preconditioning_matrix_refresh(linear_system_solver):
+                    preconditioning_matrix = _explicit_preconditioning_matrix(
+                        constitutive_matrix_builder,
                         linear_system_solver,
-                        K_r,
-                        rhs,
-                        b_full=rhs_local,
-                        local_rhs=rhs_local,
-                        free_idx=free_idx,
+                        regularization_r=r_try,
+                        K_elast=K_elast,
                     )
-                else:
-                    dU_free = _solve_linear_system(linear_system_solver, K_r, rhs, free_idx=free_idx)
+            dU_free, iter_delta, solve_info = _solve_direction_once(
+                linear_system_solver,
+                K_r_try,
+                rhs,
+                use_full_operator=use_full_operator,
+                free_idx=free_idx,
+                b_full=(rhs_local if use_local_build else None),
+                local_rhs=(rhs_local if use_local_build else None),
+                preconditioning_matrix=preconditioning_matrix,
+            )
+            dU = np.zeros(U_it.size, dtype=np.float64)
+            dU[free_idx] = np.asarray(dU_free, dtype=np.float64)
+            dU = dU.reshape(shape, order="F")
+            dU_local_free = (
+                _local_owned_free_rows_from_field(dU, constitutive_matrix_builder.owned_tangent_pattern)
+                if use_local_build
+                else None
+            )
+            if use_local_build:
+                rhs_dot_dU = _dist_dot_local(rhs, dU_local_free, comm)
             else:
-                K_free = extract_submatrix_free(K_r, free_idx)
-                _setup_linear_system(linear_system_solver, K_free, A_full=K_r, free_idx=free_idx)
-                if getattr(linear_system_solver, "supports_a_orthogonalization", lambda: True)():
-                    linear_system_solver.A_orthogonalize(K_free)
-                dU_free = _solve_linear_system(linear_system_solver, K_free, rhs, free_idx=free_idx)
-        finally:
-            _release_iteration_resources(linear_system_solver)
-            _destroy_petsc_mat(K_free)
-            if not _is_builder_cached_matrix(K_tangent, constitutive_matrix_builder):
-                _destroy_petsc_mat(K_tangent)
-            if not use_full_operator and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
-                _destroy_petsc_mat(K_r)
-        iter_delta = _collector_delta(snap_before_iter, _collector_snapshot(linear_system_solver))
+                rhs_dot_dU = float(np.dot(np.asarray(rhs, dtype=np.float64).reshape(-1), dU_free.reshape(-1)))
+            descent_direction = bool(np.isfinite(rhs_dot_dU) and rhs_dot_dU > 0.0)
+            if nonlinear_mode == "energy_armijo":
+                armijo = _armijo_backtracking(
+                    U_it,
+                    dU,
+                    phi_it=float(
+                        energy_value
+                        if energy_value is not None
+                        else _energy_merit(
+                            constitutive_matrix_builder,
+                            U_it,
+                            f,
+                            Q,
+                            external_load_scale=float(energy_force_scale),
+                        )
+                    ),
+                    gradient_dot_direction=float(-rhs_dot_dU),
+                    constitutive_matrix_builder=constitutive_matrix_builder,
+                    f=f,
+                    Q=Q,
+                    armijo_alpha0=float(armijo_alpha0),
+                    armijo_c1=float(armijo_c1),
+                    armijo_shrink=float(armijo_shrink),
+                    armijo_max_ls=int(armijo_max_ls_effective),
+                    external_load_scale=float(energy_force_scale),
+                )
+                alpha_cap = 1.0
+                if bool(armijo["accepted"]) and np.isfinite(float(armijo["alpha"])) and float(armijo["alpha"]) > 0.0:
+                    alpha_cap = float(armijo["alpha"])
+                alpha = damping(
+                    it_damp_max,
+                    U_it,
+                    dU,
+                    F,
+                    f,
+                    constitutive_matrix_builder,
+                    Q,
+                    F_free=F_free,
+                    f_free=f_free,
+                    F_local_free=F_free_local,
+                    f_local_free=f_free_local,
+                    dU_local_free=dU_local_free,
+                    comm=comm,
+                    alpha_upper=float(alpha_cap),
+                )
+                if float(alpha) > 0.0:
+                    accepted_energy = _energy_merit(
+                        constitutive_matrix_builder,
+                        U_it + float(alpha) * dU,
+                        f,
+                        Q,
+                        external_load_scale=float(energy_force_scale),
+                    )
+                    energy_change = None if energy_value is None else abs(float(accepted_energy - energy_value))
+                else:
+                    accepted_energy = None
+                    energy_change = None
+                line_search_failed_for_retry = float(alpha) == 0.0
+            else:
+                alpha = damping(
+                    it_damp_max,
+                    U_it,
+                    dU,
+                    F,
+                    f,
+                    constitutive_matrix_builder,
+                    Q,
+                    F_free=F_free,
+                    f_free=f_free,
+                    F_local_free=F_free_local,
+                    f_local_free=f_free_local,
+                    dU_local_free=dU_local_free,
+                    comm=comm,
+                )
+                accepted_energy = energy_value
+                energy_change = None
+                line_search_failed_for_retry = False
+            iterate_free_norm = _free_norm(U_it, Q)
+            accepted_correction_norm = float(np.linalg.norm(float(alpha) * _to_free_vector(dU, Q)))
+            accepted_relative_correction_norm = float(accepted_correction_norm / max(iterate_free_norm, 1.0e-30))
+            true_residual_final = solve_info.get("true_residual_final")
+            hit_max_iterations = bool(solve_info.get("hit_max_iterations", False))
+            guarded_accept = bool(
+                guarded_max_it_accept
+                and hit_max_iterations
+                and descent_direction
+                and float(alpha) >= 0.25
+                and true_residual_final is not None
+                and np.isfinite(float(true_residual_final))
+                and np.isfinite(linear_tol)
+                and float(true_residual_final) <= 2.0 * float(linear_tol)
+            )
+            retry_needed = False
+            if bool(inner_regularization_retry):
+                retry_needed = (not descent_direction) or (hit_max_iterations and not guarded_accept) or line_search_failed_for_retry
+            attempt = {
+                "alpha": float(alpha),
+                "dU": dU,
+                "iter_delta": dict(iter_delta),
+                "solve_info": dict(solve_info),
+                "r_try": float(r_try),
+                "retry_count": int(retry_index),
+                "K_r": K_r_try,
+                "descent_direction": bool(descent_direction),
+                "guarded_accept": bool(guarded_accept),
+                "iterate_free_norm": float(iterate_free_norm),
+                "accepted_correction_norm": float(accepted_correction_norm),
+                "accepted_relative_correction_norm": float(accepted_relative_correction_norm),
+                "accepted_energy": accepted_energy,
+                "energy_change": energy_change,
+            }
+            last_attempt = attempt
+            if retry_needed:
+                if retry_index + 1 < len(retry_values):
+                    if basis_snapshot is not None:
+                        _basis_restore(linear_system_solver, basis_snapshot)
+                    if not _is_builder_cached_matrix(K_r_try, constitutive_matrix_builder):
+                        _destroy_petsc_mat(K_r_try)
+                continue
+            chosen_attempt = attempt
+            break
 
-        dU = np.zeros(U_it.size, dtype=np.float64)
-        dU[free_idx] = np.asarray(dU_free, dtype=np.float64)
-        dU = dU.reshape(shape, order="F")
+        if chosen_attempt is None and last_attempt is not None:
+            chosen_attempt = dict(last_attempt)
+            chosen_attempt["alpha"] = 0.0
+            chosen_attempt["accepted_correction_norm"] = 0.0
+            chosen_attempt["accepted_relative_correction_norm"] = 0.0
+            chosen_attempt["accepted_energy"] = energy_value
+            chosen_attempt["energy_change"] = None
+        if chosen_attempt is None:
+            raise RuntimeError("Newton failed to produce a trial step")
 
-        alpha = damping(
-            it_damp_max,
-            U_it,
-            dU,
-            F,
-            f,
-            constitutive_matrix_builder,
-            Q,
-            F_free=F_free,
-            f_free=f_free,
-            F_local_free=F_free_local,
-            f_local_free=f_free_local,
-            dU_local_free=_local_owned_free_rows_from_field(dU, constitutive_matrix_builder.owned_tangent_pattern) if use_local_build else None,
-            comm=comm,
-        )
-        iterate_free_norm = _free_norm(U_it, Q)
-        accepted_correction_norm = float(np.linalg.norm(float(alpha) * _to_free_vector(dU, Q)))
-        accepted_relative_correction_norm = float(accepted_correction_norm / max(iterate_free_norm, 1.0e-30))
+        r = float(chosen_attempt["r_try"])
+        dU = np.asarray(chosen_attempt["dU"], dtype=np.float64)
+        alpha = float(chosen_attempt["alpha"])
+        iter_delta = dict(chosen_attempt["iter_delta"])
+        solve_info = dict(chosen_attempt["solve_info"])
+        iterate_free_norm = float(chosen_attempt["iterate_free_norm"])
+        accepted_correction_norm = float(chosen_attempt["accepted_correction_norm"])
+        accepted_relative_correction_norm = float(chosen_attempt["accepted_relative_correction_norm"])
+        descent_direction = bool(chosen_attempt["descent_direction"])
+        guarded_accept = bool(chosen_attempt["guarded_accept"])
+        accepted_energy = chosen_attempt["accepted_energy"]
+        energy_change = chosen_attempt["energy_change"]
+        retry_count = int(chosen_attempt["retry_count"])
+        K_r = chosen_attempt["K_r"]
         converged_on_correction = (
             stop_mode == "relative_correction"
             and float(alpha) > 0.0
             and accepted_relative_correction_norm < stop_tol
         )
+        if combined_stop:
+            stop_satisfied = bool(
+                float(alpha) > 0.0
+                and _combined_stop_satisfied(
+                    combined_stop,
+                    relative_residual=float(criterion),
+                    relative_correction=float(accepted_relative_correction_norm),
+                    energy_change=(None if energy_change is None else float(energy_change)),
+                )
+            )
+        else:
+            stop_satisfied = bool(converged_on_correction)
 
         _emit_progress(
             progress_callback,
@@ -594,10 +1179,57 @@ def newton(
             iterate_free_norm=float(iterate_free_norm),
             accepted_correction_norm=float(accepted_correction_norm),
             accepted_relative_correction_norm=float(accepted_relative_correction_norm),
-            status="converged" if converged_on_correction else "iterate",
+            linear_true_residual_final=(
+                None if solve_info.get("true_residual_final") is None else float(solve_info.get("true_residual_final"))
+            ),
+            linear_hit_max_iterations=bool(solve_info.get("hit_max_iterations", False)),
+            linear_converged_reason=(
+                None if solve_info.get("converged_reason") is None else int(solve_info.get("converged_reason"))
+            ),
+            descent_direction=bool(descent_direction),
+            guarded_max_it_accept=bool(guarded_accept),
+            energy_value=(None if energy_value is None else float(energy_value)),
+            accepted_energy=(None if accepted_energy is None else float(accepted_energy)),
+            energy_change=(None if energy_change is None else float(energy_change)),
+            status="converged" if stop_satisfied else "iterate",
+        )
+        _history_append(
+            history,
+            criterion_abs=float(criterion_abs),
+            rel_residual=float(criterion),
+            r_value=float(r),
+            alpha=float(alpha),
+            accepted_correction_norm=float(accepted_correction_norm),
+            iterate_free_norm=float(iterate_free_norm),
+            accepted_relative_correction_norm=float(accepted_relative_correction_norm),
+            linear_iterations=int(iter_delta["iterations"]),
+            linear_solve_time=float(iter_delta["solve_time"]),
+            linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
+            linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
+            iteration_wall_time=float(perf_counter() - iter_t0),
+            linear_true_residual_final=(
+                None if solve_info.get("true_residual_final") is None else float(solve_info.get("true_residual_final"))
+            ),
+            linear_hit_max_iterations=bool(solve_info.get("hit_max_iterations", False)),
+            linear_converged_reason=(
+                None if solve_info.get("converged_reason") is None else int(solve_info.get("converged_reason"))
+            ),
+            descent_direction=bool(descent_direction),
+            guarded_max_it_accept=bool(guarded_accept),
+            regularization_retry_count=int(retry_count),
+            regularization_r_try=float(r),
+            energy_value=energy_value,
+            accepted_energy=accepted_energy,
+            energy_change=energy_change,
+        )
+        _cleanup_pre_solve_iteration_mats(
+            K_tangent=K_tangent,
+            K_r=K_r,
+            use_full_operator=use_full_operator,
+            constitutive_matrix_builder=constitutive_matrix_builder,
         )
 
-        if converged_on_correction:
+        if stop_satisfied:
             U_it = U_it + alpha * dU
             break
 
@@ -623,6 +1255,8 @@ def newton(
             flag_N = 1
             break
 
+    if return_history:
+        return U_it, flag_N, it, _finalize_newton_history(history, iterations=it, flag_N=flag_N)
     return U_it, flag_N, it
 
 

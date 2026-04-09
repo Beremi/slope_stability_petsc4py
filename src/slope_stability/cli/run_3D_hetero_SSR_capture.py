@@ -19,12 +19,14 @@ from matplotlib import colors as mcolors
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from slope_stability.cli.assembly_policy import use_lightweight_mpi_elastic_path, use_owned_tangent_path
+from slope_stability.cli.elastic_initial_guess import solve_elastic_initial_guess
 from slope_stability.core.elements import normalize_elem_type, validate_supported_elem_type
 from slope_stability.cli.progress import make_progress_logger
 from slope_stability.mesh import load_mesh_from_file, heterogenous_materials, MaterialSpec, reorder_mesh_nodes
 from slope_stability.fem import (
     assemble_owned_elastic_rows_for_comm,
     assemble_strain_operator,
+    available_tetra_quadrature_rules,
     prepare_owned_tangent_pattern,
     quadrature_volume_3d,
     vector_volume,
@@ -41,17 +43,9 @@ from slope_stability.linear.pmg import (
 from slope_stability.constitutive import ConstitutiveOperator
 from slope_stability.continuation import indirect as indirect_module
 from slope_stability.continuation import LL_indirect_continuation, SSR_indirect_continuation
-from slope_stability.nonlinear.newton import (
-    _destroy_petsc_mat,
-    _prefers_full_system_operator,
-    _setup_linear_system,
-    _solve_linear_system,
-)
 from slope_stability.problem_assets import load_material_rows_for_path
 from slope_stability.utils import (
-    extract_submatrix_free,
     flatten_field,
-    full_field_from_free_values,
     local_csr_to_petsc_aij_matrix,
     matvec_to_numpy,
     owned_block_range,
@@ -275,6 +269,7 @@ def _newton_guess_difference_volume_integrals(
     coord: np.ndarray,
     elem: np.ndarray,
     elem_type: str,
+    quadrature_rule: int | str | None,
     U_guess: np.ndarray,
     U_solution: np.ndarray,
 ) -> dict[str, float]:
@@ -286,12 +281,16 @@ def _newton_guess_difference_volume_integrals(
     if coord.shape[0] != 3 or delta_u.shape[0] != 3:
         raise ValueError("3D predictor diagnostics require (3, n_nodes) coordinates and fields")
 
-    xi, wf = quadrature_volume_3d(elem_type)
+    xi, wf = quadrature_volume_3d(elem_type, quadrature_rule)
     hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
     n_p = int(hatp.shape[0])
     n_q = int(xi.shape[1])
     if elem.shape[0] != n_p:
         raise ValueError(f"Element connectivity width {elem.shape[0]} does not match {elem_type} basis width {n_p}")
+    if dhat1.shape[1] == 1 and n_q > 1:
+        dhat1 = np.repeat(dhat1, n_q, axis=1)
+        dhat2 = np.repeat(dhat2, n_q, axis=1)
+        dhat3 = np.repeat(dhat3, n_q, axis=1)
 
     # Keep the temporary dphi/evaluation buffers bounded on large P4 MPI runs.
     chunk_elems = max(32, min(1024, int(max(1, 2_000_000 // max(n_p * n_q, 1)))))
@@ -481,6 +480,7 @@ def run_capture(
     mesh_path: Path | None = None,
     mesh_boundary_type: int = 0,
     elem_type: str = "P2",
+    quadrature_rule: int | None = None,
     davis_type: str = "B",
     material_rows: list[list[float]] | np.ndarray | None = None,
     node_ordering: str = "block_metis",
@@ -734,7 +734,7 @@ def run_capture(
         q_mask = reordered.q_mask.astype(bool)
         material_identifier = mesh.material.astype(np.int64).ravel()
 
-    n_q = int(quadrature_volume_3d(elem_type)[0].shape[1])
+    n_q = int(quadrature_volume_3d(elem_type, quadrature_rule)[0].shape[1])
     n_int = int(elem.shape[1] * n_q)
     c0, phi, psi, shear, bulk, lame, gamma = heterogenous_materials(
         material_identifier,
@@ -768,6 +768,7 @@ def run_capture(
             materials,
             PETSc.COMM_WORLD,
             elem_type=elem_type,
+            quadrature_rule=quadrature_rule,
         )
         global_size = int(coord.shape[0] * coord.shape[1])
         K_elast = local_csr_to_petsc_aij_matrix(
@@ -779,7 +780,7 @@ def run_capture(
         rhs_parts = MPI.COMM_WORLD.allgather(np.asarray(elastic_rows.local_rhs, dtype=np.float64))
         f_V = np.concatenate(rhs_parts).reshape(coord.shape[0], coord.shape[1], order="F")
     else:
-        assembly = assemble_strain_operator(coord, elem, elem_type, dim=3)
+        assembly = assemble_strain_operator(coord, elem, elem_type, dim=3, quadrature_rule=quadrature_rule)
         from slope_stability.fem.assembly import build_elastic_stiffness_matrix
 
         K_elast, weight, B = build_elastic_stiffness_matrix(assembly, shear, lame, bulk)
@@ -818,6 +819,7 @@ def run_capture(
             materials,
             (row0 // coord.shape[0], row1 // coord.shape[0]),
             elem_type=elem_type,
+            quadrature_rule=quadrature_rule,
             include_unique=(str(constitutive_mode).lower() != "overlap"),
             include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
             include_overlap_B=(str(tangent_kernel).lower() == "legacy"),
@@ -1098,6 +1100,7 @@ def run_capture(
         "preconditioner_rebuild_policy": str(preconditioner_rebuild_policy),
         "preconditioner_rebuild_interval": int(preconditioner_rebuild_interval),
         "elem_type": str(elem_type),
+        "quadrature_rule": None if quadrature_rule is None else int(quadrature_rule),
         "davis_type": str(davis_type),
         "material_rows": np.asarray(mat_props, dtype=np.float64).tolist(),
         "mesh_boundary_type": int(mesh_boundary_type),
@@ -1154,6 +1157,7 @@ def run_capture(
             coord,
             elem,
             elem_type,
+            quadrature_rule,
             U_guess,
             U_solution,
         )
@@ -1222,71 +1226,26 @@ def run_capture(
             streaming_basis_max_vectors=int(streaming_basis_max_vectors),
         )
     else:
-        free_idx = q_to_free_indices(q_mask)
-        f_full = np.asarray(f_V, dtype=np.float64).reshape(-1, order="F")
-        f_free = f_full[free_idx]
-        init_linear_solver = linear_system_solver
-        if effective_pc_backend in {"pmg", "pmg_shell"}:
-            init_preconditioner_options = dict(preconditioner_options)
-            init_preconditioner_options["pc_backend"] = "hypre"
-            init_preconditioner_options.pop("pmg_hierarchy", None)
-            for key in tuple(init_preconditioner_options.keys()):
-                if key.startswith("mg_") or key.startswith("pc_mg_"):
-                    init_preconditioner_options.pop(key, None)
-            init_linear_solver = SolverFactory.create(
-                solver_type,
-                tolerance=linear_tolerance,
-                max_iterations=linear_max_iter,
-                deflation_basis_tolerance=1e-3,
-                verbose=False,
-                q_mask=q_mask,
-                coord=coord,
-                preconditioner_options=init_preconditioner_options,
-            )
-
-        snap_init_0 = _collector_snapshot(init_linear_solver)
-        U_elast_free = None
-        K_free = None
         const_builder.reduction(float(lambda_ell))
-        try:
-            if _prefers_full_system_operator(init_linear_solver, K_elast):
-                _setup_linear_system(init_linear_solver, K_elast, A_full=K_elast, free_idx=free_idx)
-                U_elast_free = _solve_linear_system(
-                    init_linear_solver,
-                    K_elast,
-                    f_free,
-                    b_full=f_full,
-                    free_idx=free_idx,
-                )
-            else:
-                K_free = extract_submatrix_free(K_elast, free_idx)
-                _setup_linear_system(init_linear_solver, K_free, A_full=K_elast, free_idx=free_idx)
-                U_elast_free = _solve_linear_system(
-                    init_linear_solver,
-                    K_free,
-                    f_free,
-                    b_full=f_full,
-                    free_idx=free_idx,
-                )
-        finally:
-            release = getattr(init_linear_solver, "release_iteration_resources", None)
-            if callable(release):
-                release()
-            _destroy_petsc_mat(K_free)
-
-        snap_init_1 = _collector_snapshot(init_linear_solver)
-        init_delta = _collector_delta(snap_init_0, snap_init_1)
-        init_linear = {
-            "init_linear_iterations": int(init_delta["iterations"]),
-            "init_linear_solve_time": float(init_delta["solve_time"]),
-            "init_linear_preconditioner_time": float(init_delta["preconditioner_time"]),
-            "init_linear_orthogonalization_time": float(init_delta["orthogonalization_time"]),
-        }
-
-        U_elast = full_field_from_free_values(np.asarray(U_elast_free, dtype=np.float64), free_idx, f_V.shape)
+        init_guess = solve_elastic_initial_guess(
+            solver_type=solver_type,
+            linear_tolerance=linear_tolerance,
+            linear_max_iter=linear_max_iter,
+            linear_system_solver=linear_system_solver,
+            preconditioner_options=preconditioner_options,
+            effective_pc_backend=effective_pc_backend,
+            q_mask=q_mask,
+            coord=coord,
+            K_elast=K_elast,
+            f_V=f_V,
+        )
+        free_idx = np.asarray(init_guess["free_idx"], dtype=np.int64)
+        U_elast_free = np.asarray(init_guess["U_elast_free"], dtype=np.float64)
+        U_elast = np.asarray(init_guess["U_elast"], dtype=np.float64)
+        init_linear = dict(init_guess["init_linear"])
         if getattr(linear_system_solver, "supports_dynamic_deflation_basis", lambda: True)():
             linear_system_solver.expand_deflation_basis(np.asarray(U_elast_free, dtype=np.float64))
-        omega_el = float(np.dot(f_free, np.asarray(U_elast_free, dtype=np.float64)))
+        omega_el = float(init_guess["omega_el"])
         U_elast = U_elast * float(d_omega_ini_scale)
 
         U3, lambda_hist3, omega_hist3, Umax_hist3, stats = LL_indirect_continuation(
@@ -1523,7 +1482,7 @@ def run_capture(
         _ensure_dir(out_dir / "plots")
         plot_B = B
         if plot_B is None:
-            plot_B = assemble_strain_operator(coord, elem, elem_type, dim=3).B
+            plot_B = assemble_strain_operator(coord, elem, elem_type, dim=3, quadrature_rule=quadrature_rule).B
         _save_plots(
             coord,
             surf,
@@ -1561,6 +1520,7 @@ def main() -> None:
     parser.add_argument("--mesh_path", type=Path, default=None, help="Optional mesh override.")
     parser.add_argument("--mesh_boundary_type", type=int, default=0)
     parser.add_argument("--elem_type", type=str, default="P2", choices=["P1", "P2", "P4"])
+    parser.add_argument("--quadrature_rule", type=int, default=None, choices=available_tetra_quadrature_rules())
     parser.add_argument("--davis_type", type=str, default="B")
     parser.add_argument(
         "--node_ordering",
@@ -1784,6 +1744,7 @@ def main() -> None:
         mesh_path=args.mesh_path,
         mesh_boundary_type=args.mesh_boundary_type,
         elem_type=args.elem_type,
+        quadrature_rule=args.quadrature_rule,
         davis_type=args.davis_type,
         node_ordering=args.node_ordering,
         step_max=args.step_max,

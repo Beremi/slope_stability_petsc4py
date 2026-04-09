@@ -60,6 +60,7 @@ def assemble_owned_elastic_rows(
     owned_node_range: tuple[int, int],
     *,
     elem_type: str = "P2",
+    quadrature_rule: int | str | None = None,
 ) -> OwnedElasticRows:
     """Assemble the full-system elastic operator rows owned by one rank.
 
@@ -113,7 +114,7 @@ def assemble_owned_elastic_rows(
 
     coord_overlap = coord[:, overlap_nodes]
     elem_overlap = node_lids[elem[:, overlap_elements]]
-    asm = assemble_strain_operator(coord_overlap, elem_overlap, elem_type, dim=dim)
+    asm = assemble_strain_operator(coord_overlap, elem_overlap, elem_type, dim=dim, quadrature_rule=quadrature_rule)
 
     _c0, _phi, _psi, shear, bulk, lame, gamma = heterogenous_materials(
         material_identifier[overlap_elements],
@@ -190,6 +191,7 @@ def assemble_owned_elastic_rows_for_comm(
     comm,
     *,
     elem_type: str = "P2",
+    quadrature_rule: int | str | None = None,
 ) -> OwnedElasticRows:
     """Assemble rows owned by the calling rank for block-aligned PETSc ownership."""
 
@@ -203,4 +205,5 @@ def assemble_owned_elastic_rows_for_comm(
         materials,
         (row0 // dim, row1 // dim),
         elem_type=elem_type,
+        quadrature_rule=quadrature_rule,
     )

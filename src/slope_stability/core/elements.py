@@ -9,7 +9,7 @@ from .simplex_lagrange import tetra_lagrange_node_tuples, triangle_lagrange_node
 
 SUPPORTED_ELEM_TYPES_BY_DIM: dict[int, tuple[str, ...]] = {
     2: ("P1", "P2", "P4"),
-    3: ("P1", "P2", "P4"),
+    3: ("P1", "P2", "P3", "P4"),
 }
 
 SIMPLEX_NODES_PER_ELEMENT: dict[tuple[int, str], int] = {
@@ -18,6 +18,7 @@ SIMPLEX_NODES_PER_ELEMENT: dict[tuple[int, str], int] = {
     (2, "P4"): 15,
     (3, "P1"): 4,
     (3, "P2"): 10,
+    (3, "P3"): 20,
     (3, "P4"): 35,
 }
 
@@ -27,6 +28,7 @@ SIMPLEX_NODES_PER_SURFACE: dict[tuple[int, str], int] = {
     (2, "P4"): 5,
     (3, "P1"): 3,
     (3, "P2"): 6,
+    (3, "P3"): 10,
     (3, "P4"): 15,
 }
 
@@ -122,6 +124,8 @@ def simplex_vtk_cell_block(dim: int, elem: np.ndarray, elem_type: str | None = N
     if int(dim) == 3:
         if elem_key == "P4":
             return "VTK_LAGRANGE_TETRAHEDRON", _tetra_p4_vtk_block(elem_arr)
+        if elem_key == "P3":
+            raise NotImplementedError("VTK export for 3D P3 tetrahedra is not wired yet.")
         if elem_key == "P2":
             return "tetra10", elem_arr[:10, :].T
         return "tetra", elem_arr[:4, :].T

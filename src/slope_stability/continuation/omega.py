@@ -34,6 +34,9 @@ def omega_SSR_direct_continuation(
     f: np.ndarray,
     constitutive_matrix_builder,
     linear_system_solver,
+    *,
+    stopping_criterion: str = "relative_residual",
+    stopping_tol: float | None = None,
 ):
     """Compute displacement for fixed ``lambda`` and return derivative-like omega."""
 
@@ -54,6 +57,8 @@ def omega_SSR_direct_continuation(
         f,
         constitutive_matrix_builder,
         linear_system_solver,
+        stopping_criterion=str(stopping_criterion),
+        stopping_tol=stopping_tol,
     )
     if flag == 1:
         return U, omega, flag
@@ -76,6 +81,8 @@ def omega_SSR_direct_continuation(
         f,
         constitutive_matrix_builder,
         linear_system_solver,
+        stopping_criterion=str(stopping_criterion),
+        stopping_tol=stopping_tol,
     )
     if flag == 1:
         return U, omega, flag
