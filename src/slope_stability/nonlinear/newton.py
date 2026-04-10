@@ -1330,6 +1330,13 @@ def newton_ind_ssr(
     first_iteration_extra_basis_free: list[np.ndarray] | None = None,
     stopping_criterion: str = "relative_residual",
     stopping_tol: float | None = None,
+    line_search_mode: str = "alg5",
+    armijo_alpha0: float = 1.0,
+    armijo_c1: float = 1.0e-4,
+    armijo_shrink: float = 0.5,
+    armijo_max_ls: int | None = None,
+    armijo_rescale_trial_to_omega: bool = True,
+    armijo_fallback_to_alg5: bool = True,
 ):
     """Nested Newton for ``F_lambda(U)=f`` with additional condition ``f^T U = omega``.
 
@@ -1359,6 +1366,7 @@ def newton_ind_ssr(
             "linear_orthogonalization_time": np.array([0.0], dtype=np.float64),
             "iteration_wall_time": np.array([0.0], dtype=np.float64),
             "line_search_iterations": np.array([0], dtype=np.int64),
+            "line_search_fallback_used": np.array([0], dtype=np.int64),
             "deflation_basis_dim_solve": np.array([0], dtype=np.int64),
             "deflation_basis_dim_end": np.array([0], dtype=np.int64),
             "first_iteration_linear_iterations": 0,
@@ -1373,6 +1381,7 @@ def newton_ind_ssr(
             "stop_criterion": str(_normalize_stopping_criterion(stopping_criterion)),
             "stop_tolerance": float(_resolve_stopping_tolerance(tol, stopping_tol)),
             "residual_tolerance": float(tol),
+            "line_search_mode": str(line_search_mode),
         }
         return U_it, float(lambda_it), 0, 0, history
     f_free = _to_free_vector(f, Q)
@@ -1411,6 +1420,7 @@ def newton_ind_ssr(
     linear_orthogonalization_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     iteration_wall_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
     line_search_iterations_hist = np.zeros(int(it_newt_max), dtype=np.int64)
+    line_search_fallback_used_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     deflation_basis_dim_solve_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     deflation_basis_dim_end_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     first_iteration_linear_iterations = 0
@@ -1506,6 +1516,8 @@ def newton_ind_ssr(
                 linear_orthogonalization_time=0.0,
                 iteration_wall_time=float(iteration_wall_hist[it - 1]),
                 line_search_iterations=0,
+                line_search_fallback_used=False,
+                line_search_mode=str(line_search_mode),
                 deflation_basis_dim_solve=int(basis_dim_current),
                 deflation_basis_dim_end=int(basis_dim_current),
                 tolerance=float(stop_tol),
@@ -1685,10 +1697,19 @@ def newton_ind_ssr(
             f_free=f_free,
             f_local_free=f_free_local if use_local_build else None,
             comm=comm,
+            mode=str(line_search_mode),
+            omega_target=float(omega),
+            armijo_alpha0=float(armijo_alpha0),
+            armijo_c1=float(armijo_c1),
+            armijo_shrink=float(armijo_shrink),
+            armijo_max_ls=armijo_max_ls,
+            armijo_rescale_trial_to_omega=bool(armijo_rescale_trial_to_omega),
+            armijo_fallback_to_alg5=bool(armijo_fallback_to_alg5),
             return_info=True,
         )
         alpha = float(damping_info["alpha"])
         line_search_iterations = int(damping_info["line_search_iterations"])
+        line_search_fallback_used = bool(damping_info.get("fallback_used", False))
         alpha_hist[it - 1] = alpha
         delta_lambda_hist[it - 1] = float(d_l)
         accepted_delta_lambda_hist[it - 1] = float(alpha * d_l)
@@ -1714,6 +1735,7 @@ def newton_ind_ssr(
         linear_orthogonalization_hist[it - 1] = float(iter_delta["orthogonalization_time"])
         iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
         line_search_iterations_hist[it - 1] = int(line_search_iterations)
+        line_search_fallback_used_hist[it - 1] = int(line_search_fallback_used)
         deflation_basis_dim_solve_hist[it - 1] = int(solve_info.get("basis_cols", _basis_cols(linear_system_solver)))
         deflation_basis_dim_end_hist[it - 1] = int(deflation_basis_dim_solve_hist[it - 1])
         if first_accepted_correction_free is None and float(alpha) > 0.0:
@@ -1740,6 +1762,8 @@ def newton_ind_ssr(
             linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
             iteration_wall_time=float(iteration_wall_hist[it - 1]),
             line_search_iterations=int(line_search_iterations_hist[it - 1]),
+            line_search_fallback_used=bool(line_search_fallback_used_hist[it - 1]),
+            line_search_mode=str(line_search_mode),
             deflation_basis_dim_solve=int(deflation_basis_dim_solve_hist[it - 1]),
             deflation_basis_dim_end=int(deflation_basis_dim_end_hist[it - 1]),
             tolerance=float(stop_tol),
@@ -1815,6 +1839,7 @@ def newton_ind_ssr(
         "linear_orthogonalization_time": linear_orthogonalization_hist[:it],
         "iteration_wall_time": iteration_wall_hist[:it],
         "line_search_iterations": line_search_iterations_hist[:it],
+        "line_search_fallback_used": line_search_fallback_used_hist[:it],
         "deflation_basis_dim_solve": deflation_basis_dim_solve_hist[:it],
         "deflation_basis_dim_end": deflation_basis_dim_end_hist[:it],
         "first_iteration_linear_iterations": int(first_iteration_linear_iterations),
@@ -1833,6 +1858,7 @@ def newton_ind_ssr(
         "stop_criterion": str(stop_mode),
         "stop_tolerance": float(stop_tol),
         "residual_tolerance": float(tol),
+        "line_search_mode": str(line_search_mode),
     }
     return U_it, float(lambda_it), flag_N, it, history
 

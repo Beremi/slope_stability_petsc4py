@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 import json
 import xml.etree.ElementTree as ET
@@ -144,6 +145,242 @@ def write_history_json(
             history["stats"] = stats
     out_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
     return out_path
+
+
+def write_history_csv_tables(*, out_dir: Path, history_json_path: Path) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    history = json.loads(history_json_path.read_text(encoding="utf-8"))
+    written: list[Path] = []
+
+    attempt_records = list(history.get("attempt_records", []))
+    step_records = list(history.get("step_records", []))
+
+    accepted_rows: list[dict[str, object]] = []
+    for step_record in step_records:
+        step_accepted = dict(step_record.get("step_accepted", {}))
+        if not step_accepted:
+            continue
+        attempts = list(step_record.get("attempts", []))
+        accepted_rows.append(
+            {
+                "accepted_step": step_record.get("accepted_step"),
+                "omega_value": step_accepted.get("omega_value"),
+                "d_omega": step_accepted.get("d_omega"),
+                "lambda_value": step_accepted.get("lambda_value"),
+                "d_lambda": step_accepted.get("d_lambda"),
+                "u_max": step_accepted.get("u_max"),
+                "step_attempt_count": step_accepted.get("step_attempt_count"),
+                "step_newton_iterations": step_accepted.get("step_newton_iterations"),
+                "step_linear_iterations": step_accepted.get("step_linear_iterations"),
+                "line_search_iterations": step_accepted.get("line_search_iterations"),
+                "line_search_fallback_count": sum(
+                    int(bool(iteration.get("line_search_fallback_used", False)))
+                    for attempt in attempts
+                    for iteration in list(attempt.get("newton_iterations", []))
+                ),
+                "deflation_basis_dim_solve_max": step_accepted.get("deflation_basis_dim_solve_max"),
+                "deflation_basis_dim_end_last": step_accepted.get("deflation_basis_dim_end_last"),
+                "step_linear_solve_time_s": step_accepted.get("step_linear_solve_time"),
+                "step_linear_preconditioner_time_s": step_accepted.get("step_linear_preconditioner_time"),
+                "step_linear_orthogonalization_time_s": step_accepted.get("step_linear_orthogonalization_time"),
+                "step_wall_time_s": step_accepted.get("step_wall_time"),
+                "step_newton_relres_end": step_accepted.get("step_newton_relres_end"),
+                "step_newton_relcorr_end": step_accepted.get("step_newton_relcorr_end"),
+            }
+        )
+    if not accepted_rows:
+        stats = dict(history.get("stats", {}))
+        step_index = list(stats.get("step_index", []))
+        lambda_hist = list(history.get("lambda_hist", []))
+        u_hist = list(history.get("Umax_hist", []))
+        for idx, step_value in enumerate(step_index):
+            step_no = int(step_value)
+            attempts = [record for record in step_records if int(record.get("accepted_step", -1)) == step_no]
+            fallback_count = sum(
+                int(bool(iteration.get("line_search_fallback_used", False)))
+                for record in attempts
+                for attempt in list(record.get("attempts", []))
+                for iteration in list(attempt.get("newton_iterations", []))
+            )
+            lambda_value = _series_value(stats, "step_lambda", idx)
+            prev_lambda = _history_step_value(lambda_hist, step_no - 1)
+            accepted_rows.append(
+                {
+                    "accepted_step": step_no,
+                    "omega_value": _series_value(stats, "step_omega", idx),
+                    "d_omega": _series_value(stats, "step_d_omega", idx),
+                    "lambda_value": lambda_value,
+                    "d_lambda": (
+                        None
+                        if lambda_value is None or prev_lambda is None
+                        else float(lambda_value) - float(prev_lambda)
+                    ),
+                    "u_max": _history_step_value(u_hist, step_no),
+                    "step_attempt_count": _series_value(stats, "step_attempt_count", idx),
+                    "step_newton_iterations": _series_value(stats, "step_newton_iterations", idx),
+                    "step_linear_iterations": _series_value(stats, "step_linear_iterations", idx),
+                    "line_search_iterations": _series_value(stats, "step_line_search_iterations", idx),
+                    "line_search_fallback_count": fallback_count,
+                    "deflation_basis_dim_solve_max": _series_value(stats, "step_deflation_basis_dim_solve_max", idx),
+                    "deflation_basis_dim_end_last": _series_value(stats, "step_deflation_basis_dim_end_last", idx),
+                    "step_linear_solve_time_s": _series_value(stats, "step_linear_solve_time", idx),
+                    "step_linear_preconditioner_time_s": _series_value(stats, "step_linear_preconditioner_time", idx),
+                    "step_linear_orthogonalization_time_s": _series_value(stats, "step_linear_orthogonalization_time", idx),
+                    "step_wall_time_s": _series_value(stats, "step_wall_time", idx),
+                    "step_newton_relres_end": _series_value(stats, "step_newton_relres_end", idx),
+                    "step_newton_relcorr_end": _series_value(stats, "step_newton_relcorr_end", idx),
+                }
+            )
+    if accepted_rows:
+        path = out_dir / "accepted_continuation_steps.csv"
+        _write_csv(path, accepted_rows)
+        written.append(path)
+
+    attempt_rows: list[dict[str, object]] = []
+    for record in attempt_records:
+        attempt_complete = dict(record.get("attempt_complete", {}))
+        iterations = list(record.get("newton_iterations", []))
+        last_iteration = dict(iterations[-1]) if iterations else {}
+        newton_iterations = attempt_complete.get("newton_iterations")
+        if newton_iterations is None:
+            newton_iterations = len(iterations)
+        linear_iterations = attempt_complete.get("linear_iterations")
+        if linear_iterations is None:
+            linear_iterations = sum(int(iteration.get("linear_iterations", 0) or 0) for iteration in iterations)
+        line_search_iterations = attempt_complete.get("line_search_iterations")
+        if line_search_iterations is None:
+            line_search_iterations = sum(
+                int(iteration.get("line_search_iterations", 0) or 0) for iteration in iterations
+            )
+        deflation_basis_dim_solve_max = attempt_complete.get("deflation_basis_dim_solve_max")
+        if deflation_basis_dim_solve_max is None:
+            deflation_basis_dim_solve_max = _max_present(iterations, "deflation_basis_dim_solve")
+        deflation_basis_dim_end_last = attempt_complete.get("deflation_basis_dim_end_last")
+        if deflation_basis_dim_end_last is None:
+            deflation_basis_dim_end_last = last_iteration.get("deflation_basis_dim_end")
+        linear_solve_time = attempt_complete.get("linear_solve_time")
+        if linear_solve_time is None:
+            linear_solve_time = sum(float(iteration.get("linear_solve_time", 0.0) or 0.0) for iteration in iterations)
+        linear_preconditioner_time = attempt_complete.get("linear_preconditioner_time")
+        if linear_preconditioner_time is None:
+            linear_preconditioner_time = sum(
+                float(iteration.get("linear_preconditioner_time", 0.0) or 0.0) for iteration in iterations
+            )
+        linear_orthogonalization_time = attempt_complete.get("linear_orthogonalization_time")
+        if linear_orthogonalization_time is None:
+            linear_orthogonalization_time = sum(
+                float(iteration.get("linear_orthogonalization_time", 0.0) or 0.0) for iteration in iterations
+            )
+        attempt_wall_time = attempt_complete.get("attempt_wall_time")
+        if attempt_wall_time is None:
+            attempt_wall_time = sum(float(iteration.get("iteration_wall_time", 0.0) or 0.0) for iteration in iterations)
+        attempt_rows.append(
+            {
+                "phase": record.get("phase"),
+                "target_step": record.get("target_step"),
+                "attempt_in_step": record.get("attempt_in_step"),
+                "init_attempt": record.get("init_attempt"),
+                "omega_target": record.get("omega_target"),
+                "lambda_before": record.get("lambda_before"),
+                "lambda_after": attempt_complete.get("lambda_after", record.get("lambda_before")),
+                "newton_iterations": newton_iterations,
+                "linear_iterations": linear_iterations,
+                "line_search_iterations": line_search_iterations,
+                "line_search_fallback_count": sum(
+                    int(bool(iteration.get("line_search_fallback_used", False))) for iteration in iterations
+                ),
+                "line_search_mode": _first_present(iterations, "line_search_mode"),
+                "deflation_basis_dim_solve_max": deflation_basis_dim_solve_max,
+                "deflation_basis_dim_end_last": deflation_basis_dim_end_last,
+                "linear_solve_time_s": linear_solve_time,
+                "linear_preconditioner_time_s": linear_preconditioner_time,
+                "linear_orthogonalization_time_s": linear_orthogonalization_time,
+                "attempt_wall_time_s": attempt_wall_time,
+                "final_rel_residual": last_iteration.get("rel_residual"),
+                "final_stopping_value": last_iteration.get("stopping_value"),
+                "final_alpha": last_iteration.get("alpha"),
+                "final_status": last_iteration.get("status"),
+            }
+        )
+    if attempt_rows:
+        path = out_dir / "all_attempts_summary.csv"
+        _write_csv(path, attempt_rows)
+        written.append(path)
+
+    newton_rows: list[dict[str, object]] = []
+    for record in attempt_records:
+        for iteration in list(record.get("newton_iterations", [])):
+            newton_rows.append(
+                {
+                    "phase": record.get("phase"),
+                    "target_step": record.get("target_step"),
+                    "attempt_in_step": record.get("attempt_in_step"),
+                    "init_attempt": record.get("init_attempt"),
+                    "newton_iteration": iteration.get("iteration"),
+                    "omega_target": record.get("omega_target"),
+                    "lambda_value": iteration.get("lambda_value"),
+                    "accepted_delta_lambda": iteration.get("accepted_delta_lambda"),
+                    "rel_residual": iteration.get("rel_residual"),
+                    "stopping_value": iteration.get("stopping_value"),
+                    "alpha": iteration.get("alpha"),
+                    "line_search_iterations": iteration.get("line_search_iterations"),
+                    "line_search_mode": iteration.get("line_search_mode"),
+                    "line_search_fallback_used": iteration.get("line_search_fallback_used"),
+                    "linear_iterations": iteration.get("linear_iterations"),
+                    "linear_solve_time_s": iteration.get("linear_solve_time"),
+                    "linear_preconditioner_time_s": iteration.get("linear_preconditioner_time"),
+                    "linear_orthogonalization_time_s": iteration.get("linear_orthogonalization_time"),
+                    "iteration_wall_time_s": iteration.get("iteration_wall_time"),
+                    "deflation_basis_dim_solve": iteration.get("deflation_basis_dim_solve"),
+                    "deflation_basis_dim_end": iteration.get("deflation_basis_dim_end"),
+                    "status": iteration.get("status"),
+                }
+            )
+    if newton_rows:
+        path = out_dir / "all_newton_iterations.csv"
+        _write_csv(path, newton_rows)
+        written.append(path)
+
+    return written
+
+
+def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _first_present(rows: list[dict[str, object]], key: str) -> object:
+    for row in rows:
+        value = row.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _max_present(rows: list[dict[str, object]], key: str) -> object:
+    values = [row.get(key) for row in rows if row.get(key) is not None]
+    if not values:
+        return None
+    return max(values)
+
+
+def _series_value(stats: dict[str, object], key: str, index: int) -> object:
+    values = stats.get(key, [])
+    if not isinstance(values, list) or index < 0 or index >= len(values):
+        return None
+    return values[index]
+
+
+def _history_step_value(values: list[object], step_no: int) -> object:
+    index = int(step_no) - 1
+    if index < 0 or index >= len(values):
+        return None
+    return values[index]
 
 
 def write_vtu(

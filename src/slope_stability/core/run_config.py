@@ -68,6 +68,13 @@ class NewtonConfig:
     r_min: float = 1e-4
     stopping_criterion: str = "relative_residual"
     stopping_tol: float | None = None
+    line_search: str = "alg5"
+    armijo_alpha0: float = 1.0
+    armijo_c1: float = 1.0e-4
+    armijo_shrink: float = 0.5
+    armijo_max_ls: int | None = None
+    armijo_rescale_trial_to_omega: bool = True
+    armijo_fallback_to_alg5: bool = True
 
 
 @dataclass(frozen=True)
@@ -204,6 +211,10 @@ class RunCaseConfig:
             "abs_delta_lambda",
             "absolute_delta_lambda",
         }
+        valid_line_search_modes = {
+            "alg5",
+            "armijo_residual",
+        }
         if not self.problem.case:
             raise ValueError("[problem].case must be set.")
         if self.problem.analysis.lower() not in {"ssr", "ll", "seepage"}:
@@ -212,6 +223,8 @@ class RunCaseConfig:
             raise ValueError(
                 "The newton stopping_criterion must be relative_residual, relative_correction, or absolute_delta_lambda."
             )
+        if str(self.newton.line_search).strip().lower() not in valid_line_search_modes:
+            raise ValueError("The newton line_search must be alg5 or armijo_residual.")
         for field_name in ("init_newton_stopping_criterion", "fine_newton_stopping_criterion"):
             value = getattr(self.continuation, field_name)
             if value is not None and str(value).strip().lower() not in valid_stopping_criteria:
@@ -402,6 +415,15 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         stopping_tol=(
             None if newton_data.get("stopping_tol") is None else float(newton_data.get("stopping_tol"))
         ),
+        line_search=str(newton_data.get("line_search", "alg5")),
+        armijo_alpha0=float(newton_data.get("armijo_alpha0", 1.0)),
+        armijo_c1=float(newton_data.get("armijo_c1", 1.0e-4)),
+        armijo_shrink=float(newton_data.get("armijo_shrink", 0.5)),
+        armijo_max_ls=(
+            None if newton_data.get("armijo_max_ls") is None else int(newton_data.get("armijo_max_ls"))
+        ),
+        armijo_rescale_trial_to_omega=bool(newton_data.get("armijo_rescale_trial_to_omega", True)),
+        armijo_fallback_to_alg5=bool(newton_data.get("armijo_fallback_to_alg5", True)),
     )
     linear_solver = LinearSolverConfig(
         solver_type=str(linear_data.get("solver_type", "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")),

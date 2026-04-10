@@ -1795,6 +1795,13 @@ def _SSR_indirect_continuation_streaming_microstep(
     newton_stopping_tol: float | None = None,
     init_newton_stopping_criterion: str | None = None,
     init_newton_stopping_tol: float | None = None,
+    newton_line_search: str = "alg5",
+    newton_armijo_alpha0: float = 1.0,
+    newton_armijo_c1: float = 1.0e-4,
+    newton_armijo_shrink: float = 0.5,
+    newton_armijo_max_ls: int | None = None,
+    newton_armijo_rescale_trial_to_omega: bool = True,
+    newton_armijo_fallback_to_alg5: bool = True,
 ):
     Q = np.asarray(Q, dtype=bool)
 
@@ -2056,6 +2063,13 @@ def _SSR_indirect_continuation_streaming_microstep(
             ),
             stopping_criterion=str(newton_stopping_criterion),
             stopping_tol=newton_stopping_tol,
+            line_search_mode=str(newton_line_search),
+            armijo_alpha0=float(newton_armijo_alpha0),
+            armijo_c1=float(newton_armijo_c1),
+            armijo_shrink=float(newton_armijo_shrink),
+            armijo_max_ls=newton_armijo_max_ls,
+            armijo_rescale_trial_to_omega=bool(newton_armijo_rescale_trial_to_omega),
+            armijo_fallback_to_alg5=bool(newton_armijo_fallback_to_alg5),
         )
         _basis_restore(linear_system_solver, accepted_basis_snapshot)
         snap_after_attempt = _collector_snapshot(linear_system_solver)
@@ -2356,6 +2370,13 @@ def SSR_indirect_continuation(
     step_length_cap_factor: float = 1.0,
     newton_stopping_criterion: str = "relative_residual",
     newton_stopping_tol: float | None = None,
+    newton_line_search: str = "alg5",
+    newton_armijo_alpha0: float = 1.0,
+    newton_armijo_c1: float = 1.0e-4,
+    newton_armijo_shrink: float = 0.5,
+    newton_armijo_max_ls: int | None = None,
+    newton_armijo_rescale_trial_to_omega: bool = True,
+    newton_armijo_fallback_to_alg5: bool = True,
     init_newton_stopping_criterion: str | None = None,
     init_newton_stopping_tol: float | None = None,
     fine_newton_stopping_criterion: str | None = None,
@@ -2412,6 +2433,13 @@ def SSR_indirect_continuation(
             newton_stopping_tol=newton_stopping_tol,
             init_newton_stopping_criterion=init_newton_stopping_criterion,
             init_newton_stopping_tol=init_newton_stopping_tol,
+            newton_line_search=str(newton_line_search),
+            newton_armijo_alpha0=float(newton_armijo_alpha0),
+            newton_armijo_c1=float(newton_armijo_c1),
+            newton_armijo_shrink=float(newton_armijo_shrink),
+            newton_armijo_max_ls=newton_armijo_max_ls,
+            newton_armijo_rescale_trial_to_omega=bool(newton_armijo_rescale_trial_to_omega),
+            newton_armijo_fallback_to_alg5=bool(newton_armijo_fallback_to_alg5),
             streaming_micro_target_length=streaming_micro_target_length,
             streaming_micro_min_length=streaming_micro_min_length,
             streaming_micro_max_length=streaming_micro_max_length,
@@ -3053,6 +3081,13 @@ def SSR_indirect_continuation(
             **newton_kwargs,
             stopping_criterion=str(current_stop_criterion),
             stopping_tol=current_stop_tol,
+            line_search_mode=str(newton_line_search),
+            armijo_alpha0=float(newton_armijo_alpha0),
+            armijo_c1=float(newton_armijo_c1),
+            armijo_shrink=float(newton_armijo_shrink),
+            armijo_max_ls=newton_armijo_max_ls,
+            armijo_rescale_trial_to_omega=bool(newton_armijo_rescale_trial_to_omega),
+            armijo_fallback_to_alg5=bool(newton_armijo_fallback_to_alg5),
         )
         _basis_restore(linear_system_solver, basis_before_attempt)
         _notify_attempt(linear_system_solver, success=(flag == 0))

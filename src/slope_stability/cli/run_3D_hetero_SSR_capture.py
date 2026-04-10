@@ -540,6 +540,13 @@ def run_capture(
     r_min: float = 1e-4,
     newton_stopping_criterion: str = "relative_residual",
     newton_stopping_tol: float | None = None,
+    newton_line_search: str = "alg5",
+    newton_armijo_alpha0: float = 1.0,
+    newton_armijo_c1: float = 1.0e-4,
+    newton_armijo_shrink: float = 0.5,
+    newton_armijo_max_ls: int | None = None,
+    newton_armijo_rescale_trial_to_omega: bool = True,
+    newton_armijo_fallback_to_alg5: bool = True,
     linear_tolerance: float = 1e-1,
     linear_max_iter: int = 100,
     preconditioner_threads: int = 16,
@@ -866,10 +873,11 @@ def run_capture(
         preconditioner_options["compiled_outer"] = True
     if recycle_preconditioner:
         preconditioner_options["recycle_preconditioner"] = True
-    mixed_parallel_shell = (
+    pmg_level_orders = tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ()))
+    robust_parallel_shell = (
         pmg_hierarchy is not None
-        and tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ())) == (1, 1, 2)
         and int(PETSc.COMM_WORLD.getSize()) > 1
+        and pmg_level_orders in {(1, 1, 2), (1, 2, 4)}
     )
     if effective_pc_backend == "pmg":
         preconditioner_options.update(
@@ -891,9 +899,9 @@ def run_capture(
         preconditioner_options.update(
             {
                 "full_system_preconditioner": False,
-                "mg_levels_ksp_type": "chebyshev" if mixed_parallel_shell else "richardson",
+                "mg_levels_ksp_type": "chebyshev" if robust_parallel_shell else "richardson",
                 "mg_levels_ksp_max_it": 3,
-                "mg_levels_pc_type": "jacobi" if mixed_parallel_shell else "sor",
+                "mg_levels_pc_type": "jacobi" if robust_parallel_shell else "sor",
                 "mg_coarse_ksp_type": "preonly",
                 "mg_coarse_pc_type": "hypre",
                 "mg_coarse_pc_hypre_type": "boomeramg",
@@ -1092,6 +1100,15 @@ def run_capture(
         "newton_stopping_tol": (
             None if newton_stopping_tol is None else float(newton_stopping_tol)
         ),
+        "newton_line_search": str(newton_line_search),
+        "newton_armijo_alpha0": float(newton_armijo_alpha0),
+        "newton_armijo_c1": float(newton_armijo_c1),
+        "newton_armijo_shrink": float(newton_armijo_shrink),
+        "newton_armijo_max_ls": (
+            None if newton_armijo_max_ls is None else int(newton_armijo_max_ls)
+        ),
+        "newton_armijo_rescale_trial_to_omega": bool(newton_armijo_rescale_trial_to_omega),
+        "newton_armijo_fallback_to_alg5": bool(newton_armijo_fallback_to_alg5),
         "factor_solver_type": factor_solver_type,
         "pc_backend": effective_pc_backend,
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
@@ -1198,6 +1215,13 @@ def run_capture(
             step_length_cap_factor=float(step_length_cap_factor),
             newton_stopping_criterion=str(newton_stopping_criterion),
             newton_stopping_tol=newton_stopping_tol,
+            newton_line_search=str(newton_line_search),
+            newton_armijo_alpha0=float(newton_armijo_alpha0),
+            newton_armijo_c1=float(newton_armijo_c1),
+            newton_armijo_shrink=float(newton_armijo_shrink),
+            newton_armijo_max_ls=newton_armijo_max_ls,
+            newton_armijo_rescale_trial_to_omega=bool(newton_armijo_rescale_trial_to_omega),
+            newton_armijo_fallback_to_alg5=bool(newton_armijo_fallback_to_alg5),
             init_newton_stopping_criterion=init_newton_stopping_criterion,
             init_newton_stopping_tol=init_newton_stopping_tol,
             fine_newton_stopping_criterion=fine_newton_stopping_criterion,
@@ -1646,6 +1670,26 @@ def main() -> None:
     )
     parser.add_argument("--newton_stopping_tol", type=float, default=None)
     parser.add_argument(
+        "--newton_line_search",
+        type=str,
+        default="alg5",
+        choices=["alg5", "armijo_residual"],
+    )
+    parser.add_argument("--newton_armijo_alpha0", type=float, default=1.0)
+    parser.add_argument("--newton_armijo_c1", type=float, default=1.0e-4)
+    parser.add_argument("--newton_armijo_shrink", type=float, default=0.5)
+    parser.add_argument("--newton_armijo_max_ls", type=int, default=None)
+    parser.add_argument(
+        "--newton_armijo_rescale_trial_to_omega",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--newton_armijo_fallback_to_alg5",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--init_newton_stopping_criterion",
         type=str,
         default=None,
@@ -1797,6 +1841,13 @@ def main() -> None:
         r_min=args.r_min,
         newton_stopping_criterion=args.newton_stopping_criterion,
         newton_stopping_tol=args.newton_stopping_tol,
+        newton_line_search=args.newton_line_search,
+        newton_armijo_alpha0=args.newton_armijo_alpha0,
+        newton_armijo_c1=args.newton_armijo_c1,
+        newton_armijo_shrink=args.newton_armijo_shrink,
+        newton_armijo_max_ls=args.newton_armijo_max_ls,
+        newton_armijo_rescale_trial_to_omega=args.newton_armijo_rescale_trial_to_omega,
+        newton_armijo_fallback_to_alg5=args.newton_armijo_fallback_to_alg5,
         init_newton_stopping_criterion=args.init_newton_stopping_criterion,
         init_newton_stopping_tol=args.init_newton_stopping_tol,
         fine_newton_stopping_criterion=args.fine_newton_stopping_criterion,

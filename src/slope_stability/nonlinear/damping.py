@@ -49,6 +49,119 @@ def _line_search_result(alpha: float, iterations: int) -> dict[str, float | int]
     }
 
 
+def _indirect_trial_residual_norm(
+    *,
+    U_it: np.ndarray,
+    d_U: np.ndarray,
+    lambda_it: float,
+    d_l: float,
+    alpha: float,
+    f: np.ndarray,
+    q_mask: np.ndarray,
+    constitutive_matrix_builder,
+    f_free: np.ndarray | None = None,
+    f_local_free: np.ndarray | None = None,
+    comm=None,
+    omega_target: float | None = None,
+    rescale_trial_to_omega: bool = False,
+) -> float:
+    alpha = float(alpha)
+    U_alpha = np.asarray(U_it, dtype=np.float64) + alpha * np.asarray(d_U, dtype=np.float64)
+    lambda_alpha = float(lambda_it) + alpha * float(d_l)
+    if lambda_alpha <= 0.0:
+        return np.inf
+
+    if bool(rescale_trial_to_omega) and omega_target is not None:
+        denom = _dot(np.asarray(f, dtype=np.float64), U_alpha, q_mask=q_mask)
+        if not np.isfinite(denom) or abs(float(denom)) <= 1.0e-30:
+            return np.inf
+        U_alpha = U_alpha * (float(omega_target) / float(denom))
+
+    build_F_all_free_local = getattr(constitutive_matrix_builder, "build_F_all_free_local", None)
+    build_F_all_free = getattr(constitutive_matrix_builder, "build_F_all_free", None)
+    try:
+        if f_local_free is not None and callable(build_F_all_free_local):
+            F_alpha_local_free = np.asarray(build_F_all_free_local(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
+            return _dist_norm_local(
+                F_alpha_local_free - np.asarray(f_local_free, dtype=np.float64).reshape(-1),
+                comm,
+            )
+        if f_free is not None and callable(build_F_all_free):
+            F_alpha_free = np.asarray(build_F_all_free(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
+            return float(np.linalg.norm(F_alpha_free - np.asarray(f_free, dtype=np.float64).reshape(-1)))
+        F_alpha = constitutive_matrix_builder.build_F_all(lambda_alpha, U_alpha)
+        return _norm(F_alpha - np.asarray(f, dtype=np.float64), q_mask=q_mask)
+    except Exception as exc:  # pragma: no cover - defensive for constitutive backends
+        if _is_invalid_lambda_trial(exc):
+            return np.inf
+        raise
+
+
+def _damping_alg5_monotone(
+    it_damp_max: int,
+    U_it: np.ndarray,
+    lambda_it: float,
+    d_U: np.ndarray,
+    d_l: float,
+    f: np.ndarray,
+    criterion: float,
+    q_mask: np.ndarray,
+    constitutive_matrix_builder,
+    *,
+    f_free: np.ndarray | None = None,
+    f_local_free: np.ndarray | None = None,
+    comm=None,
+) -> dict[str, float | int]:
+    if np.isnan(d_l) or np.isinf(d_l):
+        return _line_search_result(0.0, 0)
+    if not np.isfinite(criterion):
+        return _line_search_result(0.0, 0)
+    if it_damp_max <= 0:
+        return _line_search_result(0.0, 0)
+
+    alpha = 1.0
+    last_evaluated_alpha: float | None = None
+    line_search_iterations = 0
+
+    for _ in range(int(it_damp_max)):
+        line_search_iterations += 1
+        crit_alpha = _indirect_trial_residual_norm(
+            U_it=U_it,
+            d_U=d_U,
+            lambda_it=lambda_it,
+            d_l=d_l,
+            alpha=alpha,
+            f=f,
+            q_mask=q_mask,
+            constitutive_matrix_builder=constitutive_matrix_builder,
+            f_free=f_free,
+            f_local_free=f_local_free,
+            comm=comm,
+            omega_target=None,
+            rescale_trial_to_omega=False,
+        )
+        if not np.isfinite(crit_alpha):
+            alpha *= 0.5
+            if alpha <= 0.0:
+                return _line_search_result(0.0, int(line_search_iterations))
+            continue
+        last_evaluated_alpha = float(alpha)
+
+        if crit_alpha < criterion:
+            break
+
+        alpha *= 0.5
+        if alpha <= 0.0:
+            return _line_search_result(0.0, int(line_search_iterations))
+
+    if last_evaluated_alpha is None:
+        return _line_search_result(0.0, int(line_search_iterations))
+    return _line_search_result(
+        float(alpha if alpha == last_evaluated_alpha else last_evaluated_alpha),
+        int(line_search_iterations),
+    )
+
+
 def damping(
     it_damp_max: int,
     U_it: np.ndarray,
@@ -166,6 +279,14 @@ def damping_alg5(
     f_free: np.ndarray | None = None,
     f_local_free: np.ndarray | None = None,
     comm=None,
+    mode: str = "alg5",
+    omega_target: float | None = None,
+    armijo_alpha0: float = 1.0,
+    armijo_c1: float = 1.0e-4,
+    armijo_shrink: float = 0.5,
+    armijo_max_ls: int | None = None,
+    armijo_rescale_trial_to_omega: bool = True,
+    armijo_fallback_to_alg5: bool = True,
     return_info: bool = False,
 ) -> float | dict[str, float | int]:
     """Line-search damping for nested-Newton (`ALG5`) continuation updates.
@@ -174,73 +295,128 @@ def damping_alg5(
     computed on free degrees of freedom.
     """
 
-    if np.isnan(d_l) or np.isinf(d_l):
-        result = _line_search_result(0.0, 0)
-        return result if return_info else result["alpha"]
-    if not np.isfinite(criterion):
-        result = _line_search_result(0.0, 0)
-        return result if return_info else result["alpha"]
-    if it_damp_max <= 0:
-        result = _line_search_result(0.0, 0)
-        return result if return_info else result["alpha"]
-
     U_it = np.asarray(U_it, dtype=np.float64)
     d_U = np.asarray(d_U, dtype=np.float64)
     f = np.asarray(f, dtype=np.float64)
     q_mask = np.asarray(q_mask, dtype=bool)
-
-    alpha = 1.0
-    last_evaluated_alpha: float | None = None
-    line_search_iterations = 0
-
-    for _ in range(int(it_damp_max)):
-        line_search_iterations += 1
-        U_alpha = U_it + alpha * d_U
-        lambda_alpha = lambda_it + alpha * d_l
-        if lambda_alpha <= 0.0:
-            alpha *= 0.5
-            if alpha <= 0.0:
-                result = _line_search_result(0.0, int(line_search_iterations))
-                return result if return_info else result["alpha"]
-            continue
-        build_F_all_free_local = getattr(constitutive_matrix_builder, "build_F_all_free_local", None)
-        build_F_all_free = getattr(constitutive_matrix_builder, "build_F_all_free", None)
-        try:
-            if f_local_free is not None and callable(build_F_all_free_local):
-                F_alpha_local_free = np.asarray(build_F_all_free_local(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
-                crit_alpha = _dist_norm_local(
-                    F_alpha_local_free - np.asarray(f_local_free, dtype=np.float64).reshape(-1),
-                    comm,
-                )
-            elif f_free is not None and callable(build_F_all_free):
-                F_alpha_free = np.asarray(build_F_all_free(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
-                crit_alpha = float(np.linalg.norm(F_alpha_free - np.asarray(f_free, dtype=np.float64).reshape(-1)))
-            else:
-                F_alpha = constitutive_matrix_builder.build_F_all(lambda_alpha, U_alpha)
-                crit_alpha = _norm(F_alpha - f, q_mask=q_mask)
-        except Exception as exc:  # pragma: no cover - defensive for constitutive backends
-            if not _is_invalid_lambda_trial(exc):
-                raise
-            alpha *= 0.5
-            if alpha <= 0.0:
-                result = _line_search_result(0.0, int(line_search_iterations))
-                return result if return_info else result["alpha"]
-            continue
-        last_evaluated_alpha = float(alpha)
-
-        if crit_alpha < criterion:
-            break
-
-        alpha *= 0.5
-        if alpha <= 0.0:
-            result = _line_search_result(0.0, int(line_search_iterations))
-            return result if return_info else result["alpha"]
-
-    if last_evaluated_alpha is None:
-        result = _line_search_result(0.0, int(line_search_iterations))
+    mode_name = str(mode).strip().lower()
+    if mode_name == "alg5":
+        result = _damping_alg5_monotone(
+            it_damp_max,
+            U_it,
+            lambda_it,
+            d_U,
+            d_l,
+            f,
+            criterion,
+            q_mask,
+            constitutive_matrix_builder,
+            f_free=f_free,
+            f_local_free=f_local_free,
+            comm=comm,
+        )
+        result["line_search_mode"] = "alg5"
+        result["armijo_accepted"] = False
+        result["fallback_used"] = False
         return result if return_info else result["alpha"]
-    result = _line_search_result(
-        float(alpha if alpha == last_evaluated_alpha else last_evaluated_alpha),
-        int(line_search_iterations),
-    )
+
+    if mode_name != "armijo_residual":
+        raise ValueError(f"Unsupported indirect line-search mode {mode!r}")
+
+    if np.isnan(d_l) or np.isinf(d_l) or not np.isfinite(criterion):
+        result = _line_search_result(0.0, 0)
+        result["line_search_mode"] = "armijo_residual"
+        result["armijo_accepted"] = False
+        result["fallback_used"] = False
+        return result if return_info else result["alpha"]
+
+    phi_it = 0.5 * float(criterion) * float(criterion)
+    directional_derivative = -float(criterion) * float(criterion)
+    max_ls = int(it_damp_max if armijo_max_ls is None else armijo_max_ls)
+    if (
+        max_ls <= 0
+        or not np.isfinite(phi_it)
+        or not np.isfinite(directional_derivative)
+        or directional_derivative >= 0.0
+        or not np.isfinite(float(armijo_shrink))
+        or float(armijo_shrink) <= 0.0
+        or float(armijo_shrink) >= 1.0
+    ):
+        result = _line_search_result(0.0, 0)
+        result["line_search_mode"] = "armijo_residual"
+        result["armijo_accepted"] = False
+        result["fallback_used"] = False
+        return result if return_info else result["alpha"]
+
+    alpha_trial = min(max(float(armijo_alpha0), 1.0e-12), 1.0)
+    line_search_iterations = 0
+    accepted = False
+    accepted_alpha = 0.0
+    last_tried_alpha = 0.0
+
+    for _ in range(max_ls):
+        line_search_iterations += 1
+        last_tried_alpha = float(alpha_trial)
+        crit_alpha = _indirect_trial_residual_norm(
+            U_it=U_it,
+            d_U=d_U,
+            lambda_it=lambda_it,
+            d_l=d_l,
+            alpha=alpha_trial,
+            f=f,
+            q_mask=q_mask,
+            constitutive_matrix_builder=constitutive_matrix_builder,
+            f_free=f_free,
+            f_local_free=f_local_free,
+            comm=comm,
+            omega_target=omega_target,
+            rescale_trial_to_omega=bool(armijo_rescale_trial_to_omega),
+        )
+        phi_alpha = 0.5 * float(crit_alpha) * float(crit_alpha)
+        if np.isfinite(phi_alpha) and phi_alpha <= phi_it + float(armijo_c1) * float(alpha_trial) * directional_derivative:
+            accepted = True
+            accepted_alpha = float(alpha_trial)
+            break
+        next_alpha = float(alpha_trial) * float(armijo_shrink)
+        if next_alpha <= 1.0e-12:
+            alpha_trial = 1.0e-12
+            break
+        alpha_trial = next_alpha
+
+    if accepted:
+        result = _line_search_result(float(accepted_alpha), int(line_search_iterations))
+        result["line_search_mode"] = "armijo_residual"
+        result["armijo_accepted"] = True
+        result["fallback_used"] = False
+        result["last_tried_alpha"] = float(last_tried_alpha)
+        return result if return_info else result["alpha"]
+
+    if bool(armijo_fallback_to_alg5):
+        fallback = _damping_alg5_monotone(
+            it_damp_max,
+            U_it,
+            lambda_it,
+            d_U,
+            d_l,
+            f,
+            criterion,
+            q_mask,
+            constitutive_matrix_builder,
+            f_free=f_free,
+            f_local_free=f_local_free,
+            comm=comm,
+        )
+        fallback["line_search_iterations"] = int(line_search_iterations) + int(fallback["line_search_iterations"])
+        fallback["line_search_mode"] = "armijo_residual"
+        fallback["armijo_accepted"] = False
+        fallback["fallback_used"] = True
+        fallback["last_tried_alpha"] = float(last_tried_alpha)
+        result = fallback
+        return result if return_info else result["alpha"]
+
+    result = _line_search_result(0.0, int(line_search_iterations))
+    result["line_search_mode"] = "armijo_residual"
+    result["armijo_accepted"] = False
+    result["fallback_used"] = False
+    result["last_tried_alpha"] = float(last_tried_alpha)
     return result if return_info else result["alpha"]

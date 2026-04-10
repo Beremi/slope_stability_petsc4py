@@ -14,7 +14,7 @@ from petsc4py import PETSc
 ROOT = Path(__file__).resolve().parents[3]
 
 from slope_stability.core.run_config import RunCaseConfig, load_run_case_config
-from slope_stability.export import write_debug_bundle_h5, write_history_json, write_vtu
+from slope_stability.export import write_debug_bundle_h5, write_history_csv_tables, write_history_json, write_vtu
 from slope_stability.postprocess import build_field_exports, rebuild_case_mesh
 
 from .run_2D_homo_SSR_capture import run_capture as run_2d_homo_ssr_capture
@@ -196,6 +196,13 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "r_min": cfg.newton.r_min,
             "newton_stopping_criterion": cfg.newton.stopping_criterion,
             "newton_stopping_tol": cfg.newton.stopping_tol,
+            "newton_line_search": cfg.newton.line_search,
+            "newton_armijo_alpha0": cfg.newton.armijo_alpha0,
+            "newton_armijo_c1": cfg.newton.armijo_c1,
+            "newton_armijo_shrink": cfg.newton.armijo_shrink,
+            "newton_armijo_max_ls": cfg.newton.armijo_max_ls,
+            "newton_armijo_rescale_trial_to_omega": cfg.newton.armijo_rescale_trial_to_omega,
+            "newton_armijo_fallback_to_alg5": cfg.newton.armijo_fallback_to_alg5,
             "init_newton_stopping_criterion": cfg.continuation.init_newton_stopping_criterion,
             "init_newton_stopping_tol": cfg.continuation.init_newton_stopping_tol,
             "fine_newton_stopping_criterion": cfg.continuation.fine_newton_stopping_criterion,
@@ -327,6 +334,7 @@ def _export_outputs(cfg: RunCaseConfig, config_path: Path, output_dir: Path) -> 
     exports_dir = output_dir / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
     config_text = config_path.read_text(encoding="utf-8")
+    (output_dir / "generated_case.toml").write_text(config_text, encoding="utf-8")
     (exports_dir / "resolved_config.toml").write_text(config_text, encoding="utf-8")
 
     if cfg.export.write_custom_debug_bundle and npz_path.exists() and run_info_path.exists():
@@ -338,11 +346,15 @@ def _export_outputs(cfg: RunCaseConfig, config_path: Path, output_dir: Path) -> 
             progress_path=progress_path if progress_path.exists() else None,
         )
     if cfg.export.write_history_json and npz_path.exists() and run_info_path.exists():
-        write_history_json(
+        history_path = write_history_json(
             out_path=exports_dir / cfg.export.history_name,
             run_info_path=run_info_path,
             npz_path=npz_path,
             progress_path=progress_path if progress_path.exists() else None,
+        )
+        write_history_csv_tables(
+            out_dir=exports_dir,
+            history_json_path=history_path,
         )
     if cfg.export.write_solution_vtu and npz_path.exists():
         case_mesh = rebuild_case_mesh(cfg, mpi_size=int(PETSc.COMM_WORLD.getSize()))
