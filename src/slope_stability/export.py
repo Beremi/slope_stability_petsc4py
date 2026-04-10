@@ -10,6 +10,79 @@ import h5py
 import numpy as np
 
 
+def _attempt_group_key(event: dict[str, object]) -> tuple[object, ...] | None:
+    phase = str(event.get("phase", "")).strip().lower()
+    if phase == "continuation":
+        target_step = event.get("target_step")
+        attempt_in_step = event.get("attempt_in_step")
+        if target_step is None or attempt_in_step is None:
+            return None
+        return ("continuation", int(target_step), int(attempt_in_step))
+    if phase == "init":
+        init_stage = event.get("init_stage")
+        init_attempt = event.get("init_attempt")
+        if init_stage is None or init_attempt is None:
+            return None
+        return ("init", str(init_stage), int(init_attempt))
+    return None
+
+
+def _make_attempt_record(event: dict[str, object]) -> dict[str, object]:
+    return {
+        "phase": None if event.get("phase") is None else str(event.get("phase")),
+        "continuation_kind": event.get("continuation_kind"),
+        "target_step": None if event.get("target_step") is None else int(event.get("target_step")),
+        "accepted_steps_before": None if event.get("accepted_steps") is None else int(event.get("accepted_steps")),
+        "attempt_in_step": None if event.get("attempt_in_step") is None else int(event.get("attempt_in_step")),
+        "init_stage": None if event.get("init_stage") is None else str(event.get("init_stage")),
+        "init_attempt": None if event.get("init_attempt") is None else int(event.get("init_attempt")),
+        "lambda_before": event.get("lambda_before"),
+        "omega_target": event.get("omega_target"),
+        "newton_iterations": [],
+    }
+
+
+def _build_progress_views(progress: list[dict[str, object]]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    grouped: dict[tuple[object, ...], dict[str, object]] = {}
+    ordered: list[dict[str, object]] = []
+
+    for event in progress:
+        key = _attempt_group_key(event)
+        if key is None:
+            continue
+        record = grouped.get(key)
+        if record is None:
+            record = _make_attempt_record(event)
+            grouped[key] = record
+            ordered.append(record)
+        event_name = str(event.get("event", ""))
+        if event_name == "newton_iteration":
+            record["newton_iterations"].append(dict(event))
+        elif event_name == "attempt_complete":
+            record["attempt_complete"] = dict(event)
+        elif event_name == "step_accepted":
+            record["step_accepted"] = dict(event)
+
+    step_map: dict[int, dict[str, object]] = {}
+    for record in ordered:
+        if record.get("phase") != "continuation" or record.get("target_step") is None:
+            continue
+        step_idx = int(record["target_step"])
+        step_record = step_map.get(step_idx)
+        if step_record is None:
+            step_record = {
+                "accepted_step": int(step_idx),
+                "attempts": [],
+            }
+            step_map[step_idx] = step_record
+        step_record["attempts"].append(record)
+        if "step_accepted" in record:
+            step_record["step_accepted"] = record["step_accepted"]
+
+    step_records = [step_map[idx] for idx in sorted(step_map)]
+    return ordered, step_records
+
+
 def write_debug_bundle_h5(
     *,
     out_path: Path,
@@ -56,6 +129,12 @@ def write_history_json(
         "timings": run_info.get("timings", {}),
         "progress_events": progress,
     }
+    if progress:
+        attempt_records, step_records = _build_progress_views(progress)
+        if attempt_records:
+            history["attempt_records"] = attempt_records
+        if step_records:
+            history["step_records"] = step_records
     with np.load(npz_path, allow_pickle=True) as npz:
         for key in ("lambda_hist", "omega_hist", "Umax_hist"):
             if key in npz:

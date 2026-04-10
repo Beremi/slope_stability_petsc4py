@@ -1855,6 +1855,9 @@ def _SSR_indirect_continuation_streaming_microstep(
         "attempt_linear_solve_time": [],
         "attempt_linear_preconditioner_time": [],
         "attempt_linear_orthogonalization_time": [],
+        "attempt_line_search_iterations": [],
+        "attempt_deflation_basis_dim_solve_max": [],
+        "attempt_deflation_basis_dim_end_last": [],
         "attempt_omega_target": [],
         "attempt_lambda_before": [],
         "attempt_lambda_initial_guess": [],
@@ -1885,6 +1888,9 @@ def _SSR_indirect_continuation_streaming_microstep(
         "step_linear_solve_time": [],
         "step_linear_preconditioner_time": [],
         "step_linear_orthogonalization_time": [],
+        "step_line_search_iterations": [],
+        "step_deflation_basis_dim_solve_max": [],
+        "step_deflation_basis_dim_end_last": [],
         "step_lambda": [],
         "step_omega": [],
         "step_lambda_initial_guess": [],
@@ -2001,7 +2007,10 @@ def _SSR_indirect_continuation_streaming_microstep(
     step_lin_solve_accum = 0.0
     step_lin_prec_accum = 0.0
     step_lin_orth_accum = 0.0
+    step_line_search_accum = 0
     step_newton_it_accum = 0
+    step_deflation_basis_dim_solve_max = 0
+    step_deflation_basis_dim_end_last = 0
     step_attempt_count = 0
     micro_attempts_since_accept = 0
     s_acc = 0.0
@@ -2292,7 +2301,10 @@ def _SSR_indirect_continuation_streaming_microstep(
             step_lin_solve_accum = 0.0
             step_lin_prec_accum = 0.0
             step_lin_orth_accum = 0.0
+            step_line_search_accum = 0
             step_newton_it_accum = 0
+            step_deflation_basis_dim_solve_max = 0
+            step_deflation_basis_dim_end_last = 0
             step_attempt_count = 0
             micro_attempts_since_accept = 0
             s_acc = 0.0
@@ -2480,6 +2492,9 @@ def SSR_indirect_continuation(
         "attempt_linear_solve_time": [],
         "attempt_linear_preconditioner_time": [],
         "attempt_linear_orthogonalization_time": [],
+        "attempt_line_search_iterations": [],
+        "attempt_deflation_basis_dim_solve_max": [],
+        "attempt_deflation_basis_dim_end_last": [],
         "attempt_omega_target": [],
         "attempt_lambda_before": [],
         "attempt_lambda_initial_guess": [],
@@ -2545,6 +2560,9 @@ def SSR_indirect_continuation(
         "step_linear_solve_time": [],
         "step_linear_preconditioner_time": [],
         "step_linear_orthogonalization_time": [],
+        "step_line_search_iterations": [],
+        "step_deflation_basis_dim_solve_max": [],
+        "step_deflation_basis_dim_end_last": [],
         "step_lambda": [],
         "step_omega": [],
         "step_lambda_initial_guess": [],
@@ -2740,7 +2758,10 @@ def SSR_indirect_continuation(
     step_lin_solve_accum = 0.0
     step_lin_prec_accum = 0.0
     step_lin_orth_accum = 0.0
+    step_line_search_accum = 0
     step_newton_it_accum = 0
+    step_deflation_basis_dim_solve_max = 0
+    step_deflation_basis_dim_end_last = 0
     step_attempt_count = 0
     step_branch_efficiency_hist: list[float] = []
 
@@ -3060,6 +3081,17 @@ def SSR_indirect_continuation(
         if history["residual"].size:
             attempt_relres = float(history["residual"][-1])
         attempt_relcorr = _final_finite(history.get("accepted_relative_correction_norm", []))
+        attempt_line_search_iterations = int(
+            np.nansum(np.asarray(history.get("line_search_iterations", []), dtype=np.float64))
+        )
+        attempt_deflation_basis_dim_solve = np.asarray(history.get("deflation_basis_dim_solve", []), dtype=np.float64)
+        attempt_deflation_basis_dim_end = np.asarray(history.get("deflation_basis_dim_end", []), dtype=np.float64)
+        attempt_deflation_basis_dim_solve_max = (
+            int(np.nanmax(attempt_deflation_basis_dim_solve[np.isfinite(attempt_deflation_basis_dim_solve)]))
+            if np.isfinite(attempt_deflation_basis_dim_solve).any()
+            else 0
+        )
+        attempt_deflation_basis_dim_end_last = _final_finite(attempt_deflation_basis_dim_end)
 
         stats["attempt_step"].append(step + 1)
         stats["attempt_success"].append(flag == 0)
@@ -3072,6 +3104,9 @@ def SSR_indirect_continuation(
         stats["attempt_linear_solve_time"].append(attempt_delta["solve_time"])
         stats["attempt_linear_preconditioner_time"].append(attempt_delta["preconditioner_time"])
         stats["attempt_linear_orthogonalization_time"].append(attempt_delta["orthogonalization_time"])
+        stats["attempt_line_search_iterations"].append(int(attempt_line_search_iterations))
+        stats["attempt_deflation_basis_dim_solve_max"].append(int(attempt_deflation_basis_dim_solve_max))
+        stats["attempt_deflation_basis_dim_end_last"].append(float(attempt_deflation_basis_dim_end_last))
         stats["attempt_omega_target"].append(omega_it)
         stats["attempt_lambda_before"].append(lambda_value)
         stats["attempt_lambda_initial_guess"].append(lambda_ini)
@@ -3224,6 +3259,11 @@ def SSR_indirect_continuation(
             linear_solve_time=float(attempt_delta["solve_time"]),
             linear_preconditioner_time=float(attempt_delta["preconditioner_time"]),
             linear_orthogonalization_time=float(attempt_delta["orthogonalization_time"]),
+            line_search_iterations=int(attempt_line_search_iterations),
+            deflation_basis_dim_solve_max=int(attempt_deflation_basis_dim_solve_max),
+            deflation_basis_dim_end_last=None
+            if np.isnan(float(attempt_deflation_basis_dim_end_last))
+            else int(attempt_deflation_basis_dim_end_last),
             initial_guess_displacement_diff_volume_integral=None if np.isnan(attempt_u_diff) else float(attempt_u_diff),
             initial_guess_deviatoric_strain_diff_volume_integral=None if np.isnan(attempt_dev_diff) else float(attempt_dev_diff),
             secant_reference_displacement_diff_volume_integral=None if np.isnan(attempt_secant_u_diff) else float(attempt_secant_u_diff),
@@ -3237,7 +3277,11 @@ def SSR_indirect_continuation(
         step_lin_solve_accum += attempt_delta["solve_time"]
         step_lin_prec_accum += attempt_delta["preconditioner_time"]
         step_lin_orth_accum += attempt_delta["orthogonalization_time"]
+        step_line_search_accum += int(attempt_line_search_iterations)
         step_newton_it_accum += it_newt
+        step_deflation_basis_dim_solve_max = max(step_deflation_basis_dim_solve_max, int(attempt_deflation_basis_dim_solve_max))
+        if np.isfinite(float(attempt_deflation_basis_dim_end_last)):
+            step_deflation_basis_dim_end_last = int(attempt_deflation_basis_dim_end_last)
         step_attempt_count += 1
 
         if flag == 1:
@@ -3271,6 +3315,9 @@ def SSR_indirect_continuation(
             stats["step_linear_solve_time"].append(step_lin_solve_accum)
             stats["step_linear_preconditioner_time"].append(step_lin_prec_accum)
             stats["step_linear_orthogonalization_time"].append(step_lin_orth_accum)
+            stats["step_line_search_iterations"].append(int(step_line_search_accum))
+            stats["step_deflation_basis_dim_solve_max"].append(int(step_deflation_basis_dim_solve_max))
+            stats["step_deflation_basis_dim_end_last"].append(int(step_deflation_basis_dim_end_last))
             stats["step_lambda"].append(lambda_value)
             stats["step_omega"].append(omega)
             stats["step_lambda_initial_guess"].append(lambda_ini)
@@ -3424,6 +3471,9 @@ def SSR_indirect_continuation(
                 step_linear_solve_time=float(step_lin_solve_accum),
                 step_linear_preconditioner_time=float(step_lin_prec_accum),
                 step_linear_orthogonalization_time=float(step_lin_orth_accum),
+                line_search_iterations=int(step_line_search_accum),
+                deflation_basis_dim_solve_max=int(step_deflation_basis_dim_solve_max),
+                deflation_basis_dim_end_last=int(step_deflation_basis_dim_end_last),
                 initial_guess_displacement_diff_volume_integral=None if np.isnan(attempt_u_diff) else float(attempt_u_diff),
                 initial_guess_deviatoric_strain_diff_volume_integral=None if np.isnan(attempt_dev_diff) else float(attempt_dev_diff),
                 secant_reference_displacement_diff_volume_integral=None if np.isnan(attempt_secant_u_diff) else float(attempt_secant_u_diff),
@@ -3469,7 +3519,10 @@ def SSR_indirect_continuation(
             step_lin_solve_accum = 0.0
             step_lin_prec_accum = 0.0
             step_lin_orth_accum = 0.0
+            step_line_search_accum = 0
             step_newton_it_accum = 0
+            step_deflation_basis_dim_solve_max = 0
+            step_deflation_basis_dim_end_last = 0
             step_attempt_count = 0
 
             branch_shape_requests_increase = (lambda_hist[step - 1] - lambda_hist[step - 2]) < 0.9 * (

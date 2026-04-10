@@ -162,6 +162,18 @@ def _basis_restore(linear_system_solver, snapshot) -> None:
         linear_system_solver.deflation_basis = np.array(snapshot, dtype=np.float64, copy=True)
 
 
+def _basis_cols(linear_system_solver) -> int:
+    basis = getattr(linear_system_solver, "deflation_basis", None)
+    if basis is None:
+        return 0
+    arr = np.asarray(basis)
+    if arr.size == 0:
+        return 0
+    if arr.ndim == 1:
+        return 1
+    return int(arr.shape[1])
+
+
 def _emit_progress(progress_callback: Callable[[dict], None] | None, *, event: str, **payload) -> None:
     if progress_callback is None:
         return
@@ -434,6 +446,9 @@ def _newton_history_template(
         "linear_preconditioner_time": [],
         "linear_orthogonalization_time": [],
         "iteration_wall_time": [],
+        "line_search_iterations": [],
+        "deflation_basis_dim_solve": [],
+        "deflation_basis_dim_end": [],
         "linear_true_residual_final": [],
         "linear_hit_max_iterations": [],
         "linear_converged_reason": [],
@@ -467,6 +482,9 @@ def _history_append(
     linear_preconditioner_time: float,
     linear_orthogonalization_time: float,
     iteration_wall_time: float,
+    line_search_iterations: int,
+    deflation_basis_dim_solve: int,
+    deflation_basis_dim_end: int,
     linear_true_residual_final: float | None,
     linear_hit_max_iterations: bool,
     linear_converged_reason: int | None,
@@ -494,6 +512,9 @@ def _history_append(
     history["linear_preconditioner_time"].append(float(linear_preconditioner_time))
     history["linear_orthogonalization_time"].append(float(linear_orthogonalization_time))
     history["iteration_wall_time"].append(float(iteration_wall_time))
+    history["line_search_iterations"].append(int(line_search_iterations))
+    history["deflation_basis_dim_solve"].append(int(deflation_basis_dim_solve))
+    history["deflation_basis_dim_end"].append(int(deflation_basis_dim_end))
     history["linear_true_residual_final"].append(
         np.nan if linear_true_residual_final is None else float(linear_true_residual_final)
     )
@@ -513,7 +534,13 @@ def _finalize_newton_history(history: dict[str, object], *, iterations: int, fla
     finalized["iterations"] = int(iterations)
     finalized["flag_N"] = int(flag_N)
     bool_fields = {"linear_hit_max_iterations", "guarded_max_it_accept"}
-    int_fields = {"linear_iterations", "regularization_retry_count"}
+    int_fields = {
+        "linear_iterations",
+        "regularization_retry_count",
+        "line_search_iterations",
+        "deflation_basis_dim_solve",
+        "deflation_basis_dim_end",
+    }
     for key, value in tuple(finalized.items()):
         if not isinstance(value, list):
             continue
@@ -871,6 +898,7 @@ def newton(
             )
         )
         if compute_diffs and early_residual_stop:
+            basis_dim_current = int(_basis_cols(linear_system_solver))
             _emit_progress(
                 progress_callback,
                 event="newton_iteration",
@@ -885,6 +913,9 @@ def newton(
                 linear_preconditioner_time=0.0,
                 linear_orthogonalization_time=0.0,
                 iteration_wall_time=float(perf_counter() - iter_t0),
+                line_search_iterations=0,
+                deflation_basis_dim_solve=int(basis_dim_current),
+                deflation_basis_dim_end=int(basis_dim_current),
                 tolerance=float(stop_tol),
                 residual_tolerance=float(tol),
                 stop_criterion=str(stop_mode),
@@ -917,6 +948,9 @@ def newton(
                 linear_preconditioner_time=0.0,
                 linear_orthogonalization_time=0.0,
                 iteration_wall_time=float(perf_counter() - iter_t0),
+                line_search_iterations=0,
+                deflation_basis_dim_solve=int(basis_dim_current),
+                deflation_basis_dim_end=int(basis_dim_current),
                 linear_true_residual_final=None,
                 linear_hit_max_iterations=False,
                 linear_converged_reason=None,
@@ -1022,7 +1056,7 @@ def newton(
                 alpha_cap = 1.0
                 if bool(armijo["accepted"]) and np.isfinite(float(armijo["alpha"])) and float(armijo["alpha"]) > 0.0:
                     alpha_cap = float(armijo["alpha"])
-                alpha = damping(
+                damping_info = damping(
                     it_damp_max,
                     U_it,
                     dU,
@@ -1037,6 +1071,11 @@ def newton(
                     dU_local_free=dU_local_free,
                     comm=comm,
                     alpha_upper=float(alpha_cap),
+                    return_info=True,
+                )
+                alpha = float(damping_info["alpha"])
+                line_search_iterations = int(damping_info["line_search_iterations"]) + int(
+                    armijo.get("line_search_evaluations", 0)
                 )
                 if float(alpha) > 0.0:
                     accepted_energy = _energy_merit(
@@ -1052,7 +1091,7 @@ def newton(
                     energy_change = None
                 line_search_failed_for_retry = float(alpha) == 0.0
             else:
-                alpha = damping(
+                damping_info = damping(
                     it_damp_max,
                     U_it,
                     dU,
@@ -1066,7 +1105,10 @@ def newton(
                     f_local_free=f_free_local,
                     dU_local_free=dU_local_free,
                     comm=comm,
+                    return_info=True,
                 )
+                alpha = float(damping_info["alpha"])
+                line_search_iterations = int(damping_info["line_search_iterations"])
                 accepted_energy = energy_value
                 energy_change = None
                 line_search_failed_for_retry = False
@@ -1103,6 +1145,8 @@ def newton(
                 "accepted_relative_correction_norm": float(accepted_relative_correction_norm),
                 "accepted_energy": accepted_energy,
                 "energy_change": energy_change,
+                "line_search_iterations": int(line_search_iterations),
+                "deflation_basis_dim_solve": int(solve_info.get("basis_cols", _basis_cols(linear_system_solver))),
             }
             last_attempt = attempt
             if retry_needed:
@@ -1139,6 +1183,8 @@ def newton(
         energy_change = chosen_attempt["energy_change"]
         retry_count = int(chosen_attempt["retry_count"])
         K_r = chosen_attempt["K_r"]
+        line_search_iterations = int(chosen_attempt["line_search_iterations"])
+        deflation_basis_dim_solve = int(chosen_attempt["deflation_basis_dim_solve"])
         converged_on_correction = (
             stop_mode == "relative_correction"
             and float(alpha) > 0.0
@@ -1171,6 +1217,9 @@ def newton(
             linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
             linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
             iteration_wall_time=float(perf_counter() - iter_t0),
+            line_search_iterations=int(line_search_iterations),
+            deflation_basis_dim_solve=int(deflation_basis_dim_solve),
+            deflation_basis_dim_end=int(deflation_basis_dim_solve),
             tolerance=float(stop_tol),
             residual_tolerance=float(tol),
             stop_criterion=str(stop_mode),
@@ -1207,6 +1256,9 @@ def newton(
             linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
             linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
             iteration_wall_time=float(perf_counter() - iter_t0),
+            line_search_iterations=int(line_search_iterations),
+            deflation_basis_dim_solve=int(deflation_basis_dim_solve),
+            deflation_basis_dim_end=int(deflation_basis_dim_solve),
             linear_true_residual_final=(
                 None if solve_info.get("true_residual_final") is None else float(solve_info.get("true_residual_final"))
             ),
@@ -1306,6 +1358,9 @@ def newton_ind_ssr(
             "linear_preconditioner_time": np.array([0.0], dtype=np.float64),
             "linear_orthogonalization_time": np.array([0.0], dtype=np.float64),
             "iteration_wall_time": np.array([0.0], dtype=np.float64),
+            "line_search_iterations": np.array([0], dtype=np.int64),
+            "deflation_basis_dim_solve": np.array([0], dtype=np.int64),
+            "deflation_basis_dim_end": np.array([0], dtype=np.int64),
             "first_iteration_linear_iterations": 0,
             "first_iteration_linear_solve_time": 0.0,
             "first_iteration_linear_preconditioner_time": 0.0,
@@ -1355,6 +1410,9 @@ def newton_ind_ssr(
     linear_preconditioner_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     linear_orthogonalization_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     iteration_wall_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    line_search_iterations_hist = np.zeros(int(it_newt_max), dtype=np.int64)
+    deflation_basis_dim_solve_hist = np.zeros(int(it_newt_max), dtype=np.int64)
+    deflation_basis_dim_end_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     first_iteration_linear_iterations = 0
     first_iteration_linear_solve_time = 0.0
     first_iteration_linear_preconditioner_time = 0.0
@@ -1427,6 +1485,7 @@ def newton_ind_ssr(
         residual_hist[it - 1] = rel_resid
         lambda_hist[it - 1] = float(lambda_it)
         if compute_diffs and stop_mode == "relative_residual" and rel_resid < stop_tol and it > 1:
+            basis_dim_current = int(_basis_cols(linear_system_solver))
             iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
             _emit_progress(
                 progress_callback,
@@ -1446,6 +1505,9 @@ def newton_ind_ssr(
                 linear_preconditioner_time=0.0,
                 linear_orthogonalization_time=0.0,
                 iteration_wall_time=float(iteration_wall_hist[it - 1]),
+                line_search_iterations=0,
+                deflation_basis_dim_solve=int(basis_dim_current),
+                deflation_basis_dim_end=int(basis_dim_current),
                 tolerance=float(stop_tol),
                 residual_tolerance=float(tol),
                 stop_criterion=str(stop_mode),
@@ -1589,6 +1651,7 @@ def newton_ind_ssr(
             if not use_full_operator and not _is_builder_cached_matrix(K_r, constitutive_matrix_builder):
                 _destroy_petsc_mat(K_r)
         iter_delta = _collector_delta(snap_before_iter, _collector_snapshot(linear_system_solver))
+        solve_info = _last_solve_info(linear_system_solver)
         if it == 1:
             first_iteration_linear_iterations = int(iter_delta["iterations"])
             first_iteration_linear_solve_time = float(iter_delta["solve_time"])
@@ -1609,7 +1672,7 @@ def newton_ind_ssr(
         d_l = 0.0 if abs(denom) < 1e-30 else -float(np.dot(fQ, VQ)) / denom
 
         d_U = V + d_l * W
-        alpha = damping_alg5(
+        damping_info = damping_alg5(
             it_damp_max,
             U_it,
             lambda_it,
@@ -1622,7 +1685,10 @@ def newton_ind_ssr(
             f_free=f_free,
             f_local_free=f_free_local if use_local_build else None,
             comm=comm,
+            return_info=True,
         )
+        alpha = float(damping_info["alpha"])
+        line_search_iterations = int(damping_info["line_search_iterations"])
         alpha_hist[it - 1] = alpha
         delta_lambda_hist[it - 1] = float(d_l)
         accepted_delta_lambda_hist[it - 1] = float(alpha * d_l)
@@ -1647,6 +1713,9 @@ def newton_ind_ssr(
         linear_preconditioner_hist[it - 1] = float(iter_delta["preconditioner_time"])
         linear_orthogonalization_hist[it - 1] = float(iter_delta["orthogonalization_time"])
         iteration_wall_hist[it - 1] = float(perf_counter() - iter_t0)
+        line_search_iterations_hist[it - 1] = int(line_search_iterations)
+        deflation_basis_dim_solve_hist[it - 1] = int(solve_info.get("basis_cols", _basis_cols(linear_system_solver)))
+        deflation_basis_dim_end_hist[it - 1] = int(deflation_basis_dim_solve_hist[it - 1])
         if first_accepted_correction_free is None and float(alpha) > 0.0:
             first_accepted_correction_iteration = int(it)
             first_accepted_correction_norm = float(np.linalg.norm(correction_free))
@@ -1670,6 +1739,9 @@ def newton_ind_ssr(
             linear_preconditioner_time=float(iter_delta["preconditioner_time"]),
             linear_orthogonalization_time=float(iter_delta["orthogonalization_time"]),
             iteration_wall_time=float(iteration_wall_hist[it - 1]),
+            line_search_iterations=int(line_search_iterations_hist[it - 1]),
+            deflation_basis_dim_solve=int(deflation_basis_dim_solve_hist[it - 1]),
+            deflation_basis_dim_end=int(deflation_basis_dim_end_hist[it - 1]),
             tolerance=float(stop_tol),
             residual_tolerance=float(tol),
             stop_criterion=str(stop_mode),
@@ -1742,6 +1814,9 @@ def newton_ind_ssr(
         "linear_preconditioner_time": linear_preconditioner_hist[:it],
         "linear_orthogonalization_time": linear_orthogonalization_hist[:it],
         "iteration_wall_time": iteration_wall_hist[:it],
+        "line_search_iterations": line_search_iterations_hist[:it],
+        "deflation_basis_dim_solve": deflation_basis_dim_solve_hist[:it],
+        "deflation_basis_dim_end": deflation_basis_dim_end_hist[:it],
         "first_iteration_linear_iterations": int(first_iteration_linear_iterations),
         "first_iteration_linear_solve_time": float(first_iteration_linear_solve_time),
         "first_iteration_linear_preconditioner_time": float(first_iteration_linear_preconditioner_time),

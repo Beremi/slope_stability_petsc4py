@@ -42,6 +42,13 @@ def _dist_norm_local(x_local: np.ndarray, comm) -> float:
     return float(np.sqrt(max(_dist_dot_local(x_local, x_local, comm), 0.0)))
 
 
+def _line_search_result(alpha: float, iterations: int) -> dict[str, float | int]:
+    return {
+        "alpha": float(alpha),
+        "line_search_iterations": int(iterations),
+    }
+
+
 def damping(
     it_damp_max: int,
     U_it: np.ndarray,
@@ -58,7 +65,8 @@ def damping(
     dU_local_free: np.ndarray | None = None,
     comm=None,
     alpha_upper: float = 1.0,
-) -> float:
+    return_info: bool = False,
+) -> float | dict[str, float | int]:
     """Line-search damping for plain Newton updates.
 
     The free-mask is optional. If provided, all checks are evaluated over active
@@ -66,7 +74,8 @@ def damping(
     """
 
     if it_damp_max < 0:
-        return 0.0
+        result = _line_search_result(0.0, 0)
+        return result if return_info else result["alpha"]
 
     U_it = np.asarray(U_it, dtype=np.float64)
     dU = np.asarray(dU, dtype=np.float64)
@@ -95,16 +104,20 @@ def damping(
         or not np.isfinite(dU_norm)
         or initial_decrease >= 0.0
     ):
-        return 0.0
+        result = _line_search_result(0.0, 0)
+        return result if return_info else result["alpha"]
 
     alpha_upper = float(alpha_upper)
     if not np.isfinite(alpha_upper) or alpha_upper <= 0.0:
-        return 0.0
+        result = _line_search_result(0.0, 0)
+        return result if return_info else result["alpha"]
     alpha = min(alpha_upper, 1.0)
     alpha_min = 0.0
     alpha_max = float(alpha)
+    line_search_iterations = 0
 
     for _ in range(int(it_damp_max)):
+        line_search_iterations += 1
         U_alpha = U_it + alpha * dU
         build_F_reduced_free_local = getattr(constitutive_matrix_builder, "build_F_reduced_free_local", None)
         build_F_reduced_free = getattr(constitutive_matrix_builder, "build_F_reduced_free", None)
@@ -135,7 +148,8 @@ def damping(
 
         alpha = 0.5 * (alpha_min + alpha_max)
 
-    return float(alpha)
+    result = _line_search_result(float(alpha), int(line_search_iterations))
+    return result if return_info else result["alpha"]
 
 
 def damping_alg5(
@@ -152,7 +166,8 @@ def damping_alg5(
     f_free: np.ndarray | None = None,
     f_local_free: np.ndarray | None = None,
     comm=None,
-) -> float:
+    return_info: bool = False,
+) -> float | dict[str, float | int]:
     """Line-search damping for nested-Newton (`ALG5`) continuation updates.
 
     `criterion` is the current residual in the constrained norm and must be
@@ -160,11 +175,14 @@ def damping_alg5(
     """
 
     if np.isnan(d_l) or np.isinf(d_l):
-        return 0.0
+        result = _line_search_result(0.0, 0)
+        return result if return_info else result["alpha"]
     if not np.isfinite(criterion):
-        return 0.0
+        result = _line_search_result(0.0, 0)
+        return result if return_info else result["alpha"]
     if it_damp_max <= 0:
-        return 0.0
+        result = _line_search_result(0.0, 0)
+        return result if return_info else result["alpha"]
 
     U_it = np.asarray(U_it, dtype=np.float64)
     d_U = np.asarray(d_U, dtype=np.float64)
@@ -173,14 +191,17 @@ def damping_alg5(
 
     alpha = 1.0
     last_evaluated_alpha: float | None = None
+    line_search_iterations = 0
 
     for _ in range(int(it_damp_max)):
+        line_search_iterations += 1
         U_alpha = U_it + alpha * d_U
         lambda_alpha = lambda_it + alpha * d_l
         if lambda_alpha <= 0.0:
             alpha *= 0.5
             if alpha <= 0.0:
-                return 0.0
+                result = _line_search_result(0.0, int(line_search_iterations))
+                return result if return_info else result["alpha"]
             continue
         build_F_all_free_local = getattr(constitutive_matrix_builder, "build_F_all_free_local", None)
         build_F_all_free = getattr(constitutive_matrix_builder, "build_F_all_free", None)
@@ -202,7 +223,8 @@ def damping_alg5(
                 raise
             alpha *= 0.5
             if alpha <= 0.0:
-                return 0.0
+                result = _line_search_result(0.0, int(line_search_iterations))
+                return result if return_info else result["alpha"]
             continue
         last_evaluated_alpha = float(alpha)
 
@@ -211,8 +233,14 @@ def damping_alg5(
 
         alpha *= 0.5
         if alpha <= 0.0:
-            return 0.0
+            result = _line_search_result(0.0, int(line_search_iterations))
+            return result if return_info else result["alpha"]
 
     if last_evaluated_alpha is None:
-        return 0.0
-    return float(alpha if alpha == last_evaluated_alpha else last_evaluated_alpha)
+        result = _line_search_result(0.0, int(line_search_iterations))
+        return result if return_info else result["alpha"]
+    result = _line_search_result(
+        float(alpha if alpha == last_evaluated_alpha else last_evaluated_alpha),
+        int(line_search_iterations),
+    )
+    return result if return_info else result["alpha"]
