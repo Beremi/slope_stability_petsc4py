@@ -526,12 +526,15 @@ class _ManualPMGShellPC:
         else:
             self.A_coarse = self.A_coarse_free
             self._coarse_operator_source = "galerkin_free"
-        coarse_basis = make_near_nullspace_elasticity(
-            coarse_level.coord,
-            q_mask=coarse_level.q_mask,
-            center_coordinates=True,
-            return_full=bool(self._coarse_use_full_system),
-        )
+        if int(getattr(coarse_level, "dof_per_node", 0) or 0) == 1:
+            coarse_basis = None
+        else:
+            coarse_basis = make_near_nullspace_elasticity(
+                coarse_level.coord,
+                q_mask=coarse_level.q_mask,
+                center_coordinates=True,
+                return_full=bool(self._coarse_use_full_system),
+            )
         self.A_coarse, self._coarse_nsp, self._coarse_nsp_vecs = attach_near_nullspace(self.A_coarse, coarse_basis)
         self.smoothers = [None] * len(levels)
         for level_idx in range(1, len(levels)):
@@ -1369,8 +1372,8 @@ class PetscKSPFGMRESSolver:
     def _validate_pmg_configuration(self) -> None:
         if self._pc_backend not in {"pmg", "pmg_shell"}:
             return
-        if self.q_mask.size and int(self.q_mask.shape[0]) != 3:
-            raise ValueError(f"{self._pc_backend} backend currently supports only 3D problems.")
+        if self.q_mask.size and int(self.q_mask.shape[0]) not in {1, 3}:
+            raise ValueError(f"{self._pc_backend} backend currently supports only scalar or 3D vector problems.")
         if self._preconditioner_matrix_source != "tangent":
             raise ValueError(f"{self._pc_backend} backend currently supports only preconditioner_matrix_source='tangent'.")
         if self._preconditioner_matrix_policy != "current":

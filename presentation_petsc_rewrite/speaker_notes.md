@@ -1,432 +1,366 @@
 # PETSc Rewrite Presentation Speaker Notes
 
-- Mainline pacing target: about 84-86 minutes for slides 1-63, leaving a few minutes for transitions and discussion.
-- Appendix pacing target: backup material only for discussion, not part of the 90-minute core.
+- Mainline pacing target: about 80-85 minutes for slides 1-57, leaving discussion time.
+- Appendix pacing target: backup only.
 - Repeat this sentence early and again at the speed section: architecture slides use the current default `P4` mainline; performance slides use the committed `P2` study.
-- Speak in first person when bridging sections: “I want to keep this distinction clear”, “I keep coming back to this benchmark”, “this is the path I mean by parallel PMG”.
+- Keep the tone technical and practical: focus on what changed, what is new, how new cases are added, and where code is edited.
+- If asked about seepage `P4` reruns: the concave `L2` seepage mesh is much larger than the dry `L1` meshes on this host, and the local run hit about 119 GB RSS before finishing SSR.
 
 ## Slide 01. PETSc Rewrite of Slope Stability
 - Target: 1 minute.
-- Key message: frame the talk as a translation from the legacy MATLAB mental model into the current PETSc rewrite.
-- Point at visually: the shorter opening bullets on translating the MATLAB mental model and on the main design changes I will focus on.
-- Fallback detail: note that every claim in the deck comes from repository-local code or docs, not a fresh rerun.
+- Key message: frame the presentation as a translation from the legacy MATLAB workflow into the current PETSc runtime.
+- Point at visually: the two opening bullets only.
+- Fallback detail: this is a repository-specific architecture and workflow presentation, not a generic PETSc tutorial.
 
-## Slide 02. How I Structure This Talk
+## Slide 02. Agenda
 - Target: 1 minute.
-- Key message: I am locking the reading method early, so the audience knows which benchmark anchor I am using and which comparison I am deliberately not mixing into it.
-- Point at visually: the three bullets on MATLAB baseline, the checked-in `P4`/PMG architecture anchor, and the separation from the committed `P2` study.
-- Fallback detail: say explicitly that the current architecture story follows the default `P4` benchmark, while runtime claims later follow the locked `P2` report protocol.
+- Key message: the talk is organized around practical extension questions.
+- Point at visually: the eight agenda items.
+- Fallback detail: low-value repo-internal detail has been pushed into appendix or notes.
 
-## Slide 03. Agenda
+## Slide 03. Repository Sources Used Here
 - Target: 1 minute.
-- Key message: give the audience a clean route through the rewrite from baseline to runtime, architecture, interfaces, visualisation, meshes, and speed.
-- Point at visually: the numbered agenda only.
-- Fallback detail: say the appendix remains backup material, but the mainline route is linear and deliberate.
+- Key message: three source layers are used, and each answers a different question.
+- Point at visually: legacy MATLAB entry points, PETSc runtime entry points, and local docs/studies.
+- Fallback detail: the architecture anchor is the default `3d_hetero_ssr` `P4` benchmark; timing claims later come from the committed `P2` study.
 
-## Slide 04. What I Use As Evidence
-- Target: 1 minute.
-- Key message: there are three source layers and each one answers a different question.
-- Point at visually: legacy MATLAB sources, PETSc runtime entrypoints, and the distillation docs/studies.
-- Fallback detail: explain that the MATLAB tree gives the original mental model, the runtime code gives executable truth, and the docs give the high-yield mapping.
-
-## Slide 05. Section Divider: MATLAB Baseline
+## Slide 04. Section Divider: MATLAB Baseline
 - Target: 20 seconds.
-- Key message: the next block rebuilds the old MATLAB mental model first.
-- Point at visually: the centered section title and the full-width progress underline.
-- Fallback detail: say this is necessary because the rewrite keeps the nonlinear problem but changes how responsibilities are packaged.
+- Key message: rebuild the shared MATLAB mental model before explaining the rewrite.
+- Point at visually: the section title only.
 
-## Slide 06. The Legacy Execution Model Is Script-Centric
+## Slide 05. The Legacy Execution Model Is Script-Centric
 - Target: 2 minutes.
-- Key message: in MATLAB, one script usually declares the case, assembles the operators, runs continuation, and plots results.
-- Point at visually: the right-hand flow from quadrature through continuation to figures.
-- Fallback detail: emphasize that modular kernels existed, but orchestration was still script-local rather than registry-driven.
+- Key message: one script typically declares the case, prepares FE inputs, launches continuation, and plots figures.
+- Point at visually: the right-hand flow ending in MATLAB figures.
+- Fallback detail: modular packages existed, but orchestration still lived in the case script.
 
-## Slide 07. MATLAB Package Map
+## Slide 06. MATLAB Package Map
 - Target: 1.5 minutes.
-- Key message: MATLAB already had useful modularity, but it was organized as helper packages around the script rather than around one common runner interface.
-- Point at visually: `+ASSEMBLY`, `+CONTINUATION`, `+NEWTON`, `+CONSTITUTIVE_PROBLEM`, `+LINEAR_SOLVERS`, `+MESH`, and `+VIZ`.
-- Fallback detail: call out that the PETSc rewrite preserves these responsibility categories, but relocates them into runtime modules and config surfaces.
+- Key message: the old code already had meaningful responsibility splits, just not a unified runner surface.
+- Point at visually: `+ASSEMBLY`, `+CONTINUATION`, `+NEWTON`, `+CONSTITUTIVE_PROBLEM`, `+LINEAR_SOLVERS`, `+MESH`, `+VIZ`.
+- Fallback detail: the rewrite largely preserves these responsibility categories and changes their packaging.
 
-## Slide 08. MATLAB Core Solver Loop
+## Slide 07. MATLAB Continuation And Newton Paths
 - Target: 2 minutes.
-- Key message: the nonlinear lifecycle itself is familiar: predictor, Newton solve, accept or shrink, append history.
-- Point at visually: accepted-step lifecycle on the left and the main MATLAB data objects on the right.
-- Fallback detail: remind the audience that the historical arrays for `lambda`, `omega`, `u_max`, and counters are the ancestors of the current JSON and HDF5 exports.
+- Key message: the MATLAB repository already contains multiple nonlinear branches, not only indirect SSR.
+- Point at visually: common solve flow first, then the continuation/Newton mapping table.
+- Fallback detail: direct SSR enters through `SSR_direct_continuation.m` plus `NEWTON.newton`; indirect SSR and indirect LL each have their own continuation and Newton entry points.
 
-## Slide 09. The MATLAB Constitutive Object Is The Main Stateful Kernel Wrapper
+## Slide 08. MATLAB Constitutive Object Is Already A Central Kernel
 - Target: 1.5 minutes.
-- Key message: MATLAB centralizes constitutive state in one handle object, but feeds that object with globally assembled FE operators.
-- Point at visually: the pseudocode chain from reduction to stress to tangent and residual/tangent return.
-- Fallback detail: this is why the rewrite still needs a strong constitutive operator, even though the assembly strategy changes completely.
+- Key message: the constitutive wrapper is already a central object in MATLAB, so the rewrite preserves that structural idea.
+- Point at visually: the constitutive kernel bullets and the short flow on the right.
+- Fallback detail: `CONSTITUTIVE.m` mediates reduction, stress, tangent, residual, and timing collection, then calls the lower-level 3D constitutive functions.
 
-## Slide 10. Mesh Handling In MATLAB Is Closely Coupled To Element Degree
+## Slide 09. Mesh, Materials, And Dirichlet Labels In MATLAB Are Closely Coupled
 - Target: 2 minutes.
-- Key message: MATLAB tends to tie mesh storage, element degree, and boundary-condition conventions together.
-- Point at visually: `load_mesh_P2.m`, `load_mesh_gmsh_waterlevels.m`, and the midpoint utilities.
-- Fallback detail: preview the later PETSc contrast: canonical mesh-family storage plus solver-side degree selection.
+- Key message: MATLAB tends to bind mesh storage, FE degree, BC interpretation, and material expansion into the same loader path.
+- Point at visually: the loader rows and the consequences column.
+- Fallback detail: preview the PETSc contrast: canonical mesh-family storage plus solver-side degree selection.
 
-## Slide 11. MATLAB Visualisation Still Lives Inside The Case Script
-- Target: 2 minutes.
-- Key message: MATLAB already had useful figure products, but the production path stayed attached to benchmark-local plotting code and live workspace state.
-- Point at visually: the left-side split between what MATLAB does well and what remains coupled, then the short right-side workflow sketch.
-- Fallback detail: tell the audience that the rewrite keeps comparable outputs, but moves them behind shared exports and shared notebook helpers.
+## Slide 10. MATLAB Visualisation Still Lives Inside The Case Script
+- Target: 1.5 minutes.
+- Key message: MATLAB already produced useful figures, but the figure path stayed attached to live script state.
+- Point at visually: left boxes first, then the short workflow sketch on the right.
+- Fallback detail: the rewrite keeps comparable outputs, but relocates them behind exports and notebook helpers.
 
-## Slide 12. Section Divider: Prerequisites And Getting Running
+## Slide 11. Section Divider: What Changed Structurally
 - Target: 20 seconds.
-- Key message: switch from historical orientation to practical PETSc-side setup.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: say this section is for someone who wants to run one case before reading architecture internals.
+- Key message: this is the architectural core.
+- Point at visually: the section title only.
 
-## Slide 13. Environment And Bootstrap
-- Target: 2 minutes.
-- Key message: the repository expects a real PETSc build with HYPRE, not just a lightweight pure-Python environment.
-- Point at visually: the two bootstrap commands and the list of what the heavy first run installs.
-- Fallback detail: explain that wheel mode can be lighter, but the benchmark-capable path is the full bootstrap.
-
-## Slide 14. Run One Case Or Run The Whole Benchmark Suite
-- Target: 2 minutes.
-- Key message: both single-case execution and suite execution now flow through the same config surface.
-- Point at visually: the `run_case_from_config` invocation and the `run_benchmark_suite` command.
-- Fallback detail: mention that `run.sh` inside a benchmark folder is just a convenience wrapper around the same `case.toml`.
-
-## Slide 15. Devcontainer And Standard Outputs
+## Slide 12. What Stays Familiar, What Changes
 - Target: 1.5 minutes.
-- Key message: the rewrite standardizes both environment onboarding and run outputs.
-- Point at visually: the devcontainer validation entrypoint and the four standard output files.
-- Fallback detail: contrast this with MATLAB, where final arrays and figure state often remained in the live workspace.
+- Key message: the nonlinear mathematics is familiar; execution packaging is what changes.
+- Point at visually: familiar versus changed tiles.
+- Fallback detail: this is the cleanest way to avoid a false “full rewrite of the mathematics” reading.
 
-## Slide 16. Benchmark Folders Are The User-Facing Contract
-- Target: 1.25 minutes.
-- Key message: the benchmark folder is now the unit of execution, documentation, notebook generation, and reproducibility.
-- Point at visually: `case.toml`, `run.sh`, `README.md`, `[benchmark]`, `[notebook]`, and generated artifacts.
-- Fallback detail: say that this folder contract is the rewrite’s replacement for “which top-level MATLAB script should I run?”
+## Slide 13. Responsibility Map: MATLAB Driver To PETSc Modules
+- Target: 2 minutes.
+- Key message: each familiar MATLAB responsibility still exists, but behind different public surfaces.
+- Point at visually: case declaration, runner dispatch, mesh/material preprocessing, constitutive operator, continuation, solver factory.
+- Fallback detail: the map is tied to concrete files, not just concepts.
 
-## Slide 17. Section Divider: Structural Redesign For Parallelism
+## Slide 14. Architecture Anchor Benchmark
+- Target: 1.5 minutes.
+- Key message: the structural story is anchored on one real checked-in benchmark path.
+- Point at visually: the configuration box first, then the short start-to-continuation pipeline.
+- Fallback detail: this benchmark is for explaining the current architecture, not for proving timing claims.
+
+## Slide 15. Config Load And Runner Dispatch
+- Target: 1.5 minutes.
+- Key message: the new public runtime surface starts at TOML load/validation and explicit case-runner dispatch.
+- Point at visually: config-side bullets and the pseudocode path.
+- Fallback detail: material rows can be explicit in the benchmark or inherited from mesh-family metadata.
+
+## Slide 16. Assembly Policy And Node Ownership Are First-Class Decisions
+- Target: 2 minutes.
+- Key message: ownership and ordering are selected before the nonlinear loop because they determine where work lives.
+- Point at visually: left policy inputs and right callout.
+- Fallback detail: in MATLAB, row ownership never had to be stated. In PETSc, it is a first-order architectural decision.
+
+## Slide 17. Owned Elastic Rows And A Fixed Tangent Pattern
+- Target: 2 minutes.
+- Key message: structure is prepared once; values are refreshed each Newton step.
+- Point at visually: prepared-once versus refreshed-each-Newton lists.
+- Fallback detail: this is one of the deepest differences from a “rebuild global sparse tangent every iteration” mindset.
+
+## Slide 18. Overlap Constitutive Ownership And The Rows Kernel
+- Target: 2 minutes.
+- Key message: the default path places constitutive work on overlap data and writes tangent values directly into a fixed CSR pattern.
+- Point at visually: overlap mode on the left and row-slot metadata on the right.
+- Fallback detail: the bilinear form is unchanged; the dataflow is what became parallel-native.
+
+## Slide 19. What `pmg_shell` Means On This Mainline
+- Target: 1.5 minutes.
+- Key message: `pmg_shell` means a shell V-cycle under the outer deflated FGMRES wrapper, operating on the reduced free-space operator.
+- Point at visually: MATLAB intuition versus PETSc mainline comparison.
+- Fallback detail: in this repository, “parallel PMG” refers to this shell-preconditioned reduced solve path.
+
+## Slide 20. How The PMG Hierarchy Is Built And Rebuilt
+- Target: 1.5 minutes.
+- Key message: hierarchy geometry and transfers are built once from the reordered mesh family, but the shell is configured on the live matrix each Newton step.
+- Point at visually: startup versus Newton-step pseudocode.
+- Fallback detail: `_ensure_pmg_state()` is where level transfers become PETSc matrices.
+
+## Slide 21. Current PMG Shell Versus MATLAB HYPRE Intuition
+- Target: 2 minutes.
+- Key message: MATLAB HYPRE remains the right coarse-solve intuition, but the current mainline solve is now outer FGMRES plus shell PMG plus coarse HYPRE.
+- Point at visually: outer Krylov, preconditioner core, coarse solve, smoother row, rebuild timing row.
+- Fallback detail: for the robust parallel shell case, the smoother switches to `chebyshev + jacobi` on MPI runs with hierarchy orders `(1,2,4)` or `(1,1,2)`; otherwise the shell keeps `richardson + sor`.
+
+## Slide 22. Section Divider: What Is New And Reusable
 - Target: 20 seconds.
-- Key message: this is the architectural core of the talk.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: tell the audience this is where the rewrite stops being a translation and becomes a new execution architecture.
+- Key message: move from architecture into reusable public capability.
+- Point at visually: the section title only.
 
-## Slide 18. Responsibility Map: MATLAB Driver To PETSc Modules
-- Target: 2 minutes.
-- Key message: every familiar MATLAB responsibility still exists, but it now lives behind a different public surface.
-- Point at visually: the row-by-row mapping from script responsibilities to `case.toml`, runner dispatch, mesh/fem setup, constitutive operator, continuation, and solver factory.
-- Fallback detail: stress that the map is not conceptual only; the locations are directly tied to the current runtime tree.
-
-## Slide 19. This Is The Architecture Anchor I Keep Coming Back To
+## Slide 23. What Became Public And Reproducible
 - Target: 1.5 minutes.
-- Key message: anchor the architectural discussion on one concrete benchmark path instead of speaking in abstractions.
-- Point at visually: the benchmark settings box first, then the short runner pipeline, then the callout that separates this architecture anchor from the later `P2` speed evidence.
-- Fallback detail: say out loud that I am using this checked-in benchmark to explain structure, not claiming that every 3D `P4` branch is equally mature.
+- Key message: continuation, Newton, linear solver, execution, and export policies are now public config surfaces.
+- Point at visually: the three-column table.
+- Fallback detail: these policies used to require script edits; now they can be compared across cases.
 
-## Slide 20. Config Load And Runner Dispatch
+## Slide 24. Structured Exports And Notebook Workflow
 - Target: 1.5 minutes.
-- Key message: the runner stack starts by loading and validating TOML, then selecting a case runner explicitly.
-- Point at visually: the config-side bullets and the pseudocode path from config load to exports.
-- Fallback detail: mention that material rows can come from the config itself or be inherited from mesh-family metadata.
+- Key message: standard outputs replace workspace-local state.
+- Point at visually: the export pipeline first, then the two boxes below.
+- Fallback detail: these exports make postprocessing reproducible and rerun-free.
 
-## Slide 21. Assembly Policy And Node Ownership Are First-Class Decisions
-- Target: 2 minutes.
-- Key message: ownership and ordering are chosen up front because they determine where work and data live.
-- Point at visually: policy inputs on the left and the why-this-matters callout on the right.
-- Fallback detail: emphasize that MATLAB assumed one global sparse operator in one address space, whereas PETSc has to decide row ownership early.
-
-## Slide 22. Owned Elastic Rows And A Fixed Tangent Pattern
-- Target: 2 minutes.
-- Key message: the rewrite separates structure preparation from Newton-step value refresh.
-- Point at visually: the “prepared once” list versus the “refreshed every Newton step” list.
-- Fallback detail: this is one of the deepest changes relative to MATLAB, because the tangent is no longer a fresh global sparse rebuild every iteration.
-
-## Slide 23. Overlap Constitutive Ownership And The Rows Kernel
-- Target: 2 minutes.
-- Key message: constitutive work is placed on overlap data needed by owned rows, and the rows kernel writes directly into a fixed CSR pattern.
-- Point at visually: the overlap mode bullets and the row-slot metadata names.
-- Fallback detail: say the bilinear form is not changing; the dataflow and ownership discipline are changing.
-
-## Slide 24. What `pmg_shell` Means On This Mainline
-- Target: 1.75 minutes.
-- Key message: when I say `pmg_shell`, I mean a shell V-cycle wrapped around the current reduced free-space operator, under the MATLAB-style outer Krylov interface.
-- Point at visually: the left bullets on reduced operator, outer wrapper, shell V-cycle, and shared free-space numbering, then the right comparison between the MATLAB intuition and the PETSc mainline.
-- Fallback detail: remind the audience that this slide defines what “parallel PMG” means in the repository today.
-
-## Slide 25. How The PMG Hierarchy Is Built And Rebuilt
-- Target: 1.75 minutes.
-- Key message: the multilevel geometry and transfers are built once from the reordered case, but the shell preconditioner is still rebuilt on the current operator each Newton step.
-- Point at visually: the startup-to-Newton pseudocode on the left and the bullets on stable hierarchy metadata versus live matrix rebuild on the right.
-- Fallback detail: say that `_ensure_pmg_state()` caches level transfers, while the shell configuration is refreshed on the current matrix.
-
-## Slide 26. How The Outer Krylov Solve Sits On Top Of PMG
+## Slide 25. P4, Quadrature, And 3D Export Are Real Runtime Paths
 - Target: 1.5 minutes.
-- Key message: I have to read the outer solver and the PMG backend together, because the real linear solve lives in that combination.
-- Point at visually: the left solve stack from predictor to shell V-cycle, then the right table for `solver_type`, `pc_backend`, smoother choices, and the coarse Hypre solve.
-- Fallback detail: this is the right place to say that `solver_type` no longer tells the whole story by itself.
+- Key message: higher order and `P4` visualisation are exercised runtime paths, not conceptual placeholders.
+- Point at visually: the quadrature figure and the bullets on `P1/P2/P4`, VTK Lagrange export, and pointwise deviatoric strain.
+- Fallback detail: keep the claim scoped to the exercised path rather than every possible 3D runner.
 
-## Slide 27. What Changed Structurally To Enable Parallel Capabilities
-- Target: 2 minutes.
-- Key message: parallelism comes from four structural extractions: case spec extraction, explicit ownership, split assembly, and solve-stack decoupling.
-- Point at visually: the four metric tiles.
-- Fallback detail: say this is why the rewrite is a native distributed architecture rather than a MATLAB script with MPI wrapped around it.
-
-## Slide 28. Section Divider: Main New Functionality
+## Slide 26. Section Divider: How To Add A New Benchmark
 - Target: 20 seconds.
-- Key message: move from architectural change into new capabilities exposed by that architecture.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: note that these are additions beyond a literal MATLAB translation.
+- Key message: this is the practical extension surface.
+- Point at visually: the section title only.
 
-## Slide 29. Shared Registry Across Benchmark Folders
-- Target: 1.25 minutes.
-- Key message: once the folder contract exists, the registry becomes the cross-case surface for suites, parity reporting, notebook generation, and automation.
-- Point at visually: the three tiles for parity suite, additional runnable cases, and shared metadata.
-- Fallback detail: distinguish this from the earlier folder-contract slide: here the point is not “what is inside one benchmark?”, but “what can I do uniformly across many benchmarks?”
+## Slide 27. MATLAB Script Versus PETSc Benchmark Folder
+- Target: 2 minutes.
+- Key message: benchmark authoring moved from editing one top-level script to declaring a benchmark folder with one public config surface.
+- Point at visually: runner family, physics path, mesh input, heterogeneity, then run/inspect outputs.
+- Fallback detail: the practical translation is script selection becomes `problem.case`, script-local branch choice becomes `problem.analysis`, and case-local material or conductivity arrays split into `[[materials]]` and `[seepage]`.
 
-## Slide 30. Richer Continuation And Solver Controls
+## Slide 28. Benchmark Folder Contract And First Run
 - Target: 1.5 minutes.
-- Key message: continuation, Newton, linear-solver, and execution policies are now declarative and comparable across cases.
-- Point at visually: the table rows for `[continuation]`, `[newton]`, `[linear_solver]`, and `[execution]`.
-- Fallback detail: note that stop criteria, warm starts, fine-switch logic, and solver backends are no longer buried in local script edits.
+- Key message: the folder is the unit of execution, but `case.toml` is the only document the runner consumes directly.
+- Point at visually: bootstrap commands first, then the folder tree, then `./run.sh` and `run_case_from_config`.
+- Fallback detail: `run.sh` is a convenience wrapper. `README.md`, `simulation.ipynb`, and `visualisation.ipynb` describe or reuse the config, but they do not define solver behavior. `exports/*` is the stable postprocess surface.
 
-## Slide 31. Structured Exports And Notebook Workflow
+## Slide 29. Choose The Runner Family First
 - Target: 1.5 minutes.
-- Key message: the run now produces stable artifacts that can be consumed later without rerunning the case.
-- Point at visually: the export pipeline pseudocode and the “what this improves” box.
-- Fallback detail: say this is the enabling step for unified visualisation and for better reproducibility.
+- Key message: `problem.case` is the decisive first choice because it selects the concrete runner family and conventions around mesh loading and boundary handling.
+- Point at visually: `problem.case`, `problem.analysis`, `continuation.method`, then the split between `problem.mesh_path` and `[case_data].mesh_dir`.
+- Fallback detail: dispatch happens in `src/slope_stability/cli/run_case_from_config.py`. `problem.analysis` accepts `ssr`, `ll`, and `seepage`, but the runner family still decides which continuation and hydro controls actually matter.
 
-## Slide 32. The Rewrite Also Carries A P4 Export And 3D Display Path
+## Slide 30. What The Current Public Surface Actually Supports
+- Target: 2 minutes.
+- Key message: the public config surface is intentionally asymmetric; the current 3D mainline is not just the 2D text-mesh interface scaled up.
+- Point at visually: the four family rows, especially the difference between 2D text meshes and 3D dry / seepage families.
+- Fallback detail: `continuation.method = "direct"` is currently meaningful in the text-mesh runner. The config-driven 3D dry mainline and the 3D seepage-SSR families discussed in this deck are indirect in practice.
+
+## Slide 31. Dry Mechanical Example: 3D Heterogeneous SSR
+- Target: 2 minutes.
+- Key message: one real `case.toml` is enough to explain the dry 3D mainline: runner family, FE degree, mesh family, continuation method, Newton stop, and linear backend.
+- Point at visually: the `[problem]` block first, then `method = "indirect"`, then the `absolute_delta_lambda` stop, then `pc_backend = "pmg_shell"`.
+- Fallback detail: this is `benchmarks/slope_stability_3D_hetero_SSR_default/case.toml`. The same file also carries `[execution]` for ordering and ownership, plus `[notebook]` for display defaults rather than solver logic.
+
+## Slide 32. Hydro Paths: Seepage Only Versus Seepage-Coupled SSR
+- Target: 2 minutes.
+- Key message: hydro currently means two different workflows, not one generic toggle.
+- Point at visually: seepage-only on the left, seepage-coupled SSR on the right, then the callout about boundary handling.
+- Fallback detail: `problem.seepage = true` is only a case flag. The actual hydro path comes from the chosen seepage runner family. Waterlevels versus COMSOL is still runner-local logic, not a generic TOML section.
+
+## Slide 33. Boundary Labels, Materials, And 2D Text Meshes
+- Target: 2 minutes.
+- Key message: mechanical BC labels and default constitutive rows come from mesh-family metadata when it exists; 2D text-mesh cases are the main exception path.
+- Point at visually: `DEFINITION`, then `[[materials]]`, then `[case_data].mesh_dir`, then the five bullets.
+- Fallback detail: family lookup happens through `src/slope_stability/problem_assets.py`, and mechanical Dirichlet masks are built in `src/slope_stability/io.py`. If no family metadata is found, the runtime falls back to default axis-label sets. `mesh_boundary_type = 1` is the 3D glued-bottom special case.
+
+## Slide 34. Benchmark Authoring Checklist
+- Target: 2 minutes.
+- Key message: benchmark authoring is now a short, inspectable sequence, but the order matters.
+- Point at visually: the checklist from `[benchmark]` and `[problem]` through the run and export verification.
+- Fallback detail: the main practical trap is choosing fields that the selected runner does not actually consume. That is why the sequence starts with `problem.case` and `problem.analysis`, not with tolerances or solver tuning.
+
+## Slide 35. Section Divider: Unified Visualisation
+- Target: 20 seconds.
+- Key message: move from run definition to result inspection.
+- Point at visually: the section title only.
+
+## Slide 36. Unified Visualisation Pipeline
 - Target: 1.5 minutes.
-- Key message: the benchmark I use in the architecture story does carry a real `P4` export and display path, even though I do not want to oversell it as uniform maturity across every 3D runner.
-- Point at visually: the quadrature figure and the bullets on `P1`/`P2`/`P4`, VTK Lagrange export, pointwise deviatoric strain export, and the maturity caveat.
-- Fallback detail: remind the audience that this talk uses a benchmark that exercises the `P4` path deliberately, while the active docs still keep broad production claims focused on `P2`.
+- Key message: one shared export and reconstruction path now feeds notebooks and viewers.
+- Point at visually: the pipeline pseudocode and the three helper paths.
+- Fallback detail: `rebuild_case_mesh()` and `build_field_exports()` are the key runtime-side abstractions.
 
-## Slide 33. Mainline Versus Appendix Features
+## Slide 37. PETSc 3D Views: Geometry And Warped Displacement
 - Target: 1 minute.
-- Key message: keep the default story narrow enough to stay readable, and push alternatives into appendix material.
-- Point at visually: mainline versus appendix rows for mechanics path, preconditioning, continuation, constitutive ownership, and speed study.
-- Fallback detail: say this is a presentation choice, not a claim that appendix branches are unimportant.
+- Key message: the rewrite can reproduce the 3D geometry and warped displacement products from standard exports.
+- Point at visually: left mesh-outline view, right warped displacement view.
+- Fallback detail: both come from the same default indirect 3D SSR visualisation notebook path.
 
-## Slide 34. Section Divider: Unified Runners
+## Slide 38. PETSc Localisation Surface And Top-View Slices
+- Target: 1.5 minutes.
+- Key message: the same exported deviatoric field supports both full 3D localisation views and top-view analysis slices.
+- Point at visually: left 3D deviatoric surface, right slice montage.
+- Fallback detail: the top-view slices are configured from benchmark metadata, not hard-coded inside one case script.
+
+## Slide 39. MATLAB And PETSc Reach Similar Slice Products Through Different Workflows
+- Target: 1.5 minutes.
+- Key message: the visual end product stays familiar, but the production path is now shared and reusable.
+- Point at visually: MATLAB image versus PETSc image.
+- Fallback detail: this is a workflow comparison slide, not a claim that both plotting stacks are implemented the same way.
+
+## Slide 40. Section Divider: Unified Meshes
 - Target: 20 seconds.
-- Key message: shift from architecture to the user-facing execution contract.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: mention that this is the practical extension surface for new benchmarks.
+- Key message: move from outputs back to how the underlying 3D mesh story changed.
+- Point at visually: the section title only.
 
-## Slide 35. Benchmark Folder Contract
-- Target: 1.25 minutes.
-- Key message: return to the folder layout here only as the practical skeleton a contributor must create or inspect.
-- Point at visually: the folder tree and the bullets about one `case.toml` powering CLI, suites, notebooks, and exports.
-- Fallback detail: contrast this with slide 16: there the point was the public contract; here the point is the concrete extension skeleton.
-
-## Slide 36. Public TOML Sections
+## Slide 41. MATLAB Mesh Handling And Element Degree Are Entangled
 - Target: 1.5 minutes.
-- Key message: the runtime surface is intentionally explicit and grouped by responsibility.
-- Point at visually: the table of `[problem]`, `[execution]`, `[continuation]`, `[newton]`, `[linear_solver]`, `[seepage]`, `[export]`, and `[[materials]]`.
-- Fallback detail: this slide is the answer to “what can I configure without editing Python code?”
+- Key message: in MATLAB, geometry storage and FE order tend to move together.
+- Point at visually: each row and its consequence.
+- Fallback detail: this made higher-order growth more loader-specific.
 
-## Slide 37. Walkthrough Of The Architecture-Anchor `case.toml`
+## Slide 42. PETSc Mesh Families Carry Their Own Metadata
 - Target: 1.5 minutes.
-- Key message: one real config is now the shortest path to understanding a benchmark.
-- Point at visually: the example `P4` problem block, execution block, and `pc_backend = "pmg_shell"`, then the right-side bullets that explain why this one file is enough to orient the benchmark.
-- Fallback detail: mention that notebook metadata lives in the same TOML and therefore shares the same case identity.
+- Key message: a mesh family is now a reusable asset with canonical storage, BC labels, and default materials.
+- Point at visually: the `DEFINITION` snippet.
+- Fallback detail: `problem_assets.py` is the runtime bridge from file path back to family metadata.
 
-## Slide 38. Dispatch Through `run_case_from_config`
+## Slide 43. Mesh Family And `elem_type` Are Now Separate Concepts
 - Target: 1.5 minutes.
-- Key message: dispatch is explicit, readable, and centered on `problem.case`.
-- Point at visually: the pseudocode from config load through case-runner mapping to exports.
-- Fallback detail: say this replaces choosing between many top-level MATLAB entry scripts.
+- Key message: geometry/material family selection and FE degree selection are now different decisions.
+- Point at visually: the concept table.
+- Fallback detail: this is the cleanest contrast with the MATLAB `P2`-centric mesh path.
 
-## Slide 39. How To Add A New Benchmark: Steps 1 To 3
+## Slide 44. Boundary Tags, Material Tags, And Reordering Stay Explicit
 - Target: 1.5 minutes.
-- Key message: adding a case begins with folder creation, benchmark metadata, and filling the runtime blocks.
-- Point at visually: the three numbered steps and the callout about inheriting material tables from mesh-family definitions.
-- Fallback detail: emphasize that the benchmark contract is documentation plus execution surface, not just a config file.
+- Key message: reordering for ownership does not erase the physics labels.
+- Point at visually: boundary labels, material ids, and node reorder tiles.
+- Fallback detail: labels stay explicit first and the discrete system is reordered around them afterwards.
 
-## Slide 40. How To Add A New Benchmark: Steps 4 To 5
-- Target: 1.25 minutes.
-- Key message: the last steps are notebook metadata and one real execution that populates reusable artifacts.
-- Point at visually: the two numbered steps and the final checklist.
-- Fallback detail: say the important validation question is whether `run.sh`, the notebooks, and the exports all point to the same config truth.
-
-## Slide 41. Section Divider: Unified Visualisation
+## Slide 45. Section Divider: Speed Comparison
 - Target: 20 seconds.
-- Key message: move from running the case to consuming the outputs.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: tell the audience the next slides focus on 3D because that is where the MATLAB authors will feel the biggest workflow change.
+- Key message: now switch from architecture to controlled performance evidence.
+- Point at visually: the section title only.
 
-## Slide 42. Unified Visualisation Pipeline
+## Slide 46. Locked Runtime Study Protocol
 - Target: 1.5 minutes.
-- Key message: visualisation is now a shared postprocess pipeline rather than per-case plotting code.
-- Point at visually: the top pipeline pseudocode and the helper modules listed below.
-- Fallback detail: say this is the practical meaning of “unified visualisation”: one mesh reconstruction surface, one field naming surface, and one consumer surface.
+- Key message: all timing claims in the main speed section are from the committed `P2` study, not the `P4` architecture anchor.
+- Point at visually: the five protocol bullets.
+- Fallback detail: repeat the distinction out loud because otherwise architecture and performance evidence will naturally get mixed.
 
-## Slide 43. PETSc 3D Views: Geometry And Warped Displacement
+## Slide 47. Locked P2 Study: Headline View Across The Three Cases
+- Target: 1 minute.
+- Key message: PETSc is already ahead on the two main dry 3D cases, and seepage has one completed level with a documented limitation.
+- Point at visually: the headline table.
+- Fallback detail: do not linger here; the later plots carry the story better.
+
+## Slide 48. Homogeneous 3D SSR: PETSc Pulls Ahead As The Mesh Grows
 - Target: 1.5 minutes.
-- Key message: these are the notebook-style views of the default indirect benchmark that I actually want the audience to see, not recycled comparison crops.
-- Point at visually: the mesh-outline view on the left and the warped displacement view on the right.
-- Fallback detail: say that these screenshots came from the `slope_stability_3D_hetero_SSR_default` visualisation path and I used them as the visual target for the deck.
+- Key message: on the homogeneous dry ladder, PETSc pulls further ahead as level grows.
+- Point at visually: continuation on the left, timings on the right.
+- Fallback detail: cite the ratio growth from `1.24x` to `3.47x`.
 
-## Slide 44. PETSc Localisation Surface And Top-View Slices
+## Slide 49. Homogeneous 3D SSR: Committed P2 Ladder Versus The New P4(L1) Curve
 - Target: 1.5 minutes.
-- Key message: this is the PETSc view family I want to standardise on: one full localisation surface view and one slice view family from the same exported field.
-- Point at visually: the notebook-style boundary-surface plot on the left, then the slice view on the right.
-- Fallback detail: say that the slice planes still come from `[notebook]` metadata in the benchmark config, even though the screenshot itself was taken from the notebook output.
+- Key message: the black `P4(L1)` rerun is for continuation-shape comparison against the committed `P2` ladder, not for runtime parity claims.
+- Point at visually: the black line versus the colored committed curves.
+- Fallback detail: mention the fixed PMG shell and `absolute_delta_lambda` stop rule used in the rerun.
 
-## Slide 45. MATLAB And PETSc Reach Similar Slice Products Through Different Workflows
-- Target: 1.25 minutes.
-- Key message: the slice product can look comparable, but the workflow beneath it is very different now.
-- Point at visually: MATLAB on the left, PETSc on the right, then read the callout sentence about where the slice product comes from.
-- Fallback detail: say this is one of the most important maintenance changes in the rewrite.
-
-## Slide 46. Reuse In PyVista And ParaView
+## Slide 50. Heterogeneous 3D SSR: Same Trend, Stronger Advantage On Larger Levels
 - Target: 1.5 minutes.
-- Key message: standard outputs now support both in-repo notebooks and external viewers cleanly.
-- Point at visually: the four output files and the note about rebuilding the case mesh with attached fields.
-- Fallback detail: compare this with the old MATLAB workflow of hoping the right arrays still existed in the live workspace.
+- Key message: the same PETSc advantage appears on the heterogeneous dry ladder.
+- Point at visually: continuation on the left, timings on the right.
+- Fallback detail: cite the ratio growth from `1.35x` to `3.08x`.
 
-## Slide 47. Section Divider: Unified Meshes
+## Slide 51. Heterogeneous 3D SSR: Where The New P4(L1) Curve Sits Relative To P2
+- Target: 1.5 minutes.
+- Key message: the new higher-order dry rerun sits in the same continuation-family comparison space as the committed `P2` curves.
+- Point at visually: black curve against the `P2` ladders.
+- Fallback detail: this is a continuation-shape comparison, not a replacement for the committed timing protocol.
+
+## Slide 52. Seepage 3D SSR: Only One Level Completed Under The Locked Protocol
+- Target: 1.5 minutes.
+- Key message: seepage has one committed `P2` comparison level, and the local `P4` rerun stayed incomplete because of host memory limits.
+- Point at visually: committed seepage continuation/timing plots and the note in the bullets.
+- Fallback detail: if asked, cite the local peak memory issue and note that this is why the slide keeps `P2` seepage evidence only.
+
+## Slide 53. Additional Speedup Gain: The Delta-Lambda Stop Rule
+- Target: 1.5 minutes.
+- Key message: changing the stop rule yields another controlled performance gain inside the same study branch.
+- Point at visually: continuation and timing figures together.
+- Fallback detail: this is a protocol sensitivity result, not a different architecture.
+
+## Slide 54. Section Divider: Where To Edit The Code And Close
 - Target: 20 seconds.
-- Key message: transition from postprocessing to geometric input design.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: tell the audience this is the second biggest conceptual shift after owned-row assembly.
+- Key message: finish with the practical file map that is most useful after the presentation.
+- Point at visually: the section title only.
 
-## Slide 48. MATLAB Mesh Handling And Element Degree Are Entangled
-- Target: 1.5 minutes.
-- Key message: in MATLAB, geometry storage, FE degree, and loader assumptions are tightly coupled.
-- Point at visually: the question/answer/consequence table.
-- Fallback detail: mention that this is why higher-order growth in MATLAB tends to proliferate utilities and special-case loaders.
+## Slide 55. Code Entry Points For Common Changes
+- Target: 2 minutes.
+- Key message: most extension questions map cleanly to a small set of entry files.
+- Point at visually: question-to-path table.
+- Fallback detail: this is the slide worth photographing for a practical starting map after the presentation.
 
-## Slide 49. PETSc Mesh Families Carry Their Own Metadata
-- Target: 1.5 minutes.
-- Key message: a mesh family is now a reusable asset that carries storage conventions, labels, defaults, and materials.
-- Point at visually: the `DEFINITION` pseudocode and the bullets about canonical storage and inherited materials.
-- Fallback detail: say this is what lets multiple benchmarks share one family without copying material tables everywhere.
+## Slide 56. Algorithm Changes Live In A Few Concentrated Files
+- Target: 2 minutes.
+- Key message: the main numerical behavior is concentrated enough that adaptation does not require reading the whole repository.
+- Point at visually: constitutive, Newton, continuation, linear solver/PMG, runner wiring, and postprocess rows.
+- Fallback detail: the `cli/` capture runners are where benchmark-side wiring and algorithm modules meet.
 
-## Slide 50. Canonical Gmsh Tet4 Storage With Loader-Side Elevation
-- Target: 1.5 minutes.
-- Key message: one canonical low-order family file can serve multiple finite-element degrees.
-- Point at visually: the pipeline from Gmsh tet4 physical groups to loader-side elevation to `P1`/`P2`/`P4`.
-- Fallback detail: explicitly contrast this with the MATLAB `P2` HDF5 path and degree-specific midpoint utilities.
-
-## Slide 51. Mesh Family And `elem_type` Are Now Separate Concepts
-- Target: 1.5 minutes.
-- Key message: geometry/material-family selection and FE-degree selection are now distinct runtime decisions.
-- Point at visually: the table rows for mesh family, `problem.mesh_path`, `problem.elem_type`, and export cell type.
-- Fallback detail: say this separation is the core of the new 3D mesh design.
-
-## Slide 52. Boundary Tags, Material Tags, And Reordering Stay Explicit
-- Target: 1.5 minutes.
-- Key message: the rewrite keeps physical meaning explicit even while reordering for ownership.
-- Point at visually: boundary labels, material identifiers, and node reorder tiles.
-- Fallback detail: say the system does not bury physics labels under generic partitioning; it reorders around explicit labels.
-
-## Slide 53. Section Divider: Speed Comparison
-- Target: 20 seconds.
-- Key message: now switch from architecture to the committed evidence.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: repeat that the next section is about the controlled `P2` study, not the current `P4` default.
-
-## Slide 54. Before I Quote Runtimes, Here Is The Locked Study Protocol
-- Target: 1.5 minutes.
-- Key message: define the protocol before quoting any runtime numbers.
-- Point at visually: indirect SSR only, `P2` only, PETSc MPI-8, MATLAB OMP-8, and the three study cases.
-- Fallback detail: use the callout sentence verbatim if the audience seems likely to conflate the study with the architecture mainline.
-
-## Slide 55. Locked P2 Study: Headline View Across The Three Cases
+## Slide 57. Final Summary
 - Target: 1 minute.
-- Key message: before I dive into the plots, I want one study-only table that summarizes what the locked `P2` report actually established across the three cases.
-- Point at visually: completed levels first, then the MATLAB-over-PETSc ratios, then the takeaway column.
-- Fallback detail: use this frame to restate that the seepage row is deliberately narrow and that the next level remains part of the reported limitation.
+- Key message: the rewrite keeps the old problem recognizable, but changes configuration, ownership-aware assembly, solver layering, and outputs into first-class interfaces.
+- Point at visually: the three summary tiles.
+- Fallback detail: close by saying that the shortest path for adaptation is now benchmark folder plus mesh-family metadata plus a few concentrated algorithm files.
 
-## Slide 56. Homogeneous 3D SSR: PETSc Pulls Ahead As The Mesh Grows
-- Target: 1 minute.
-- Key message: on the homogeneous 3D dry case, PETSc’s advantage widens as the mesh gets larger.
-- Point at visually: the continuation plot and timing plot, then the ratio bullet from `1.24x` to `3.47x`.
-- Fallback detail: mention the absolute numbers only if asked; the trend is the main point.
+## Slide 58. Appendix Divider
+- Target: only if needed.
+- Key message: everything after this is backup.
 
-## Slide 57. Heterogeneous 3D SSR: Same Trend, Stronger Advantage On Larger Levels
-- Target: 1 minute.
-- Key message: the heterogeneous dry case shows the same scaling pattern, with PETSc clearly ahead on larger levels.
-- Point at visually: the timing growth and the ratio bullet from `1.35x` to `3.08x`.
-- Fallback detail: say this is the closest committed study analogue to the current default heterogeneous architecture benchmark.
+## Slide 59. Architecture Mainline Versus Performance Study Protocol
+- Use only if the `P4` architecture anchor and the committed `P2` timing study still get mixed.
 
-## Slide 58. Seepage 3D SSR: Only One Level Completed Under The Locked Protocol
-- Target: 1 minute.
-- Key message: the seepage story is promising at the completed level but must be presented honestly with its current limitation.
-- Point at visually: the completed `concave_L2` comparison and the note that the next level failed under the locked study protocol.
-- Fallback detail: stress that the report deliberately stops at completed evidence rather than smoothing over the limitation.
+## Slide 60. Optional And Inactive Paths Present In The Repository
+- Use only if someone asks what alternative branches still exist outside the mainline story.
 
-## Slide 59. Additional Speedup Gain: The Delta-Lambda Stop Rule
-- Target: 1 minute.
-- Key message: PETSc speed depends not only on backend choice but also on stopping protocol, and the delta-lambda variant is a concrete extra speedup on top of the main study branch.
-- Point at visually: the continuation and timing figures first, then the bullets comparing delta-lambda against the residual baseline and against MATLAB.
-- Fallback detail: say explicitly that this is a stop-policy gain, not a different solver architecture.
+## Slide 61. Global Assembly And The Legacy Tangent Kernel
+- Use only if someone asks how much legacy-style assembly is still present in the repository.
 
-## Slide 60. Section Divider: Close
-- Target: 20 seconds.
-- Key message: move from evidence back to what the MATLAB authors should retain.
-- Point at visually: the centered section title and the progress underline.
-- Fallback detail: say the appendix is available for side branches and caveats after the main summary.
+## Slide 62. Alternative Linear-Solver Branches
+- Use only if someone asks about `hypre`, `gamg`, `bddc`, or non-mainline solver branches.
 
-## Slide 61. Key Takeaways For The Original MATLAB Authors
-- Target: 1 minute.
-- Key message: summarize the five durable takeaways on packaging, config, owned-row assembly, standard exports, and current speed evidence.
-- Point at visually: all five bullets in sequence.
-- Fallback detail: if time is short, read bullets two, three, and four only; those are the biggest workflow changes.
+## Slide 63. Seepage Caveat In The Committed Performance Report
+- Use only if someone wants the exact wording or limitation context behind the seepage protocol.
 
-## Slide 62. Recommended Reading Order For New Contributors
-- Target: 30 seconds.
-- Key message: give the audience a practical map for follow-up reading after the talk.
-- Point at visually: the question-to-file table.
-- Fallback detail: recommend starting with the default `P4` architecture benchmark config, then `run_case_from_config.py`, then the map document.
+## Slide 64. Delta-Lambda Appendix Numbers
+- Use only if someone wants the exact appendix timing numbers behind the stop-rule comparison.
 
-## Slide 63. Final Summary
-- Target: 30 seconds.
-- Key message: close with what stayed the same, what changed, and what should be discussed next.
-- Point at visually: the three metric tiles.
-- Fallback detail: use the rightmost tile to prompt discussion about production defaults versus appendix branches.
-
-## Slide 64. Appendix Divider: Optional Paths, Caveats, And Additional Reading
-- Target: 10 seconds.
-- Key message: the remaining slides are backup material for questions.
-- Point at visually: the centered appendix title and the full-width underline.
-- Fallback detail: say you will use these only if the room wants to go deeper on side branches or report caveats.
-
-## Slide 65. Architecture Mainline Versus Performance Study Protocol
-- Target: 1 minute if used.
-- Key message: restate the benchmark split one final time in tabular form.
-- Point at visually: purpose, case anchor, element degree, backend focus, and what each path proves.
-- Fallback detail: if someone quotes a runtime from the speed study against a `P4` architecture slide, come back to this frame.
-
-## Slide 66. Optional And Inactive Paths Present In The Repository
-- Target: 1 minute if used.
-- Key message: several alternative branches remain in the repo, but they are not part of the default story.
-- Point at visually: direct SSR, LL, BDDC, Hypre, GAMG, and alternative constitutive ownership modes.
-- Fallback detail: mention that the map document annex preserves these paths without letting them dominate first-time orientation.
-
-## Slide 67. Global Assembly And The Legacy Tangent Kernel
-- Target: 1 minute if used.
-- Key message: legacy-style global rebuild and tangent paths still exist, but they are no longer the mainline architecture.
-- Point at visually: the comparison rows for global rebuild, legacy tangent kernel, and legacy scatter-style assembly.
-- Fallback detail: this frame is useful if the audience asks whether the rewrite still has a more MATLAB-like fallback path.
-
-## Slide 68. Alternative Linear-Solver Branches
-- Target: 1 minute if used.
-- Key message: multiple solver backends remain available for studies, but `pmg_shell` is the mainline narrative.
-- Point at visually: `hypre`, `gamg`, `bddc`, and `DIRECT`.
-- Fallback detail: use this frame if the audience wants to discuss where future tuning or production hardening should happen.
-
-## Slide 69. Seepage Caveat In The Committed Performance Report
-- Target: 1 minute if used.
-- Key message: the seepage limitation is specific, documented, and intentionally left visible.
-- Point at visually: the bullets about `concave_L2`, the next-level crash after hierarchy construction and solver setup, and the same-mesh fallback diagnostics.
-- Fallback detail: say this is exactly the kind of report honesty that should guide future performance communication.
-
-## Slide 70. Delta-Lambda Appendix Numbers
-- Target: 1 minute if used.
-- Key message: the delta-lambda stopping rule materially changes PETSc runtimes in the heterogeneous dry case.
-- Point at visually: the side-by-side residual and delta-lambda PETSc numbers against MATLAB.
-- Fallback detail: keep the interpretation narrow: it is a protocol-sensitivity note, not a replacement baseline.
-
-## Slide 71. Extra Source Map And Reading Order
-- Target: 30 seconds if used.
-- Key message: end with the highest-yield files for self-study.
-- Point at visually: the ordered list from the map document through runner, tangent, solver, and notebook support.
-- Fallback detail: if the audience only remembers two starting points, recommend the map document and the default `P4` architecture benchmark config.
+## Slide 65. Extra Source Map And Reading Order
+- Use only if someone asks for a concrete reading order after the presentation.

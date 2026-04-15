@@ -27,6 +27,7 @@ class PMGLevel:
     elem: np.ndarray
     surf: np.ndarray
     q_mask: np.ndarray
+    dof_dim: int
     material_identifier: np.ndarray
     freedofs: np.ndarray
     total_to_free_orig: np.ndarray
@@ -41,12 +42,16 @@ class PMGLevel:
         return int(self.coord.shape[0])
 
     @property
+    def dof_per_node(self) -> int:
+        return int(self.dof_dim)
+
+    @property
     def n_nodes(self) -> int:
         return int(self.coord.shape[1])
 
     @property
     def total_size(self) -> int:
-        return int(self.dim * self.n_nodes)
+        return int(self.dof_dim * self.n_nodes)
 
     @property
     def free_size(self) -> int:
@@ -206,6 +211,7 @@ def _prune_level_to_active_free(level: PMGLevel, active_free_mask: np.ndarray) -
         elem=np.asarray(level.elem, dtype=np.int64),
         surf=np.asarray(level.surf, dtype=np.int64),
         q_mask=q_mask,
+        dof_dim=int(level.dof_per_node),
         material_identifier=np.asarray(level.material_identifier, dtype=np.int64),
         freedofs=freedofs,
         total_to_free_orig=total_to_free_orig,
@@ -301,9 +307,11 @@ def _build_level(
     reorder_parts: int | None,
     boundary_type: int,
     comm,
+    scalar_dofs: bool = False,
+    q_mask_override=None,
 ) -> PMGLevel:
     mesh_path_lower = mesh_path.as_posix().lower()
-    if "waterlevels" in mesh_path_lower and str(elem_type).strip().upper() in {"P1", "P2"}:
+    if "waterlevels" in mesh_path_lower:
         mesh = load_mesh_gmsh_waterlevels(mesh_path, elem_type=elem_type)
     else:
         mesh = load_mesh_from_file(mesh_path, boundary_type=boundary_type, elem_type=elem_type)
@@ -318,18 +326,27 @@ def _build_level(
     coord = np.asarray(reordered.coord, dtype=np.float64)
     elem = np.asarray(reordered.elem, dtype=np.int64)
     surf = np.asarray(reordered.surf, dtype=np.int64)
-    q_mask = np.asarray(reordered.q_mask, dtype=bool)
+    triangle_labels = getattr(mesh, "triangle_labels", None)
+    if callable(q_mask_override):
+        q_mask = np.asarray(q_mask_override(coord, surf, triangle_labels), dtype=bool)
+    elif q_mask_override is not None:
+        q_mask = np.asarray(q_mask_override, dtype=bool)
+    elif scalar_dofs:
+        q_mask = np.ones((1, int(coord.shape[1])), dtype=bool)
+    else:
+        q_mask = np.asarray(reordered.q_mask, dtype=bool)
     material_identifier = np.asarray(mesh.material, dtype=np.int64).ravel()
 
+    dof_dim = int(q_mask.shape[0]) if q_mask.ndim == 2 else int(coord.shape[0])
     freedofs_total = q_to_free_indices(q_mask)
-    total_to_free_orig = np.full(coord.shape[0] * coord.shape[1], -1, dtype=np.int64)
+    total_to_free_orig = np.full(dof_dim * coord.shape[1], -1, dtype=np.int64)
     total_to_free_orig[freedofs_total] = np.arange(freedofs_total.size, dtype=np.int64)
     perm, iperm = _identity_free_permutation(freedofs_total.size)
     freedofs = np.asarray(freedofs_total[perm], dtype=np.int64)
 
-    owned_total_range = owned_block_range(coord.shape[1], coord.shape[0], comm)
-    node0 = int(owned_total_range[0] // coord.shape[0])
-    node1 = int(owned_total_range[1] // coord.shape[0])
+    owned_total_range = owned_block_range(coord.shape[1], dof_dim, comm)
+    node0 = int(owned_total_range[0] // dof_dim)
+    node1 = int(owned_total_range[1] // dof_dim)
     lo = int(np.searchsorted(freedofs_total, owned_total_range[0], side="left"))
     hi = int(np.searchsorted(freedofs_total, owned_total_range[1], side="left"))
 
@@ -340,6 +357,7 @@ def _build_level(
         elem=elem,
         surf=surf,
         q_mask=q_mask,
+        dof_dim=dof_dim,
         material_identifier=material_identifier,
         freedofs=freedofs,
         total_to_free_orig=total_to_free_orig,
@@ -366,6 +384,58 @@ def _sorted_coo_arrays(entries: dict[tuple[int, int], float]) -> tuple[np.ndarra
     return rows, cols, data
 
 
+def _validate_level_layout(level: PMGLevel, *, comm) -> None:
+    expected_total_range = owned_block_range(level.n_nodes, level.dof_per_node, comm)
+    if tuple(int(v) for v in level.owned_total_range) != tuple(int(v) for v in expected_total_range):
+        raise ValueError(
+            "PMG level owned total range does not match communicator ownership: "
+            f"{tuple(int(v) for v in level.owned_total_range)} vs {tuple(int(v) for v in expected_total_range)}"
+        )
+    expected_lo = int(np.searchsorted(level.freedofs, expected_total_range[0], side="left"))
+    expected_hi = int(np.searchsorted(level.freedofs, expected_total_range[1], side="left"))
+    if tuple(int(v) for v in level.owned_free_range) != (expected_lo, expected_hi):
+        raise ValueError(
+            "PMG level owned free range does not match free-space ownership: "
+            f"{tuple(int(v) for v in level.owned_free_range)} vs {(expected_lo, expected_hi)}"
+        )
+    if level.freedofs.ndim != 1 or not np.all(level.freedofs[:-1] <= level.freedofs[1:]):
+        raise ValueError("PMG level freedofs must be a sorted 1D array.")
+    free_count = int(np.count_nonzero(level.total_to_free_orig >= 0))
+    if free_count != int(level.free_size):
+        raise ValueError(f"PMG level free-size mismatch: {free_count} vs {int(level.free_size)}")
+
+
+def validate_pmg_fine_level_alignment(
+    hierarchy,
+    *,
+    coord: np.ndarray,
+    elem: np.ndarray,
+    surf: np.ndarray,
+    q_mask: np.ndarray,
+    comm,
+) -> None:
+    fine = hierarchy.fine_level if hasattr(hierarchy, "fine_level") else hierarchy.levels[-1]
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    elem_arr = np.asarray(elem, dtype=np.int64)
+    surf_arr = np.asarray(surf, dtype=np.int64)
+    q_mask_arr = np.asarray(q_mask, dtype=bool)
+    if (
+        fine.coord.shape != coord_arr.shape
+        or fine.elem.shape != elem_arr.shape
+        or fine.surf.shape != surf_arr.shape
+        or fine.q_mask.shape != q_mask_arr.shape
+        or not np.allclose(fine.coord, coord_arr)
+        or not np.array_equal(fine.elem, elem_arr)
+        or not np.array_equal(fine.surf, surf_arr)
+        or not np.array_equal(fine.q_mask, q_mask_arr)
+    ):
+        raise ValueError(
+            "PMG fine level does not match the reordered fine-space operator layout. "
+            "Use the same mesh family, node ordering, and free-mask builder for both."
+        )
+    _validate_level_layout(fine, comm=comm)
+
+
 def _adjacent_level_prolongation(
     coarse: PMGLevel,
     fine: PMGLevel,
@@ -374,7 +444,7 @@ def _adjacent_level_prolongation(
     fine_order: int,
     duplicate_tolerance: float = 1.0e-12,
 ) -> PMGTransfer:
-    if coarse.dim != fine.dim:
+    if coarse.dof_per_node != fine.dof_per_node:
         raise ValueError("PMG levels must have the same vector dimension")
     if coarse.material_identifier.shape != fine.material_identifier.shape or not np.array_equal(
         coarse.material_identifier,
@@ -390,12 +460,14 @@ def _adjacent_level_prolongation(
     _ = overlap_nodes
 
     entries: dict[tuple[int, int], float] = {}
+    scalar_row_sum_expected: dict[int, float] = {}
+    scalar_row_dropped_support: dict[int, bool] = {}
     for elem_id in np.asarray(overlap_elements, dtype=np.int64).tolist():
         fine_nodes = np.asarray(fine.elem[:, elem_id], dtype=np.int64)
         coarse_nodes = np.asarray(coarse.elem[:, elem_id], dtype=np.int64)
         for fine_local_idx, fine_node in enumerate(fine_nodes.tolist()):
-            for comp in range(fine.dim):
-                fine_total = int(fine.dim * fine_node + comp)
+            for comp in range(fine.dof_per_node):
+                fine_total = int(fine.dof_per_node * fine_node + comp)
                 if fine_total < fine.owned_total_range[0] or fine_total >= fine.owned_total_range[1]:
                     continue
                 fine_free_orig = int(fine.total_to_free_orig[fine_total])
@@ -403,10 +475,15 @@ def _adjacent_level_prolongation(
                     continue
                 fine_row = int(fine.iperm[fine_free_orig])
                 coeff = np.asarray(coarse_hatp[:, fine_local_idx], dtype=np.float64)
+                if fine.dof_per_node == 1:
+                    expected = float(np.sum(coeff[np.abs(coeff) > duplicate_tolerance]))
+                    scalar_row_sum_expected[fine_row] = expected
                 for coarse_local_idx in np.flatnonzero(np.abs(coeff) > duplicate_tolerance).tolist():
-                    coarse_total = int(coarse.dim * coarse_nodes[coarse_local_idx] + comp)
+                    coarse_total = int(coarse.dof_per_node * coarse_nodes[coarse_local_idx] + comp)
                     coarse_free_orig = int(coarse.total_to_free_orig[coarse_total])
                     if coarse_free_orig < 0:
+                        if fine.dof_per_node == 1:
+                            scalar_row_dropped_support[fine_row] = True
                         continue
                     coarse_col = int(coarse.iperm[coarse_free_orig])
                     value = float(coeff[coarse_local_idx])
@@ -420,6 +497,18 @@ def _adjacent_level_prolongation(
                             f"Inconsistent PMG interpolation entry for free row {fine_row} coarse col {coarse_col}: "
                             f"{previous} vs {value}"
                         )
+
+    if fine.dof_per_node == 1 and scalar_row_sum_expected:
+        actual_row_sums: dict[int, float] = {}
+        for (fine_row, _coarse_col), value in entries.items():
+            actual_row_sums[fine_row] = float(actual_row_sums.get(fine_row, 0.0) + float(value))
+        for fine_row, expected_sum in scalar_row_sum_expected.items():
+            actual_sum = float(actual_row_sums.get(fine_row, 0.0))
+            if not scalar_row_dropped_support.get(fine_row, False) and abs(actual_sum - expected_sum) > 1.0e-12:
+                raise ValueError(
+                    "Scalar PMG transfer does not preserve a constant field on a fully free row: "
+                    f"row {fine_row} has sum {actual_sum}, expected {expected_sum}"
+                )
 
     rows, cols, data = _sorted_coo_arrays(entries)
     local_rows = rows - fine.lo
@@ -500,7 +589,7 @@ def _cross_mesh_p1_to_p1_prolongation(
     duplicate_tolerance: float = 1.0e-12,
     location_tolerance: float = 1.0e-9,
 ) -> PMGTransfer:
-    if coarse.dim != fine.dim:
+    if coarse.dof_per_node != fine.dof_per_node:
         raise ValueError("PMG levels must have the same vector dimension")
     if int(coarse.order) != 1 or int(fine.order) != 1:
         raise ValueError("Cross-mesh PMG transfer currently supports only P1 -> P1 interpolation.")
@@ -520,8 +609,8 @@ def _cross_mesh_p1_to_p1_prolongation(
             tolerance=location_tolerance,
         )
         coarse_nodes = np.asarray(coarse_elem[:, coarse_elem_id], dtype=np.int64)
-        for comp in range(fine.dim):
-            fine_total = int(fine.dim * fine_node + comp)
+        for comp in range(fine.dof_per_node):
+            fine_total = int(fine.dof_per_node * fine_node + comp)
             fine_free_orig = int(fine.total_to_free_orig[fine_total])
             if fine_free_orig < 0:
                 continue
@@ -529,7 +618,7 @@ def _cross_mesh_p1_to_p1_prolongation(
             for coarse_local_idx, weight in enumerate(np.asarray(bary, dtype=np.float64).tolist()):
                 if abs(weight) <= duplicate_tolerance:
                     continue
-                coarse_total = int(coarse.dim * coarse_nodes[coarse_local_idx] + comp)
+                coarse_total = int(coarse.dof_per_node * coarse_nodes[coarse_local_idx] + comp)
                 coarse_free_orig = int(coarse.total_to_free_orig[coarse_total])
                 if coarse_free_orig < 0:
                     continue
@@ -688,6 +777,88 @@ def build_3d_same_mesh_pmg_hierarchy(
         coarse_order=2,
         fine_order=4,
     )
+    return GeneralPMGHierarchy(
+        levels_tuple=(level_p1, level_p2, level_p4),
+        prolongations_tuple=(prolongation_p21, prolongation_p42),
+        materials=materials,
+        mesh_path=mesh_path,
+        node_ordering=str(node_ordering),
+    )
+
+
+def build_3d_same_mesh_scalar_pmg_hierarchy(
+    mesh_path: str | Path,
+    *,
+    fine_elem_type: str = "P4",
+    boundary_type: int = 0,
+    node_ordering: str = "block_metis",
+    reorder_parts: int | None = None,
+    material_rows: list[list[float]] | None = None,
+    q_mask_builder=None,
+    comm,
+) -> GeneralPMGHierarchy:
+    """Build a scalar same-mesh hierarchy such as `P1 -> P2` or `P1 -> P2 -> P4`."""
+
+    fine_elem_type_norm = str(fine_elem_type).strip().upper()
+    if fine_elem_type_norm not in {"P2", "P4"}:
+        raise ValueError(f"Same-mesh PMG hierarchy currently supports fine_elem_type P2 or P4, got {fine_elem_type!r}.")
+
+    mesh_path = Path(mesh_path).resolve()
+    materials = _materials_from_rows(material_rows, mesh_path=mesh_path)
+    level_p1 = _build_level(
+        mesh_path=mesh_path,
+        elem_type="P1",
+        node_ordering=node_ordering,
+        reorder_parts=reorder_parts,
+        boundary_type=boundary_type,
+        comm=comm,
+        scalar_dofs=True,
+        q_mask_override=q_mask_builder,
+    )
+    level_p2 = _build_level(
+        mesh_path=mesh_path,
+        elem_type="P2",
+        node_ordering=node_ordering,
+        reorder_parts=reorder_parts,
+        boundary_type=boundary_type,
+        comm=comm,
+        scalar_dofs=True,
+        q_mask_override=q_mask_builder,
+    )
+    prolongation_p21 = _adjacent_level_prolongation(
+        level_p1,
+        level_p2,
+        coarse_order=1,
+        fine_order=2,
+    )
+    _validate_level_layout(level_p1, comm=comm)
+    _validate_level_layout(level_p2, comm=comm)
+    if fine_elem_type_norm == "P2":
+        return GeneralPMGHierarchy(
+            levels_tuple=(level_p1, level_p2),
+            prolongations_tuple=(prolongation_p21,),
+            materials=materials,
+            mesh_path=mesh_path,
+            node_ordering=str(node_ordering),
+        )
+
+    level_p4 = _build_level(
+        mesh_path=mesh_path,
+        elem_type="P4",
+        node_ordering=node_ordering,
+        reorder_parts=reorder_parts,
+        boundary_type=boundary_type,
+        comm=comm,
+        scalar_dofs=True,
+        q_mask_override=q_mask_builder,
+    )
+    prolongation_p42 = _adjacent_level_prolongation(
+        level_p2,
+        level_p4,
+        coarse_order=2,
+        fine_order=4,
+    )
+    _validate_level_layout(level_p4, comm=comm)
     return GeneralPMGHierarchy(
         levels_tuple=(level_p1, level_p2, level_p4),
         prolongations_tuple=(prolongation_p21, prolongation_p42),

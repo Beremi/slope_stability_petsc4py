@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from time import perf_counter
@@ -14,9 +15,11 @@ from petsc4py import PETSc
 
 ROOT = Path(__file__).resolve().parents[3]
 
+from slope_stability.linear.pmg import build_3d_same_mesh_scalar_pmg_hierarchy, validate_pmg_fine_level_alignment
 from slope_stability.linear.solver import SolverFactory
 from slope_stability.core.elements import validate_supported_elem_type
-from slope_stability.mesh import load_mesh_gmsh_waterlevels, seepage_boundary_3d_hetero
+from slope_stability.fem.quadrature import quadrature_volume_3d
+from slope_stability.mesh import load_mesh_gmsh_waterlevels, reorder_mesh_nodes, seepage_boundary_3d_hetero
 from slope_stability.seepage import heter_conduct, seepage_problem_3d
 
 
@@ -69,14 +72,96 @@ def _plot_saturation_centroids(coord: np.ndarray, elem: np.ndarray, mater_sat: n
     plt.close(fig)
 
 
+def _load_reordered_waterlevels_mesh(
+    mesh_path: Path,
+    *,
+    elem_type: str,
+    node_ordering: str,
+    partition_count: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    mesh = load_mesh_gmsh_waterlevels(mesh_path, elem_type=elem_type)
+    reordered = reorder_mesh_nodes(
+        mesh.coord,
+        mesh.elem,
+        mesh.surf,
+        mesh.q_mask,
+        strategy=node_ordering,
+        n_parts=partition_count if str(node_ordering).lower() == "block_metis" else None,
+    )
+    return (
+        np.asarray(reordered.coord, dtype=np.float64),
+        np.asarray(reordered.elem, dtype=np.int64),
+        np.asarray(reordered.surf, dtype=np.int64),
+        np.asarray(mesh.material, dtype=np.int64),
+        np.asarray(mesh.triangle_labels, dtype=np.int64),
+    )
+
+
+def _first_linear_history_payload(init_linear: dict[str, object]) -> dict[str, object]:
+    solve_info = dict(init_linear.get("solve_info", {}) or {})
+    reported = [float(v) for v in solve_info.get("reported_residual_history", []) or []]
+    true = [float(v) for v in solve_info.get("true_residual_history", []) or []]
+    limit = min(11, max(len(reported), len(true)))
+    reported0 = reported[0] if reported else None
+    true0 = true[0] if true else None
+    rows = []
+    for idx in range(limit):
+        reported_val = reported[idx] if idx < len(reported) else None
+        true_val = true[idx] if idx < len(true) else None
+        rows.append(
+            {
+                "history_index": idx,
+                "reported_residual": reported_val,
+                "reported_ratio_to_initial": None
+                if reported_val is None or reported0 in {None, 0.0}
+                else float(reported_val / reported0),
+                "true_residual": true_val,
+                "true_ratio_to_initial": None if true_val is None or true0 in {None, 0.0} else float(true_val / true0),
+            }
+        )
+    return {
+        "iterations": int(init_linear.get("iterations", 0) or 0),
+        "solve_time_s": float(init_linear.get("solve_time", 0.0) or 0.0),
+        "preconditioner_time_s": float(init_linear.get("preconditioner_time", 0.0) or 0.0),
+        "orthogonalization_time_s": float(init_linear.get("orthogonalization_time", 0.0) or 0.0),
+        "reported_residual_history": reported,
+        "true_residual_history": true,
+        "rows": rows,
+    }
+
+
+def _write_first_linear_artifacts(data_dir: Path, payload: dict[str, object]) -> None:
+    json_path = data_dir / "first_linear_system.json"
+    csv_path = data_dir / "first_linear_system.csv"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "history_index",
+                "reported_residual",
+                "reported_ratio_to_initial",
+                "true_residual",
+                "true_ratio_to_initial",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(payload.get("rows", []))
+
+
 def run_capture(
     *,
     out_dir: Path,
     mesh_path: Path,
     elem_type: str = "P2",
+    node_ordering: str = "block_metis",
+    partition_count_override: int | None = None,
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE",
+    pc_backend: str = "hypre",
     linear_tolerance: float = 1.0e-10,
     linear_max_iter: int = 500,
+    petsc_opt: list[str] | None = None,
 ) -> dict[str, object]:
     comm = PETSc.COMM_WORLD
     rank = int(comm.getRank())
@@ -95,19 +180,85 @@ def run_capture(
     plots_dir.mkdir(exist_ok=True)
 
     elem_type = validate_supported_elem_type(3, elem_type)
-    if elem_type != "P2":
+    if elem_type not in {"P2", "P4"}:
         raise NotImplementedError(
-            f"3D heterogeneous seepage currently uses the Gmsh waterlevels P2 mesh family; requested {elem_type!r}."
+            f"3D heterogeneous seepage currently supports P2 and P4 waterlevels meshes; requested {elem_type!r}."
         )
 
-    mesh = load_mesh_gmsh_waterlevels(mesh_path)
-    coord, elem, surf = mesh.coord, mesh.elem, mesh.surf
-    material_identifier, triangle_labels = mesh.material, mesh.triangle_labels
+    partition_count = (
+        int(partition_count_override)
+        if partition_count_override is not None
+        else (int(size) if str(node_ordering).lower() == "block_metis" else None)
+    )
+    coord, elem, surf, material_identifier, triangle_labels = _load_reordered_waterlevels_mesh(
+        mesh_path,
+        elem_type=elem_type,
+        node_ordering=node_ordering,
+        partition_count=partition_count,
+    )
 
     grho = 9.81
     k = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float64)
-    conduct0 = heter_conduct(material_identifier, 11, k)
+    n_q = int(quadrature_volume_3d(elem_type)[0].shape[1])
+    conduct0 = heter_conduct(material_identifier, n_q, k)
     q_w, pw_d = seepage_boundary_3d_hetero(coord, surf, triangle_labels, grho)
+
+    pc_backend_norm = str(pc_backend).strip().lower()
+    preconditioner_options = {
+        "threads": 16,
+        "print_level": 0,
+        "use_as_preconditioner": True,
+        "pc_hypre_boomeramg_coarsen_type": "HMIS",
+        "pc_hypre_boomeramg_interp_type": "ext+i",
+        "null_space": np.empty((0, 0), dtype=np.float64),
+    }
+    if petsc_opt:
+        for entry in petsc_opt:
+            text = str(entry)
+            if "=" in text:
+                key, value = text.split("=", 1)
+            else:
+                key, value = text, "1"
+            preconditioner_options[key.strip()] = value.strip()
+    if pc_backend_norm in {"pmg", "pmg_shell"}:
+        n_materials = int(np.max(material_identifier)) + 1 if np.size(material_identifier) else 1
+        material_rows = [[0.0, 0.0, 0.0, 1.0, 0.3, 0.0, 0.0] for _ in range(n_materials)]
+
+        def _q_mask_builder(level_coord, level_surf, level_triangle_labels):
+            if level_triangle_labels is None:
+                raise ValueError("PMG seepage hierarchy requires triangle labels for boundary detection.")
+            level_q_w, _ = seepage_boundary_3d_hetero(
+                level_coord,
+                level_surf,
+                level_triangle_labels,
+                grho,
+            )
+            return np.asarray(level_q_w, dtype=bool).reshape(1, -1)
+
+        pmg_hierarchy = build_3d_same_mesh_scalar_pmg_hierarchy(
+            mesh_path,
+            fine_elem_type=elem_type,
+            boundary_type=0,
+            node_ordering=node_ordering,
+            reorder_parts=partition_count,
+            material_rows=material_rows,
+            q_mask_builder=_q_mask_builder,
+            comm=PETSc.COMM_SELF,
+        )
+        validate_pmg_fine_level_alignment(
+            pmg_hierarchy,
+            coord=coord,
+            elem=elem,
+            surf=surf,
+            q_mask=np.asarray(q_w, dtype=bool).reshape(1, -1),
+            comm=PETSc.COMM_SELF,
+        )
+        preconditioner_options.update(
+            {
+                "pc_backend": pc_backend_norm,
+                "pmg_hierarchy": pmg_hierarchy,
+            }
+        )
 
     solver = SolverFactory.create(
         solver_type,
@@ -115,16 +266,12 @@ def run_capture(
         max_iterations=linear_max_iter,
         deflation_basis_tolerance=1.0e-3,
         verbose=False,
-        q_mask=None,
-        coord=None,
-        preconditioner_options={
-            "threads": 16,
-            "print_level": 0,
-            "use_as_preconditioner": True,
-            "pc_hypre_boomeramg_coarsen_type": "HMIS",
-            "pc_hypre_boomeramg_interp_type": "ext+i",
-        },
+        q_mask=np.asarray(q_w, dtype=bool).reshape(1, -1),
+        coord=coord,
+        preconditioner_options=preconditioner_options,
     )
+    if hasattr(solver, "enable_diagnostics"):
+        solver.enable_diagnostics(True)
 
     t0 = perf_counter()
     pw, grad_p, mater_sat, history, assembly = seepage_problem_3d(
@@ -160,6 +307,8 @@ def run_capture(
         criterion=np.asarray(history["criterion"], dtype=np.float64),
         linear_iterations=np.asarray(history["linear_iterations"], dtype=np.int64),
     )
+    first_linear_payload = _first_linear_history_payload(dict(history["init_linear"]))
+    _write_first_linear_artifacts(data_dir, first_linear_payload)
 
     result = {
         "run_info": {
@@ -171,13 +320,18 @@ def run_capture(
             "mesh_elements": int(elem.shape[1]),
             "n_int": int(assembly.n_int),
             "solver_type": solver_type,
+            "pc_backend": pc_backend_norm,
         },
         "params": {
             "elem_type": elem_type,
+            "node_ordering": str(node_ordering),
             "grho": grho,
             "k": k.tolist(),
             "linear_tolerance": linear_tolerance,
             "linear_max_iter": linear_max_iter,
+            "partition_count": partition_count,
+            "pc_backend": pc_backend_norm,
+            "petsc_opt": list(petsc_opt or []),
         },
         "timings": {
             "linear": {
@@ -186,6 +340,7 @@ def run_capture(
                 "newton_linear_solve_time": history["linear_solve_time"],
                 "newton_linear_preconditioner_time": history["linear_preconditioner_time"],
                 "newton_linear_orthogonalization_time": history["linear_orthogonalization_time"],
+                "newton_linear_solve_info": history["linear_solve_info"],
             }
         },
         "history": {
@@ -194,6 +349,7 @@ def run_capture(
             "converged": bool(history["converged"]),
             "K_D_nnz": int(history["K_D_nnz"]),
         },
+        "first_linear_system": first_linear_payload,
     }
     with open(data_dir / "run_info.json", "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
@@ -216,17 +372,25 @@ def main() -> None:
         default=ROOT / "meshes" / "3d_hetero_seepage" / "slope_with_waterlevels_concave_L2.msh",
     )
     parser.add_argument("--elem_type", type=str, default="P2", choices=["P1", "P2", "P4"])
+    parser.add_argument("--node_ordering", type=str, default="block_metis")
+    parser.add_argument("--partition_count_override", type=int, default=None)
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE")
+    parser.add_argument("--pc_backend", type=str, default="hypre")
     parser.add_argument("--linear_tolerance", type=float, default=1.0e-10)
     parser.add_argument("--linear_max_iter", type=int, default=500)
+    parser.add_argument("--petsc_opt", action="append", default=None)
     args = parser.parse_args()
     run_capture(
         out_dir=args.out_dir,
         mesh_path=args.mesh_path,
         elem_type=args.elem_type,
+        node_ordering=args.node_ordering,
+        partition_count_override=args.partition_count_override,
         solver_type=args.solver_type,
+        pc_backend=args.pc_backend,
         linear_tolerance=args.linear_tolerance,
         linear_max_iter=args.linear_max_iter,
+        petsc_opt=args.petsc_opt,
     )
 
 

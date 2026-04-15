@@ -8,7 +8,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from ..io import _collect_meshio_blocks, _elevate_tet4_mesh_to_tet10, _map_physical_ids
+from ..io import _collect_meshio_blocks, _elevate_tet4_mesh_to_tet10, _map_physical_ids, load_mesh_file
 
 
 @dataclass(frozen=True)
@@ -25,8 +25,8 @@ def _normalize_elem_type(elem_type: str | None) -> str:
     if elem_type is None:
         return "P2"
     text = str(elem_type).strip().upper()
-    if text not in {"P1", "P2"}:
-        raise NotImplementedError(f"Waterlevels mesh loader currently supports only 'P1' and 'P2', got {elem_type!r}.")
+    if text not in {"P1", "P2", "P4"}:
+        raise NotImplementedError(f"Waterlevels mesh loader currently supports only 'P1', 'P2', and 'P4', got {elem_type!r}.")
     return text
 
 
@@ -121,6 +121,18 @@ def load_mesh_gmsh_waterlevels(path: str | Path, elem_type: str | None = "P2") -
     path = Path(path)
     elem_type_norm = _normalize_elem_type(elem_type)
     if path.suffix.lower() == ".msh":
+        if elem_type_norm == "P4":
+            mesh = load_mesh_file(path, elem_type="P4", boundary_type=0)
+            triangle_labels = np.asarray(mesh.boundary, dtype=np.int64).ravel()
+            q_mask = _waterlevels_q_mask(mesh.coord.shape[1], mesh.surf, triangle_labels)
+            return WaterlevelsMesh3D(
+                coord=np.asarray(mesh.coord, dtype=np.float64),
+                elem=np.asarray(mesh.elem, dtype=np.int64),
+                surf=np.asarray(mesh.surf, dtype=np.int64),
+                q_mask=q_mask,
+                material=np.asarray(mesh.material, dtype=np.int64),
+                triangle_labels=triangle_labels,
+            )
         try:
             import meshio
         except ImportError as exc:  # pragma: no cover - runtime dependency in normal use
@@ -153,6 +165,9 @@ def load_mesh_gmsh_waterlevels(path: str | Path, elem_type: str | None = "P2") -
             material=np.asarray(material, dtype=np.int64),
             triangle_labels=np.asarray(triangle_labels, dtype=np.int64),
         )
+
+    if elem_type_norm == "P4":
+        raise NotImplementedError("Waterlevels HDF5 meshes currently support only 'P1' and 'P2'; use the .msh family for 'P4'.")
 
     with h5py.File(str(path), "r") as h5:
         node = np.asarray(h5["points"][:], dtype=np.float64)

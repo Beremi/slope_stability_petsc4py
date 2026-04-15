@@ -24,7 +24,12 @@ from slope_stability.fem import (
     vector_volume,
 )
 from slope_stability.linear import SolverFactory
-from slope_stability.linear.pmg import build_3d_mixed_pmg_hierarchy, build_3d_same_mesh_pmg_hierarchy
+from slope_stability.linear.pmg import (
+    build_3d_mixed_pmg_hierarchy,
+    build_3d_same_mesh_pmg_hierarchy,
+    build_3d_same_mesh_scalar_pmg_hierarchy,
+    validate_pmg_fine_level_alignment,
+)
 from slope_stability.mesh import (
     MaterialSpec,
     heterogenous_materials,
@@ -130,6 +135,7 @@ def _load_labeled_mesh(
     mesh_path: Path,
     *,
     boundary_mode: str,
+    elem_type: str,
     node_ordering: str,
     partition_count: int | None,
 ):
@@ -153,7 +159,7 @@ def _load_labeled_mesh(
             "mesh_boundary_type": 1,
         }
 
-    mesh = load_mesh_gmsh_waterlevels(mesh_path)
+    mesh = load_mesh_gmsh_waterlevels(mesh_path, elem_type=elem_type)
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,
@@ -215,6 +221,9 @@ def run_capture(
     petsc_opt: list[str] | None = None,
     seepage_linear_tolerance: float = 1e-10,
     seepage_linear_max_iter: int = 500,
+    seepage_pc_backend: str = "hypre",
+    seepage_max_deflation_basis_vectors: int = 48,
+    max_deflation_basis_vectors: int = 48,
     water_unit_weight: float = 9.81,
     conductivity: list[float] | np.ndarray | None = None,
 ) -> dict:
@@ -232,8 +241,8 @@ def run_capture(
     run_t0 = perf_counter()
     _stage_log(rank, "start", run_t0)
     elem_type = validate_supported_elem_type(3, elem_type)
-    if elem_type != "P2":
-        raise NotImplementedError(f"3D seepage+SSR study runner currently supports only 'P2', got {elem_type!r}.")
+    if elem_type not in {"P2", "P4"}:
+        raise NotImplementedError(f"3D seepage+SSR study runner currently supports only 'P2' and 'P4', got {elem_type!r}.")
 
     solver_type_upper = str(solver_type).upper()
     effective_pc_backend = None if pc_backend is None else str(pc_backend).strip().lower()
@@ -274,6 +283,7 @@ def run_capture(
     labeled = _load_labeled_mesh(
         mesh_path,
         boundary_mode=boundary_mode_name,
+        elem_type=elem_type,
         node_ordering=node_ordering,
         partition_count=partition_count,
     )
@@ -328,34 +338,107 @@ def run_capture(
         _stage_log(rank, "built_pmg_hierarchy", run_t0)
 
     n_q = int(quadrature_volume_3d(elem_type)[0].shape[1])
-    conductivity_values = np.asarray([1.0] if conductivity is None else conductivity, dtype=np.float64).ravel()
     grho = float(water_unit_weight)
     if boundary_mode_name == "comsol":
         seepage_material_identifier = np.zeros(elem.shape[1], dtype=np.int64)
+        required_conductivity_count = int(seepage_material_identifier.max()) + 1 if seepage_material_identifier.size else 1
+        conductivity_values = np.asarray(
+            np.ones(required_conductivity_count, dtype=np.float64) if conductivity is None else conductivity,
+            dtype=np.float64,
+        ).ravel()
+        if conductivity_values.size == 1 and required_conductivity_count > 1:
+            conductivity_values = np.repeat(conductivity_values, required_conductivity_count)
+        if conductivity_values.size < required_conductivity_count:
+            raise ValueError(
+                f"Conductivity vector has {conductivity_values.size} entries, "
+                f"but seepage material ids require {required_conductivity_count}."
+            )
         conduct0 = heter_conduct(seepage_material_identifier, n_q, conductivity_values)
         q_w, pw_d = seepage_boundary_3d_hetero_comsol(coord, surf, triangle_labels, grho)
     else:
+        required_conductivity_count = int(material_identifier.max()) + 1 if material_identifier.size else 1
+        conductivity_values = np.asarray(
+            np.ones(required_conductivity_count, dtype=np.float64) if conductivity is None else conductivity,
+            dtype=np.float64,
+        ).ravel()
+        if conductivity_values.size == 1 and required_conductivity_count > 1:
+            conductivity_values = np.repeat(conductivity_values, required_conductivity_count)
+        if conductivity_values.size < required_conductivity_count:
+            raise ValueError(
+                f"Conductivity vector has {conductivity_values.size} entries, "
+                f"but seepage material ids require {required_conductivity_count}."
+            )
         conduct0 = heter_conduct(material_identifier, n_q, conductivity_values)
         q_w, pw_d = seepage_boundary_3d_hetero(coord, surf, triangle_labels, grho)
 
     seepage_solver = None
     if rank == 0:
+        seepage_q_mask = np.asarray(q_w, dtype=bool).reshape(1, -1)
+        seepage_preconditioner_options = {
+            "threads": int(preconditioner_threads),
+            "print_level": 0,
+            "use_as_preconditioner": True,
+            "pc_hypre_boomeramg_coarsen_type": pc_hypre_coarsen_type,
+            "pc_hypre_boomeramg_interp_type": pc_hypre_interp_type,
+            "max_deflation_basis_vectors": int(seepage_max_deflation_basis_vectors),
+        }
+        seepage_pc_backend_norm = str(seepage_pc_backend or "hypre").strip().lower()
+        if seepage_pc_backend_norm in {"pmg", "pmg_shell"}:
+            def _seepage_q_mask_builder(level_coord, level_surf, level_triangle_labels):
+                if level_triangle_labels is None:
+                    raise ValueError("Seepage PMG hierarchy requires triangle labels for boundary detection.")
+                if boundary_mode_name == "comsol":
+                    level_q_w, _ = seepage_boundary_3d_hetero_comsol(
+                        level_coord,
+                        level_surf,
+                        level_triangle_labels,
+                        grho,
+                    )
+                else:
+                    level_q_w, _ = seepage_boundary_3d_hetero(
+                        level_coord,
+                        level_surf,
+                        level_triangle_labels,
+                        grho,
+                    )
+                return np.asarray(level_q_w, dtype=bool).reshape(1, -1)
+
+            seepage_pmg_hierarchy = build_3d_same_mesh_scalar_pmg_hierarchy(
+                mesh_path,
+                fine_elem_type=elem_type,
+                boundary_type=mesh_boundary_type,
+                node_ordering=node_ordering,
+                reorder_parts=partition_count,
+                material_rows=mat_props.tolist(),
+                q_mask_builder=_seepage_q_mask_builder,
+                comm=PETSc.COMM_SELF,
+            )
+            validate_pmg_fine_level_alignment(
+                seepage_pmg_hierarchy,
+                coord=coord,
+                elem=elem,
+                surf=surf,
+                q_mask=seepage_q_mask,
+                comm=PETSc.COMM_SELF,
+            )
+            seepage_preconditioner_options.update(
+                {
+                    "pc_backend": seepage_pc_backend_norm,
+                    "pmg_hierarchy": seepage_pmg_hierarchy,
+                }
+            )
         seepage_solver = SolverFactory.create(
             "PETSC_MATLAB_DFGMRES_HYPRE",
             tolerance=seepage_linear_tolerance,
             max_iterations=seepage_linear_max_iter,
             deflation_basis_tolerance=1e-3,
             verbose=False,
-            q_mask=None,
-            coord=None,
-            preconditioner_options={
-                "threads": int(preconditioner_threads),
-                "print_level": 0,
-                "use_as_preconditioner": True,
-                "pc_hypre_boomeramg_coarsen_type": pc_hypre_coarsen_type,
-                "pc_hypre_boomeramg_interp_type": pc_hypre_interp_type,
-            },
+            q_mask=seepage_q_mask,
+            coord=coord,
+            preconditioner_options=seepage_preconditioner_options,
         )
+        if hasattr(seepage_solver, "enable_diagnostics"):
+            seepage_solver.enable_diagnostics(True)
         pw, grad_p, mater_sat, seep_history, _seep_assembly = seepage_problem_3d(
             coord,
             elem,
@@ -480,21 +563,23 @@ def run_capture(
         "preconditioner_rebuild_interval": 1,
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
         "use_coordinates": True,
+        "max_deflation_basis_vectors": int(max_deflation_basis_vectors),
     }
     if recycle_preconditioner:
         preconditioner_options["recycle_preconditioner"] = True
-    mixed_parallel_shell = (
+    robust_parallel_shell = (
         pmg_hierarchy is not None
-        and tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ())) == (1, 1, 2)
+        and str(elem_type).upper() == "P4"
+        and tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ())) in {(1, 1, 2), (1, 2, 4)}
         and int(PETSc.COMM_WORLD.getSize()) > 1
     )
     if effective_pc_backend == "pmg_shell":
         preconditioner_options.update(
             {
                 "full_system_preconditioner": False,
-                "mg_levels_ksp_type": "chebyshev" if mixed_parallel_shell else "richardson",
+                "mg_levels_ksp_type": "chebyshev" if robust_parallel_shell else "richardson",
                 "mg_levels_ksp_max_it": 3,
-                "mg_levels_pc_type": "jacobi" if mixed_parallel_shell else "sor",
+                "mg_levels_pc_type": "jacobi" if robust_parallel_shell else "sor",
                 "mg_coarse_ksp_type": "preonly",
                 "mg_coarse_pc_type": "hypre",
                 "mg_coarse_pc_hypre_type": "boomeramg",
@@ -566,6 +651,7 @@ def run_capture(
         "boundary_mode": boundary_mode_name,
         "seepage_linear_tolerance": float(seepage_linear_tolerance),
         "seepage_linear_max_iter": int(seepage_linear_max_iter),
+        "seepage_pc_backend": str(seepage_pc_backend),
         "water_unit_weight": float(grho),
         "conductivity": conductivity_values.tolist(),
         "petsc_opt": list(petsc_opt or []),
@@ -744,6 +830,9 @@ def main() -> None:
     parser.add_argument("--petsc-opt", action="append", default=[], dest="petsc_opt")
     parser.add_argument("--seepage_linear_tolerance", type=float, default=1e-10)
     parser.add_argument("--seepage_linear_max_iter", type=int, default=500)
+    parser.add_argument("--seepage_pc_backend", type=str, default="hypre")
+    parser.add_argument("--seepage_max_deflation_basis_vectors", type=int, default=48)
+    parser.add_argument("--max_deflation_basis_vectors", type=int, default=48)
     parser.add_argument("--water_unit_weight", type=float, default=9.81)
     parser.add_argument("--conductivity", type=float, action="append", default=None)
     args = parser.parse_args()
@@ -789,6 +878,9 @@ def main() -> None:
         petsc_opt=args.petsc_opt,
         seepage_linear_tolerance=args.seepage_linear_tolerance,
         seepage_linear_max_iter=args.seepage_linear_max_iter,
+        seepage_pc_backend=args.seepage_pc_backend,
+        seepage_max_deflation_basis_vectors=args.seepage_max_deflation_basis_vectors,
+        max_deflation_basis_vectors=args.max_deflation_basis_vectors,
         water_unit_weight=args.water_unit_weight,
         conductivity=args.conductivity,
     )

@@ -28,7 +28,10 @@
 \definecolor{warnred}{HTML}{9A3B2D}
 \definecolor{bluehint}{HTML}{EDF4F8}
 
-\setbeamersize{text margin left=0.62cm, text margin right=0.62cm}
+\newcommand{\decktextmargin}{0.62cm}
+\newcommand{\frametitleleftinset}{\decktextmargin}
+
+\setbeamersize{text margin left=\decktextmargin, text margin right=\decktextmargin}
 \setbeamertemplate{navigation symbols}{}
 \setbeamertemplate{headline}{}
 \setbeamercolor{normal text}{fg=ink,bg=white}
@@ -52,25 +55,28 @@
 \setbeamertemplate{itemize subitem}{\color{accent}\tiny\ding{118}}
 
 \makeatletter
-\newcommand{\deckpagenumbers}{{\ttfamily\usebeamerfont{page number in head/foot}\insertframenumber\kern0.68em/\kern0.68em\inserttotalframenumber}}
+\newcommand{\pagenumberrightinset}{0.19cm}
+\newcommand{\pagenumberbottominset}{0.20cm}
+\newcommand{\deckpagenumbers}{{\ttfamily\usebeamerfont{page number in head/foot}\insertframenumber\kern0.1em/\kern0.1em\inserttotalframenumber}}
 \newcommand{\fullbleedbox}[2]{%
   \makebox[0pt][l]{%
-    \hspace*{-0.62cm}%
+    \hspace*{-\decktextmargin}%
     \begin{beamercolorbox}[wd=\paperwidth,ht=#1,dp=0pt,#2]{frametitle}%
     \end{beamercolorbox}%
   }%
   \vspace*{#1}%
 }
-\newcommand{\plainpagenumberoverlay}{%
+\newcommand{\deckpagenumberoverlay}{%
   \begin{tikzpicture}[remember picture,overlay]
     \node[
       anchor=south east,
       inner sep=0pt,
       text=muted,
       font=\ttfamily\footnotesize\bfseries
-    ] at ([xshift=-0.92cm,yshift=0.24cm]current page.south east) {\insertframenumber\kern0.68em/\kern0.68em\inserttotalframenumber};
+    ] at ([xshift=-\pagenumberrightinset,yshift=\pagenumberbottominset]current page.south east) {\deckpagenumbers};
   \end{tikzpicture}%
 }
+\let\plainpagenumberoverlay\deckpagenumberoverlay
 \newcommand{\plainheaderband}[1]{%
   \begin{tikzpicture}[remember picture,overlay]
     \path[fill=header] (current page.north west) rectangle ([yshift=-#1]current page.north east);
@@ -78,13 +84,16 @@
 }
 \setbeamertemplate{frametitle}{%
   \nointerlineskip%
-  \begin{beamercolorbox}[wd=\paperwidth,ht=0.74cm,dp=0cm,leftskip=0.62cm,rightskip=0.35cm]{frametitle}
+  \begin{beamercolorbox}[wd=\paperwidth,ht=0.74cm,dp=0cm,sep=0pt]{frametitle}
     \vbox to 0.74cm{%
       \vfil
-      {\usebeamerfont{frametitle}\strut\insertframetitle\par}%
-      \ifx\insertframesubtitle\@empty\else%
-        {\usebeamerfont{framesubtitle}\color{headerlight}\insertframesubtitle\par}%
-      \fi
+      \hspace*{\frametitleleftinset}%
+      \parbox[t]{\textwidth}{%
+        {\usebeamerfont{frametitle}\strut\insertframetitle\par}%
+        \ifx\insertframesubtitle\@empty\else%
+          {\usebeamerfont{framesubtitle}\color{headerlight}\insertframesubtitle\par}%
+        \fi
+      }%
       \vfil
     }%
   \end{beamercolorbox}%
@@ -94,10 +103,10 @@
 \setbeamertemplate{footline}{%
   \leavevmode%
   \hbox{%
-    \begin{beamercolorbox}[wd=\paperwidth,ht=2.25ex,dp=1.1ex,rightskip=0.92cm]{page number in head/foot}%
-      \hfill\deckpagenumbers
+    \begin{beamercolorbox}[wd=\paperwidth,ht=2.25ex,dp=1.1ex]{page number in head/foot}%
     \end{beamercolorbox}%
   }%
+  \deckpagenumberoverlay%
 }
 
 \renewcommand{\arraystretch}{1.18}

@@ -877,6 +877,7 @@ def run_capture(
     robust_parallel_shell = (
         pmg_hierarchy is not None
         and int(PETSc.COMM_WORLD.getSize()) > 1
+        and str(elem_type).upper() == "P4"
         and pmg_level_orders in {(1, 1, 2), (1, 2, 4)}
     )
     if effective_pc_backend == "pmg":

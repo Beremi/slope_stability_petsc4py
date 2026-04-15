@@ -1,7 +1,7 @@
 # Keep the presentation sources and final PDF under version control.
 !/.gitignore
 !/Makefile
-!/slides.tex
+!/presentation_petsc_rewrite.tex
 !/theme.tex
 !/speaker_notes.md
 !/presentation_petsc_rewrite.pdf
@@ -12,8 +12,10 @@
 !/assets/reference_tetra_quadratures.pdf
 !/assets/homo_3d_continuation.pdf
 !/assets/homo_3d_timings.pdf
+!/assets/homo_3d_p2_vs_p4_curves.pdf
 !/assets/hetero_3d_continuation.pdf
 !/assets/hetero_3d_timings.pdf
+!/assets/hetero_3d_p2_vs_p4_curves.pdf
 !/assets/seepage_3d_continuation.pdf
 !/assets/seepage_3d_timings.pdf
 !/assets/hetero_3d_delta_lambda_continuation.pdf
@@ -35,3 +37,4 @@
 *.toc
 *.synctex.gz
 /preview/
+/preview_*/

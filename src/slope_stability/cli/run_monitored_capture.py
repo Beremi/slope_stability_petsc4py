@@ -98,6 +98,32 @@ def _format_gb_from_kb(kb: int) -> float:
     return kb / (1024.0 * 1024.0)
 
 
+def _read_mem_available_kb() -> int | None:
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fp:
+            for line in fp:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1])
+    except OSError:
+        return None
+    return None
+
+
+def _read_mem_total_kb() -> int | None:
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fp:
+            for line in fp:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1])
+    except OSError:
+        return None
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the PETSc capture under MPI with RSS monitoring.")
     parser.add_argument("--nproc", type=int, required=True)
@@ -141,8 +167,14 @@ def main() -> None:
     killed_for_rss = False
     rss_limit_kb = int(args.rss_limit_gb * 1024.0 * 1024.0)
     max_total_rss_kb = 0
+    mem_total_kb = _read_mem_total_kb()
+    limit_total_fixed_kb = int(mem_total_kb * 0.95) if mem_total_kb is not None else None
     max_rank_rss_kb: dict[str, int] = {}
     max_pid_rss_kb: dict[str, int] = {}
+    mem_available_samples_kb: list[int] = []
+    limit_total_samples_kb: list[int] = []
+    limit_rank_samples_kb: list[int] = []
+    killed_reason: str | None = None
     sample_count = 0
     started = time.time()
 
@@ -181,12 +213,23 @@ def main() -> None:
                     max_rank_rss_kb[key] = max(max_rank_rss_kb.get(key, 0), info.rss_kb)
 
             max_total_rss_kb = max(max_total_rss_kb, total_rss)
+            mem_available_kb = _read_mem_available_kb()
+            limit_total_kb = limit_total_fixed_kb
+            limit_rank_kb = None
+            if mem_available_kb is not None:
+                limit_rank_kb = int(limit_total_kb / max(args.nproc, 1))
+                mem_available_samples_kb.append(mem_available_kb)
+                limit_total_samples_kb.append(limit_total_kb)
+                limit_rank_samples_kb.append(limit_rank_kb)
             sample_fp.write(
                 json.dumps(
                     {
                         "t_sec": time.time() - started,
                         "total_rss_kb": total_rss,
                         "rank_rss_kb": ranks_this_sample,
+                        "mem_available_kb": mem_available_kb,
+                        "limit_total_kb": limit_total_kb,
+                        "limit_rank_kb": limit_rank_kb,
                         "python_processes": pids_this_sample,
                     }
                 )
@@ -197,10 +240,20 @@ def main() -> None:
 
             if any(rss > rss_limit_kb for rss in ranks_this_sample.values()):
                 killed_for_rss = True
+                killed_reason = "legacy_rank_limit"
                 _terminate_process_group(proc, signal.SIGTERM)
                 time.sleep(2.0)
                 if proc.poll() is None:
                     _terminate_process_group(proc, signal.SIGKILL)
+
+            if limit_total_kb is not None:
+                if total_rss > limit_total_kb:
+                    killed_for_rss = True
+                    killed_reason = "total_limit"
+                    _terminate_process_group(proc, signal.SIGTERM)
+                    time.sleep(2.0)
+                    if proc.poll() is None:
+                        _terminate_process_group(proc, signal.SIGKILL)
 
             if rc is not None:
                 break
@@ -212,10 +265,14 @@ def main() -> None:
         "command": cmd,
         "return_code": return_code,
         "killed_for_rss": killed_for_rss,
+        "killed_reason": killed_reason,
         "rss_limit_gb": args.rss_limit_gb,
         "sample_sec": args.sample_sec,
         "duration_sec": time.time() - started,
         "sample_count": sample_count,
+        "mem_available_kb_samples": mem_available_samples_kb,
+        "limit_total_kb_samples": limit_total_samples_kb,
+        "limit_rank_kb_samples": limit_rank_samples_kb,
         "max_total_rss_kb": max_total_rss_kb,
         "max_total_rss_gb": _format_gb_from_kb(max_total_rss_kb),
         "max_rank_rss_kb": max_rank_rss_kb,

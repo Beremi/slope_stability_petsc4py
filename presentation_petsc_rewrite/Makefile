@@ -1,5 +1,5 @@
 PDF=presentation_petsc_rewrite.pdf
-SOURCE=slides.tex
+SOURCE=presentation_petsc_rewrite.tex
 
 .PHONY: pdf clean preview distclean
 
