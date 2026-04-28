@@ -49,6 +49,30 @@ def _case_tomls() -> list[Path]:
     return sorted(BENCHMARKS_DIR.glob("*/case.toml"))
 
 
+def _node_permutation_by_coordinates(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    lookup: dict[tuple[float, ...], int] = {}
+    for idx in range(target.shape[1]):
+        key = tuple(np.round(target[:, idx], 8))
+        if key in lookup:
+            raise ValueError("Target coordinates are not unique enough for permutation recovery.")
+        lookup[key] = idx
+    perm = np.empty(source.shape[1], dtype=np.int64)
+    for idx in range(source.shape[1]):
+        key = tuple(np.round(source[:, idx], 8))
+        perm[idx] = lookup[key]
+    return perm
+
+
+def _normalized_columns(connectivity: np.ndarray) -> list[tuple[int, ...]]:
+    conn = np.asarray(connectivity, dtype=np.int64)
+    return sorted(tuple(sorted(int(v) for v in conn[:, idx])) for idx in range(conn.shape[1]))
+
+
+def _exact_columns(connectivity: np.ndarray) -> list[tuple[int, ...]]:
+    conn = np.asarray(connectivity, dtype=np.int64)
+    return sorted(tuple(int(v) for v in conn[:, idx]) for idx in range(conn.shape[1]))
+
+
 def _notebook_sources(path: Path) -> str:
     notebook = nbformat.read(path, as_version=4)
     return "\n".join("".join(cell.get("source", "")) for cell in notebook.cells)
@@ -86,6 +110,13 @@ def test_every_benchmark_has_valid_generated_notebook() -> None:
         assert not (case_toml.parent / "pyvista_workflow.ipynb").exists()
 
 
+def test_generated_notebooks_reload_notebook_support() -> None:
+    for case_toml in _case_tomls():
+        source = _notebook_sources(case_toml.parent / "visualisation.ipynb")
+        assert "import importlib" in source
+        assert "nb = importlib.reload(notebook_support)" in source
+
+
 def test_no_committed_generated_notebook_case_toml_remains() -> None:
     assert not (BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "notebook_case.generated.toml").exists()
 
@@ -115,7 +146,9 @@ def test_support_module_imports_without_viz_extras() -> None:
 
 def test_load_case_sections_resolves_relative_paths_for_generated_configs() -> None:
     module = _support()
-    sections = module.load_case_sections(BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "case.toml")
+    sections = module.load_case_sections(
+        BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "artifacts" / "simulation" / "generated_case.toml"
+    )
 
     assert Path(sections["problem"]["mesh_path"]).is_absolute()
 
@@ -522,7 +555,7 @@ def test_load_case_mesh_uses_artifact_mpi_size(monkeypatch) -> None:
 def test_pore_pressure_field_reorders_old_comsol_ssr_artifacts(monkeypatch) -> None:
     module = _support()
     cfg = SimpleNamespace(
-        problem=SimpleNamespace(case="3d_hetero_seepage_ssr_comsol"),
+        problem=SimpleNamespace(asset="3d_hetero_seepage_transition", analysis="ssr", dimension=3),
         execution=SimpleNamespace(node_ordering="block_metis"),
     )
     artifacts = SimpleNamespace(
@@ -531,11 +564,78 @@ def test_pore_pressure_field_reorders_old_comsol_ssr_artifacts(monkeypatch) -> N
     )
 
     monkeypatch.setattr(module, "_load_runtime_config", lambda case_toml: cfg)
-    monkeypatch.setattr(module, "_comsol_ssr_node_permutation", lambda case_toml, artifacts: np.array([1, 0, 2], dtype=np.int64))
+    monkeypatch.setattr(module, "_seepage_ssr_node_permutation", lambda case_toml, artifacts: np.array([1, 0, 2], dtype=np.int64))
 
     values = module._pore_pressure_field(artifacts, BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "case.toml")  # noqa: SLF001
 
     np.testing.assert_allclose(values, np.array([20.0, 10.0, 30.0]))
+
+
+def test_show_3d_pore_pressure_view_keeps_existing_vtu_point_field(monkeypatch) -> None:
+    module = _support()
+
+    class FakeGrid:
+        def __init__(self):
+            self.point_data = {"pore_pressure": np.array([1.0, 2.0, 3.0], dtype=np.float64)}
+            self.n_cells = 1
+
+    class FakePlotter:
+        def __init__(self):
+            self.mesh_calls: list[tuple[object, dict[str, object]]] = []
+
+        def add_mesh(self, mesh, **kwargs):
+            self.mesh_calls.append((mesh, kwargs))
+
+    grid = FakeGrid()
+    plotter = FakePlotter()
+
+    monkeypatch.setattr(module, "_module_available", lambda name: name == "pyvista")
+    monkeypatch.setattr(module, "_import_pyvista", lambda: SimpleNamespace(read=lambda path: grid))
+    monkeypatch.setattr(module, "_surface_for_display", lambda dataset, **kwargs: dataset)
+    monkeypatch.setattr(module, "_decimate_display_mesh", lambda dataset, **kwargs: dataset)
+    monkeypatch.setattr(module, "_optimize_display_mesh", lambda dataset, **kwargs: dataset)
+    monkeypatch.setattr(module, "_new_plotter", lambda pv_mod, title: plotter)
+    monkeypatch.setattr(module, "_show_plotter", lambda plotter_obj, *args, **kwargs: "shown")
+    monkeypatch.setattr(module, "_apply_matlab_camera", lambda plotter_obj: None)
+    monkeypatch.setattr(module, "_display_boundary_edge_overlay", lambda *args, **kwargs: False)
+    monkeypatch.setattr(module, "_display_nonlinear_surface_subdivision", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(module, "_display_surface_decimate_reduction", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(
+        module,
+        "_pore_pressure_field",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected pore-pressure recomputation")),
+    )
+
+    result = module.show_3d_pore_pressure_view(SimpleNamespace(vtu_path=Path("dummy.vtu")), BENCHMARKS_DIR / "slope_stability_3D_homo_seepage_SSR_concave" / "case.toml")  # noqa: E501
+
+    assert result == "shown"
+    assert len(plotter.mesh_calls) == 1
+    assert plotter.mesh_calls[0][0] is grid
+
+
+def test_build_plotting_mesh_with_face_ids_canonicalizes_quadratic_surface_faces() -> None:
+    module = _support()
+    coord = np.array(
+        [
+            [0.0, 1.0, 0.0, 0.5, 0.5, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.5, 0.5],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    # VTK-style midside order [e01, e12, e20]; notebook helpers must canonicalize this
+    # before splitting the face into four linear triangles.
+    surf = np.array([[0], [1], [2], [3], [4], [5]], dtype=np.int64)
+
+    triangles, face_ids = module._build_plotting_mesh_with_face_ids(coord, surf)  # noqa: SLF001
+
+    pts = coord.T
+    tri_pts = pts[triangles]
+    areas = 0.5 * np.linalg.norm(np.cross(tri_pts[:, 1] - tri_pts[:, 0], tri_pts[:, 2] - tri_pts[:, 0]), axis=1)
+
+    assert triangles.shape == (4, 3)
+    assert face_ids.tolist() == [0, 0, 0, 0]
+    assert np.all(areas > 0.0)
 
 
 def test_2d_artifact_plots_use_vtu_topology_for_reused_generated_config() -> None:
@@ -554,6 +654,158 @@ def test_2d_artifact_plots_use_vtu_topology_for_reused_generated_config() -> Non
         fig = plot(artifacts, active_config)
         assert fig is not None
         plt.close(fig)
+
+
+def test_build_discontinuous_deviatoric_plot_mesh_2d_uses_local_p2_nodes() -> None:
+    module = _support()
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "run_2D_homo_SSR_capture" / "artifacts" / "simulation")
+    vtu = module.load_vtu(artifacts.vtu_path)
+    coord, _triangles, _parents, elem, elem_type = module._vtu_linear_triangles_2d(vtu)  # noqa: SLF001
+    displacement = module._displacement_field(artifacts, vtu, dim=2)[:, :2].T  # noqa: SLF001
+
+    display_coord, display_triangles, display_values = module._build_discontinuous_deviatoric_plot_mesh_2d(  # noqa: SLF001
+        coord,
+        module._vtu_internal_elem_2d(elem, elem_type),  # noqa: SLF001
+        elem_type,
+        displacement,
+    )
+
+    assert elem_type == "P2"
+    assert display_coord.shape == (elem.shape[0] * elem.shape[1], 2)
+    assert display_values.shape == (elem.shape[0] * elem.shape[1],)
+    assert display_triangles.shape == (4 * elem.shape[1], 3)
+    assert np.unique(np.round(display_coord, decimals=10), axis=0).shape[0] < display_coord.shape[0]
+
+
+def test_parent_triangles_2d_keep_one_triangle_per_parent_element() -> None:
+    module = _support()
+    elem = np.array(
+        [
+            [0, 1],
+            [2, 3],
+            [4, 5],
+            [6, 7],
+            [8, 9],
+            [10, 11],
+        ],
+        dtype=np.int64,
+    )
+
+    triangles, parents = module._parent_triangles_2d(elem)  # noqa: SLF001
+
+    assert triangles.shape == (2, 3)
+    assert parents.tolist() == [0, 1]
+    assert np.array_equal(triangles, np.array([[0, 2, 4], [1, 3, 5]], dtype=np.int64))
+
+
+def test_build_discontinuous_deviatoric_surface_3d_duplicates_shared_boundary_nodes() -> None:
+    module = _support()
+    pv = pytest.importorskip("pyvista")
+    pv.OFF_SCREEN = True
+    coord = np.array(
+        [
+            [0.0, 1.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.5, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+        ],
+        dtype=np.float64,
+    )
+    elem = np.arange(10, dtype=np.int64)[:, None]
+    surf = np.array(
+        [
+            [0, 0],
+            [1, 1],
+            [2, 3],
+            [4, 4],
+            [5, 7],
+            [6, 9],
+        ],
+        dtype=np.int64,
+    )
+    displacement = np.zeros((3, coord.shape[1]), dtype=np.float64)
+
+    surface = module._build_discontinuous_deviatoric_surface_3d(coord, elem, surf, "P2", displacement)  # noqa: SLF001
+
+    assert surface.n_points == 12
+    assert surface.n_cells == 8
+    assert "deviatoric_strain" in surface.point_data
+    assert "deviatoric_strain" not in surface.cell_data
+    assert np.unique(np.round(np.asarray(surface.points), decimals=10), axis=0).shape[0] < surface.n_points
+
+
+def test_build_parent_boundary_surface_keeps_one_triangle_per_boundary_face(monkeypatch) -> None:
+    module = _support()
+    pv = pytest.importorskip("pyvista")
+    pv.OFF_SCREEN = True
+    dataset = SimpleNamespace(
+        points=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.5, 0.0, 0.0],
+                [0.5, 0.5, 0.0],
+                [0.0, 0.5, 0.0],
+                [0.5, 0.0, 0.5],
+                [0.0, 0.5, 0.5],
+                [0.0, 0.0, 0.5],
+            ],
+            dtype=np.float64,
+        ),
+        point_data={"displacement": np.arange(30, dtype=np.float64).reshape(10, 3)},
+    )
+    case_mesh = SimpleNamespace(
+        surf=np.array(
+            [
+                [0, 0],
+                [1, 2],
+                [2, 3],
+                [4, 6],
+                [5, 8],
+                [6, 9],
+            ],
+            dtype=np.int64,
+        ),
+        elem=np.array(
+            [
+                [0],
+                [1],
+                [2],
+                [3],
+                [4],
+                [5],
+                [6],
+                [7],
+                [8],
+                [9],
+            ],
+            dtype=np.int64,
+        ),
+    )
+    monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
+    monkeypatch.setattr(module, "_load_case_mesh", lambda *args, **kwargs: case_mesh)
+
+    surface = module._build_parent_boundary_surface(  # noqa: SLF001
+        dataset,
+        case_toml=BENCHMARKS_DIR / "SIOPT_SSR" / "case.toml",
+        artifacts=SimpleNamespace(),
+        point_array_names=("displacement",),
+    )
+
+    assert surface.n_cells == 2
+    assert surface.n_points == 4
+    assert "displacement" in surface.point_data
+
+
+def test_plot_2d_mesh_falls_back_from_legacy_generated_config_for_homo_ll() -> None:
+    module = _support()
+    active_config = BENCHMARKS_DIR / "slope_stability_2D_homo_LL" / "artifacts" / "simulation" / "generated_case.toml"
+
+    fig = module.plot_2d_mesh(active_config)
+
+    assert fig is not None
+    plt.close(fig)
 
 
 def test_saturation_field_falls_back_to_npz_when_vtu_cell_data_is_missing() -> None:
@@ -575,9 +827,20 @@ def test_saturation_field_falls_back_to_npz_when_vtu_cell_data_is_missing() -> N
     np.testing.assert_allclose(saturation, np.asarray(artifacts.npz["mater_sat"], dtype=np.float64))
 
 
-def test_2d_vtu_triangle6_subdivision_preserves_positive_area() -> None:
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        "run_2D_homo_SSR_capture",
+        "slope_stability_2D_Franz_dam_SSR",
+        "slope_stability_2D_Kozinec_LL",
+        "slope_stability_2D_Kozinec_SSR",
+        "slope_stability_2D_Luzec_SSR",
+        "slope_stability_2D_homo_LL",
+    ],
+)
+def test_2d_vtu_triangle6_subdivision_preserves_positive_area(case_name: str) -> None:
     module = _support()
-    out_dir = BENCHMARKS_DIR / "slope_stability_2D_Franz_dam_SSR" / "artifacts" / "simulation"
+    out_dir = BENCHMARKS_DIR / case_name / "artifacts" / "simulation"
     vtu = module.load_vtu(out_dir / "exports" / "final_solution.vtu")
 
     coord, triangles, _parents, _elem, _elem_type = module._vtu_linear_triangles_2d(vtu)  # noqa: SLF001
@@ -590,17 +853,27 @@ def test_2d_vtu_triangle6_subdivision_preserves_positive_area() -> None:
     assert np.all(areas > 0.0)
 
 
-@pytest.mark.parametrize("case_name", ["slope_stability_2D_Franz_dam_SSR", "slope_stability_2D_Kozinec_SSR", "slope_stability_2D_Luzec_SSR"])
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        "run_2D_homo_SSR_capture",
+        "slope_stability_2D_Franz_dam_SSR",
+        "slope_stability_2D_Kozinec_LL",
+        "slope_stability_2D_Kozinec_SSR",
+        "slope_stability_2D_Luzec_SSR",
+    ],
+)
 def test_2d_vtu_triangle6_internal_order_matches_case_mesh(case_name: str) -> None:
     module = _support()
     case_toml = BENCHMARKS_DIR / case_name / "case.toml"
     artifacts = module.load_run_artifacts(BENCHMARKS_DIR / case_name / "artifacts" / "simulation")
     vtu = module.load_vtu(artifacts.vtu_path)
-    _coord, _triangles, _parents, elem, elem_type = module._vtu_linear_triangles_2d(vtu)  # noqa: SLF001
+    coord, _triangles, _parents, elem, elem_type = module._vtu_linear_triangles_2d(vtu)  # noqa: SLF001
 
     assert elem_type == "P2"
-    expected = module._load_case_mesh(case_toml).elem  # noqa: SLF001
-    np.testing.assert_array_equal(module._vtu_internal_elem_2d(elem, elem_type), expected)  # noqa: SLF001
+    expected = module._load_case_mesh(case_toml)  # noqa: SLF001
+    perm = _node_permutation_by_coordinates(coord, expected.coord)
+    assert _exact_columns(perm[module._vtu_internal_elem_2d(elem, elem_type)]) == _exact_columns(expected.elem)  # noqa: SLF001
 
 
 def test_slice_source_grid_repairs_p2_tetra_connectivity(monkeypatch) -> None:
@@ -609,7 +882,15 @@ def test_slice_source_grid_repairs_p2_tetra_connectivity(monkeypatch) -> None:
     module = _support()
     case_toml = BENCHMARKS_DIR / "slope_stability_3D_hetero_LL" / "case.toml"
     artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "slope_stability_3D_hetero_LL" / "artifacts" / "simulation")
-    raw = pv.read(artifacts.vtu_path)
+    case_mesh = module._load_case_mesh(case_toml, artifacts=artifacts)  # noqa: SLF001
+    cell_type, cells = case_mesh.cell_blocks[0]
+    assert cell_type == "tetra10"
+    n_nodes = cells.shape[1]
+    raw = pv.UnstructuredGrid(
+        np.column_stack((np.full(cells.shape[0], n_nodes, dtype=np.int64), cells)).reshape(-1),
+        np.full(cells.shape[0], int(pv.CellType.QUADRATIC_TETRA), dtype=np.uint8),
+        case_mesh.points,
+    )
     fixed = module._slice_source_grid(raw, artifacts=artifacts, case_toml=case_toml)  # noqa: SLF001
 
     def boundary_edge_count(grid, *, axis: str, value: float) -> int:
@@ -631,17 +912,33 @@ def test_slice_source_grid_repairs_p2_tetra_connectivity(monkeypatch) -> None:
 
     assert fixed.n_cells == raw.n_cells
     assert fixed.n_points == raw.n_points
+    assert fixed is not raw
     assert fixed_edges < raw_edges / 5
 
 
-def test_show_3d_deviatoric_surface_view_uses_surface_cell_scalars(monkeypatch) -> None:
+def test_show_3d_deviatoric_surface_view_uses_surface_point_scalars(monkeypatch) -> None:
     pv = pytest.importorskip("pyvista")
     pv.OFF_SCREEN = True
     module = _support()
-    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "artifacts" / "simulation")
-    case_toml = BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "case.toml"
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "SIOPT_SSR" / "artifacts" / "simulation")
+    case_toml = BENCHMARKS_DIR / "SIOPT_SSR" / "case.toml"
     captured: dict[str, object] = {}
     original_add_mesh = pv.Plotter.add_mesh
+    surface = pv.PolyData(
+        np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        ),
+        np.array([3, 0, 1, 2, 3, 3, 4, 5], dtype=np.int64),
+    )
+    surface.point_data["deviatoric_strain"] = np.linspace(0.0, 1.0, surface.n_points)
 
     def wrapped_add_mesh(self, mesh, *args, **kwargs):
         captured["mesh"] = mesh
@@ -652,26 +949,44 @@ def test_show_3d_deviatoric_surface_view_uses_surface_cell_scalars(monkeypatch) 
     monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
     monkeypatch.setattr(module, "_new_plotter", lambda pv_mod, title: pv_mod.Plotter(off_screen=True))
     monkeypatch.setattr(module, "_show_plotter", lambda plotter, *args, **kwargs: plotter.close() or "shown")
+    monkeypatch.setattr(module, "_load_case_mesh", lambda *args, **kwargs: SimpleNamespace(surf=np.array([[0, 0], [1, 1], [2, 2]], dtype=np.int64), coord=np.zeros((3, 3)), elem=np.zeros((4, 1), dtype=np.int64)))
+    monkeypatch.setattr(module, "_build_discontinuous_deviatoric_surface_3d", lambda *args, **kwargs: surface)
     monkeypatch.setattr(pv.Plotter, "add_mesh", wrapped_add_mesh)
 
     result = module.show_3d_deviatoric_surface_view(artifacts, case_toml)
 
     assert result == "shown"
     assert captured["kwargs"]["scalars"] == "deviatoric_strain"
-    assert captured["kwargs"]["preference"] == "cell"
+    assert captured["kwargs"]["preference"] == "point"
     assert captured["kwargs"]["lighting"] is False
-    assert "deviatoric_strain" in captured["mesh"].cell_data
-    assert "deviatoric_strain" not in captured["mesh"].point_data
+    assert "deviatoric_strain" in captured["mesh"].point_data
+    assert "deviatoric_strain" not in captured["mesh"].cell_data
+    assert np.unique(np.round(np.asarray(captured["mesh"].points), decimals=10), axis=0).shape[0] < captured["mesh"].n_points
 
 
 def test_show_3d_deviatoric_surface_view_can_overlay_boundary_edges(monkeypatch) -> None:
     pv = pytest.importorskip("pyvista")
     pv.OFF_SCREEN = True
     module = _support()
-    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "artifacts" / "simulation")
-    case_toml = BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "case.toml"
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "SIOPT_SSR" / "artifacts" / "simulation")
+    case_toml = BENCHMARKS_DIR / "SIOPT_SSR" / "case.toml"
     captured: list[dict[str, object]] = []
     original_add_mesh = pv.Plotter.add_mesh
+    surface = pv.PolyData(
+        np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        ),
+        np.array([3, 0, 1, 2, 3, 3, 4, 5], dtype=np.int64),
+    )
+    surface.point_data["deviatoric_strain"] = np.linspace(0.0, 1.0, surface.n_points)
 
     def wrapped_add_mesh(self, mesh, *args, **kwargs):
         captured.append({"mesh": mesh, "kwargs": kwargs})
@@ -681,6 +996,8 @@ def test_show_3d_deviatoric_surface_view_can_overlay_boundary_edges(monkeypatch)
     monkeypatch.setattr(module, "_import_pyvista", lambda: pv)
     monkeypatch.setattr(module, "_new_plotter", lambda pv_mod, title: pv_mod.Plotter(off_screen=True))
     monkeypatch.setattr(module, "_show_plotter", lambda plotter, *args, **kwargs: plotter.close() or "shown")
+    monkeypatch.setattr(module, "_load_case_mesh", lambda *args, **kwargs: SimpleNamespace(surf=np.array([[0, 0], [1, 1], [2, 2]], dtype=np.int64), coord=np.zeros((3, 3)), elem=np.zeros((4, 1), dtype=np.int64)))
+    monkeypatch.setattr(module, "_build_discontinuous_deviatoric_surface_3d", lambda *args, **kwargs: surface)
     monkeypatch.setattr(pv.Plotter, "add_mesh", wrapped_add_mesh)
 
     result = module.show_3d_deviatoric_surface_view(artifacts, case_toml, boundary_edge_overlay=True)
@@ -793,8 +1110,8 @@ def test_show_3d_deviatoric_slices_uses_single_scalar_bar(monkeypatch) -> None:
     pv = pytest.importorskip("pyvista")
     pv.OFF_SCREEN = True
     module = _support()
-    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "artifacts" / "simulation")
-    case_toml = BENCHMARKS_DIR / "run_3D_hetero_seepage_SSR_comsol_capture" / "case.toml"
+    artifacts = module.load_run_artifacts(BENCHMARKS_DIR / "SIOPT_SSR" / "artifacts" / "simulation")
+    case_toml = BENCHMARKS_DIR / "SIOPT_SSR" / "case.toml"
 
     monkeypatch.setattr(module, "_module_available", lambda name: name == "pyvista")
     monkeypatch.setattr(module, "_import_pyvista", lambda: pv)

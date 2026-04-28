@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parents[3]
 
 from slope_stability.core.run_config import RunCaseConfig, load_run_case_config
 from slope_stability.export import write_debug_bundle_h5, write_history_csv_tables, write_history_json, write_vtu
-from slope_stability.postprocess import build_field_exports, rebuild_case_mesh
+from slope_stability.postprocess import build_field_exports, rebuild_case_mesh, validate_case_mesh_alignment
+from slope_stability.problem_asset_runtime import resolve_problem_asset_from_config
 
-from .run_2D_homo_SSR_capture import run_capture as run_2d_homo_ssr_capture
 from .run_2D_textmesh_case_capture import run_capture as run_2d_textmesh_case_capture
 from .run_2D_sloan2013_seepage_capture import run_capture as run_2d_sloan2013_seepage_capture
 from .run_3D_hetero_SSR_capture import run_capture as run_3d_ssr_capture
@@ -26,90 +26,38 @@ from .run_3D_seepage_SSR_capture import run_capture as run_3d_seepage_ssr_captur
 
 
 def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
+    resolved = resolve_problem_asset_from_config(cfg)
+    profile = resolved.resolved_variant.profile
     linear = cfg.linear_solver
     common_linear = {
         "solver_type": linear.solver_type,
         "linear_tolerance": linear.tolerance,
         "linear_max_iter": linear.max_iterations,
     }
-    if cfg.problem.case == "2d_homo_ssr":
-        geom = cfg.geometry
+
+    if resolved.dimension == 2 and cfg.problem.analysis.lower() == "seepage":
         kwargs = {
-            "analysis": cfg.problem.analysis,
+            "asset_name": resolved.asset_name,
+            "mesh_variant": resolved.variant_name,
+            "profile": profile,
             "elem_type": cfg.problem.elem_type,
-            "davis_type": cfg.problem.davis_type,
-            "h": float(geom.get("h", 1.0)),
-            "x1": float(geom.get("x1", 15.0)),
-            "x3": float(geom.get("x3", 15.0)),
-            "y1": float(geom.get("y1", 10.0)),
-            "y2": float(geom.get("y2", 10.0)),
-            "beta_deg": float(geom.get("beta_deg", 45.0)),
-            "material_row": cfg.material_rows()[0],
             "node_ordering": cfg.execution.node_ordering,
-            "lambda_init": cfg.continuation.lambda_init,
-            "d_lambda_init": cfg.continuation.d_lambda_init,
-            "d_lambda_min": cfg.continuation.d_lambda_min,
-            "d_lambda_diff_scaled_min": cfg.continuation.d_lambda_diff_scaled_min,
-            "lambda_ell": cfg.continuation.lambda_ell,
-            "d_omega_ini_scale": cfg.continuation.d_omega_ini_scale,
-            "d_t_min": cfg.continuation.d_t_min,
-            "omega_max_stop": cfg.continuation.omega_max,
-            "continuation_predictor": cfg.continuation.predictor,
-            "omega_step_controller": cfg.continuation.omega_step_controller,
-            "continuation_secant_correction_mode": cfg.continuation.secant_correction_mode,
-            "continuation_first_newton_warm_start_mode": cfg.continuation.first_newton_warm_start_mode,
-            "continuation_secant_correction_mode": cfg.continuation.secant_correction_mode,
-            "continuation_first_newton_warm_start_mode": cfg.continuation.first_newton_warm_start_mode,
-            "omega_no_increase_newton_threshold": cfg.continuation.omega_no_increase_newton_threshold,
-            "omega_half_newton_threshold": cfg.continuation.omega_half_newton_threshold,
-            "omega_target_newton_iterations": cfg.continuation.omega_target_newton_iterations,
-            "omega_adapt_min_scale": cfg.continuation.omega_adapt_min_scale,
-            "omega_adapt_max_scale": cfg.continuation.omega_adapt_max_scale,
-            "omega_hard_newton_threshold": cfg.continuation.omega_hard_newton_threshold,
-            "omega_hard_linear_threshold": cfg.continuation.omega_hard_linear_threshold,
-            "omega_efficiency_floor": cfg.continuation.omega_efficiency_floor,
-            "omega_efficiency_drop_ratio": cfg.continuation.omega_efficiency_drop_ratio,
-            "omega_efficiency_window": cfg.continuation.omega_efficiency_window,
-            "omega_hard_shrink_scale": cfg.continuation.omega_hard_shrink_scale,
-            "step_length_cap_mode": cfg.continuation.step_length_cap_mode,
-            "step_length_cap_factor": cfg.continuation.step_length_cap_factor,
-            "step_max": cfg.continuation.step_max,
-            "it_newt_max": cfg.newton.it_max,
-            "it_damp_max": cfg.newton.it_damp_max,
-            "tol": cfg.newton.tol,
-            "r_min": cfg.newton.r_min,
-            "mpi_distribute_by_nodes": cfg.execution.mpi_distribute_by_nodes,
-            "pc_hypre_coarsen_type": linear.pc_hypre_coarsen_type,
-            "pc_hypre_interp_type": linear.pc_hypre_interp_type,
-            "pc_hypre_strong_threshold": linear.pc_hypre_strong_threshold,
-            "pc_hypre_boomeramg_max_iter": linear.pc_hypre_boomeramg_max_iter or 1,
-            "recycle_preconditioner": linear.recycle_preconditioner,
-            "constitutive_mode": cfg.execution.constitutive_mode,
-            "tangent_kernel": cfg.execution.tangent_kernel,
-            **common_linear,
-        }
-        return run_2d_homo_ssr_capture, kwargs
-    if cfg.problem.case == "2d_sloan2013_seepage":
-        kwargs = {
-            "elem_type": cfg.problem.elem_type,
             "solver_type": linear.solver_type.replace("_NULLSPACE", ""),
             "linear_tolerance": cfg.seepage.linear_tolerance,
             "linear_max_iter": cfg.seepage.linear_max_iter,
             "nonlinear_max_iter": cfg.seepage.nonlinear_max_iter,
         }
         return run_2d_sloan2013_seepage_capture, kwargs
-    if cfg.problem.case in {"2d_kozinec_ssr", "2d_kozinec_ll", "2d_luzec_ssr", "2d_franz_dam_ssr"}:
+
+    if resolved.dimension == 2:
         kwargs = {
-            "case_name": cfg.case_data.get("case_name", cfg.problem.case.split("_", 1)[1].rsplit("_", 1)[0]),
+            "asset_name": resolved.asset_name,
+            "mesh_variant": resolved.variant_name,
+            "profile": profile,
             "analysis": cfg.problem.analysis,
             "continuation_method": cfg.continuation.method,
-            "mesh_dir": cfg.case_data["mesh_dir"],
             "elem_type": cfg.problem.elem_type,
             "davis_type": cfg.problem.davis_type,
-            "material_rows": cfg.material_rows(),
-            "hydraulic_conductivity": (
-                None if not cfg.seepage.conductivity else list(cfg.seepage.conductivity)
-            ),
             "node_ordering": cfg.execution.node_ordering,
             "lambda_init": cfg.continuation.lambda_init,
             "d_lambda_init": cfg.continuation.d_lambda_init,
@@ -153,15 +101,65 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "tangent_kernel": cfg.execution.tangent_kernel,
             "seepage_linear_tolerance": cfg.seepage.linear_tolerance,
             "seepage_linear_max_iter": cfg.seepage.linear_max_iter,
-            "seepage_water_unit_weight": cfg.seepage.water_unit_weight,
             **common_linear,
         }
         return run_2d_textmesh_case_capture, kwargs
-    if cfg.problem.case in {"3d_homo_ssr", "3d_hetero_ssr", "3d_siopt_ssr"}:
+
+    if resolved.dimension == 3 and cfg.problem.analysis.lower() == "seepage":
+        kwargs = {
+            "mesh_path": resolved.mesh_path,
+            "profile": profile,
+            "elem_type": cfg.problem.elem_type,
+            "node_ordering": cfg.execution.node_ordering,
+            "solver_type": linear.solver_type.replace("_NULLSPACE", ""),
+            "linear_tolerance": cfg.seepage.linear_tolerance,
+            "linear_max_iter": cfg.seepage.linear_max_iter,
+        }
+        return run_3d_hetero_seepage_capture, kwargs
+
+    if resolved.dimension == 3 and "seepage" in resolved.definition.capabilities:
+        kwargs = {
+            "mesh_path": resolved.mesh_path,
+            "profile": profile,
+            "elem_type": cfg.problem.elem_type,
+            "node_ordering": cfg.execution.node_ordering,
+            "lambda_init": cfg.continuation.lambda_init,
+            "d_lambda_init": cfg.continuation.d_lambda_init,
+            "d_lambda_min": cfg.continuation.d_lambda_min,
+            "d_lambda_diff_scaled_min": cfg.continuation.d_lambda_diff_scaled_min,
+            "omega_max_stop": cfg.continuation.omega_max,
+            "continuation_predictor": cfg.continuation.predictor,
+            "omega_step_controller": cfg.continuation.omega_step_controller,
+            "step_max": cfg.continuation.step_max,
+            "it_newt_max": cfg.newton.it_max,
+            "it_damp_max": cfg.newton.it_damp_max,
+            "tol": cfg.newton.tol,
+            "r_min": cfg.newton.r_min,
+            "newton_stopping_criterion": cfg.newton.stopping_criterion,
+            "newton_stopping_tol": cfg.newton.stopping_tol,
+            "mpi_distribute_by_nodes": cfg.execution.mpi_distribute_by_nodes,
+            "pc_backend": linear.pc_backend,
+            "pc_hypre_coarsen_type": linear.pc_hypre_coarsen_type or "HMIS",
+            "pc_hypre_interp_type": linear.pc_hypre_interp_type or "ext+i",
+            "pc_hypre_strong_threshold": linear.pc_hypre_strong_threshold,
+            "pc_hypre_boomeramg_max_iter": linear.pc_hypre_boomeramg_max_iter or 1,
+            "pc_hypre_P_max": linear.pc_hypre_P_max,
+            "pc_hypre_agg_nl": linear.pc_hypre_agg_nl,
+            "pc_hypre_nongalerkin_tol": linear.pc_hypre_nongalerkin_tol,
+            "recycle_preconditioner": linear.recycle_preconditioner,
+            "constitutive_mode": cfg.execution.constitutive_mode,
+            "tangent_kernel": cfg.execution.tangent_kernel,
+            "seepage_linear_tolerance": cfg.seepage.linear_tolerance,
+            "seepage_linear_max_iter": cfg.seepage.linear_max_iter,
+            **common_linear,
+        }
+        return run_3d_seepage_ssr_capture, kwargs
+
+    if resolved.dimension == 3:
         kwargs = {
             "analysis": cfg.problem.analysis,
-            "mesh_path": cfg.problem.mesh_path,
-            "mesh_boundary_type": cfg.problem.mesh_boundary_type,
+            "mesh_path": resolved.mesh_path,
+            "profile": profile,
             "elem_type": cfg.problem.elem_type,
             "davis_type": cfg.problem.davis_type,
             "material_rows": cfg.material_rows(),
@@ -254,59 +252,20 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             **common_linear,
         }
         return run_3d_ssr_capture, kwargs
-    if cfg.problem.case == "3d_hetero_seepage":
-        kwargs = {
-            "mesh_path": cfg.problem.mesh_path,
-            "elem_type": cfg.problem.elem_type,
-            "solver_type": linear.solver_type.replace("_NULLSPACE", ""),
-            "linear_tolerance": cfg.seepage.linear_tolerance,
-            "linear_max_iter": cfg.seepage.linear_max_iter,
-        }
-        return run_3d_hetero_seepage_capture, kwargs
-    if cfg.problem.case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
-        kwargs = {
-            "mesh_path": cfg.problem.mesh_path,
-            "boundary_mode": "comsol" if cfg.problem.case == "3d_hetero_seepage_ssr_comsol" else "waterlevels",
-            "elem_type": cfg.problem.elem_type,
-            "node_ordering": cfg.execution.node_ordering,
-            "lambda_init": cfg.continuation.lambda_init,
-            "d_lambda_init": cfg.continuation.d_lambda_init,
-            "d_lambda_min": cfg.continuation.d_lambda_min,
-            "d_lambda_diff_scaled_min": cfg.continuation.d_lambda_diff_scaled_min,
-            "omega_max_stop": cfg.continuation.omega_max,
-            "continuation_predictor": cfg.continuation.predictor,
-            "omega_step_controller": cfg.continuation.omega_step_controller,
-            "step_max": cfg.continuation.step_max,
-            "it_newt_max": cfg.newton.it_max,
-            "it_damp_max": cfg.newton.it_damp_max,
-            "tol": cfg.newton.tol,
-            "r_min": cfg.newton.r_min,
-            "newton_stopping_criterion": cfg.newton.stopping_criterion,
-            "newton_stopping_tol": cfg.newton.stopping_tol,
-            "mpi_distribute_by_nodes": cfg.execution.mpi_distribute_by_nodes,
-            "pc_backend": linear.pc_backend,
-            "pc_hypre_coarsen_type": linear.pc_hypre_coarsen_type or "HMIS",
-            "pc_hypre_interp_type": linear.pc_hypre_interp_type or "ext+i",
-            "pc_hypre_strong_threshold": linear.pc_hypre_strong_threshold,
-            "pc_hypre_boomeramg_max_iter": linear.pc_hypre_boomeramg_max_iter or 1,
-            "pc_hypre_P_max": linear.pc_hypre_P_max,
-            "pc_hypre_agg_nl": linear.pc_hypre_agg_nl,
-            "pc_hypre_nongalerkin_tol": linear.pc_hypre_nongalerkin_tol,
-            "recycle_preconditioner": linear.recycle_preconditioner,
-            "constitutive_mode": cfg.execution.constitutive_mode,
-            "tangent_kernel": cfg.execution.tangent_kernel,
-            "seepage_linear_tolerance": cfg.seepage.linear_tolerance,
-            "seepage_linear_max_iter": cfg.seepage.linear_max_iter,
-            "water_unit_weight": cfg.seepage.water_unit_weight,
-            "conductivity": list(cfg.seepage.conductivity) if cfg.seepage.conductivity else None,
-            **common_linear,
-        }
-        return run_3d_seepage_ssr_capture, kwargs
-    raise KeyError(f"Unsupported case id {cfg.problem.case!r}")
+
+    raise KeyError(
+        f"Unsupported asset routing for asset={resolved.asset_name!r}, "
+        f"dimension={resolved.dimension}, source_kind={resolved.source_kind!r}, analysis={cfg.problem.analysis!r}."
+    )
+
+
+def _load_export_arrays(npz_path: Path) -> dict[str, np.ndarray]:
+    with np.load(npz_path, allow_pickle=True) as npz:
+        return {name: np.asarray(npz[name]) for name in npz.files}
 
 
 def _build_field_exports(
-    npz_path: Path,
+    arrays: dict[str, np.ndarray],
     *,
     n_cells: int,
     coord: np.ndarray | None = None,
@@ -314,8 +273,6 @@ def _build_field_exports(
     elem_type: str | None = None,
     dim: int | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    with np.load(npz_path, allow_pickle=True) as npz:
-        arrays = {name: np.asarray(npz[name]) for name in npz.files}
     return build_field_exports(
         arrays,
         n_cells=n_cells,
@@ -358,8 +315,10 @@ def _export_outputs(cfg: RunCaseConfig, config_path: Path, output_dir: Path) -> 
         )
     if cfg.export.write_solution_vtu and npz_path.exists():
         case_mesh = rebuild_case_mesh(cfg, mpi_size=int(PETSc.COMM_WORLD.getSize()))
+        arrays = _load_export_arrays(npz_path)
+        validate_case_mesh_alignment(case_mesh, arrays)
         point_data, cell_data = _build_field_exports(
-            npz_path,
+            arrays,
             n_cells=sum(block.shape[0] for _, block in case_mesh.cell_blocks),
             coord=case_mesh.coord,
             elem=case_mesh.elem,

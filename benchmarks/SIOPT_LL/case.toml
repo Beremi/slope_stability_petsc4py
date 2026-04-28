@@ -7,15 +7,15 @@ suite = false
 
 [problem]
 name = "SIOPT_LL"
-case = "3d_siopt_ssr"
+asset = "3d_siopt"
+mesh_variant = "reference_l0.msh"
+profile = "fixed_base"
 analysis = "ll"
 dimension = 3
 variant = "homo"
 elem_type = "P2"
 davis_type = "B"
 seepage = false
-mesh_path = "../../meshes/3d_siopt/SIOPT_L0.msh"
-mesh_boundary_type = 1
 
 [execution]
 node_ordering = "block_metis"

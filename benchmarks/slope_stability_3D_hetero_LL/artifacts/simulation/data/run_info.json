@@ -1,15 +1,15 @@
 {
   "run_info": {
-    "timestamp": "2026-04-04T06:01:10",
+    "timestamp": "2026-04-23T13:48:30",
     "python_version": "petsc driver",
-    "runtime_seconds": 1266.9147850999143,
+    "runtime_seconds": 739.4867409159779,
     "mpi_size": 8,
     "mesh_nodes": 35867,
     "mesh_elements": 22516,
     "unknowns": 105910,
     "analysis": "ll",
     "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
-    "step_count": 29
+    "step_count": 28
   },
   "params": {
     "analysis": "ll",
@@ -69,6 +69,13 @@
     "r_min": 0.0001,
     "newton_stopping_criterion": "relative_residual",
     "newton_stopping_tol": null,
+    "newton_line_search": "alg5",
+    "newton_armijo_alpha0": 1.0,
+    "newton_armijo_c1": 0.0001,
+    "newton_armijo_shrink": 0.5,
+    "newton_armijo_max_ls": null,
+    "newton_armijo_rescale_trial_to_omega": true,
+    "newton_armijo_fallback_to_alg5": true,
     "factor_solver_type": null,
     "pc_backend": "hypre",
     "pmg_fine_hierarchy_mode": "default",
@@ -77,6 +84,7 @@
     "preconditioner_rebuild_policy": "every_newton",
     "preconditioner_rebuild_interval": 1,
     "elem_type": "P2",
+    "quadrature_rule": null,
     "davis_type": "B",
     "material_rows": [
       [
@@ -157,7 +165,7 @@
     "tangent_kernel": "rows"
   },
   "mesh": {
-    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_ll/LL_hetero_ada_L1.msh",
+    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_slope/adaptive_family_b_l1.msh",
     "coord_shape": [
       3,
       35867
@@ -173,44 +181,44 @@
   },
   "timings": {
     "constitutive": {
-      "reduction": 0.0020987731404602528,
-      "stress": 25.052089728880674,
-      "stress_tangent": 15.634620980592445,
-      "build_F": 28.416726279072464,
+      "reduction": 0.002126375969965011,
+      "stress": 16.418244929693174,
+      "stress_tangent": 8.500076067633927,
+      "build_F": 16.89058402046794,
       "build_F_K_tangent": 0.0,
-      "build_tangent_local": 56.487592929275706,
-      "local_strain": 14.357235988369212,
-      "local_constitutive": 26.25871968595311,
+      "build_tangent_local": 29.334283826174214,
+      "local_strain": 9.027275142609142,
+      "local_constitutive": 16.06303196650697,
       "local_constitutive_comm": 0.0,
-      "local_force_assembly": 28.410493101924658,
+      "local_force_assembly": 16.887655078724492,
       "local_force_gather": 0.0,
       "potential": 0.0
     },
     "linear": {
       "init_linear_iterations": 2,
-      "init_linear_solve_time": 0.0902434999588877,
-      "init_linear_preconditioner_time": 0.48604055494070053,
+      "init_linear_solve_time": 0.09050692396704108,
+      "init_linear_preconditioner_time": 0.5192716780002229,
       "init_linear_orthogonalization_time": 0.0,
-      "attempt_linear_iterations_total": 11237,
-      "attempt_linear_solve_time_total": 519.4094790753443,
-      "attempt_linear_preconditioner_time_total": 54.70054028253071,
-      "attempt_linear_orthogonalization_time_total": 462.3822022599634,
+      "attempt_linear_iterations_total": 8641,
+      "attempt_linear_solve_time_total": 372.8191595489625,
+      "attempt_linear_preconditioner_time_total": 27.752449423074722,
+      "attempt_linear_orthogonalization_time_total": 214.78581779933302,
       "pc_backend": "hypre",
       "preconditioner_matrix_source": "tangent",
       "preconditioner_matrix_policy": "current",
       "preconditioner_rebuild_policy": "every_newton",
       "preconditioner_rebuild_interval": 1,
-      "preconditioner_rebuild_count": 1361,
+      "preconditioner_rebuild_count": 727,
       "preconditioner_reuse_count": 0,
       "preconditioner_age_max": 0,
-      "preconditioner_setup_time_last": 0.04145654197782278,
-      "preconditioner_setup_time_total": 55.18658083747141,
-      "preconditioner_apply_time_last": 0.03622170095331967,
-      "preconditioner_apply_time_total": 401.8647778984159,
+      "preconditioner_setup_time_last": 0.03841505298623815,
+      "preconditioner_setup_time_total": 28.271721101074945,
+      "preconditioner_apply_time_last": 0.0339001800166443,
+      "preconditioner_apply_time_total": 290.4877467897604,
       "preconditioner_last_rebuild_reason": "current_policy",
       "preconditioner_age_current": 0
     },
-    "continuation_total_wall_time": 1266.3334695938975
+    "continuation_total_wall_time": 738.8704329369939
   },
   "predictor_diagnostics": {
     "attempt_initial_guess_displacement_diff_volume_integral_total": 0.0,
@@ -262,11 +270,11 @@
   "owned_tangent_pattern": {
     "stats_max": {
       "scatter_bytes": 0.0,
-      "row_slot_bytes": 10897925.0,
+      "row_slot_bytes": 10933925.0,
       "overlap_B_bytes": 0.0,
       "unique_B_bytes": 4.0,
-      "dphi_bytes": 8888880.0,
-      "avg_active_rows_per_overlap_element": 27.06413148565904,
+      "dphi_bytes": 8775360.0,
+      "avg_active_rows_per_overlap_element": 26.634831460674157,
       "max_active_rows_per_overlap_element": 30.0,
       "legacy_scatter_enabled": 0.0
     },
@@ -275,17 +283,17 @@
       "row_slot_bytes": 83939936.0,
       "overlap_B_bytes": 0.0,
       "unique_B_bytes": 32.0,
-      "dphi_bytes": 67734480.0,
-      "avg_active_rows_per_overlap_element": 208.42291741884804,
+      "dphi_bytes": 67615680.0,
+      "avg_active_rows_per_overlap_element": 208.66310409537226,
       "max_active_rows_per_overlap_element": 240.0,
       "legacy_scatter_enabled": 0.0
     },
     "timings_max": {
       "elastic_pattern_s": 0.0,
-      "overlap_geometry_s": 0.0738322080578655,
-      "unique_geometry_s": 8.383998647332191e-05,
-      "structural_pattern_s": 0.3474855700042099,
-      "scatter_map_s": 0.5866089700721204,
+      "overlap_geometry_s": 0.06699690403183922,
+      "unique_geometry_s": 9.151501581072807e-05,
+      "structural_pattern_s": 0.32414466998307034,
+      "scatter_map_s": 0.5737565740128048,
       "scatter_missing_entries": 0.0,
       "elastic_pattern_reused": 1.0
     }

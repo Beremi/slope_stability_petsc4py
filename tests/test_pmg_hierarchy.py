@@ -28,9 +28,9 @@ from slope_stability.utils import q_to_free_indices, to_petsc_aij_matrix
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MESH_PATH = ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
-MESH_PATH_L2 = ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L2.msh"
-MESH_PATH_L3 = ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L3.msh"
+MESH_PATH = ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh"
+MESH_PATH_L2 = ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l2.msh"
+MESH_PATH_L3 = ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l3.msh"
 
 
 def _single_tetra_mesh(order: int) -> tuple[np.ndarray, np.ndarray]:
@@ -1000,4 +1000,3 @@ def test_run_capture_accepts_same_mesh_p2_pmg_shell_path(monkeypatch: pytest.Mon
             node_ordering="original",
             step_max=1,
         )
-

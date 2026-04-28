@@ -13,15 +13,14 @@ strain_clim_scale_max = 0.25
 
 [problem]
 name = "run_3D_hetero_SSR_capture"
-case = "3d_hetero_ssr"
+asset = "3d_hetero_slope"
+mesh_variant = "adaptive_family_a_l1.msh"
 analysis = "ssr"
 dimension = 3
 variant = "hetero"
 elem_type = "P2"
 davis_type = "B"
 seepage = false
-mesh_path = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
-mesh_boundary_type = 0
 
 [execution]
 node_ordering = "block_metis"

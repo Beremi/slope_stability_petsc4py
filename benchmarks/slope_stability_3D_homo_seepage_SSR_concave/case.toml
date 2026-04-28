@@ -7,14 +7,15 @@ suite = false
 
 [problem]
 name = "slope_stability_3D_homo_seepage_SSR_concave"
-case = "3d_concave_seepage_ssr"
+asset = "3d_hetero_seepage_transition"
+mesh_variant = "transition_default.msh"
+profile = "fixed_base"
 analysis = "ssr"
 dimension = 3
 variant = "hetero"
 elem_type = "P2"
 davis_type = "B"
 seepage = true
-mesh_path = "../../meshes/3d_hetero_seepage_ssr_comsol/comsol_mesh.msh"
 
 [execution]
 node_ordering = "block_metis"
@@ -47,8 +48,6 @@ recycle_preconditioner = true
 [seepage]
 linear_tolerance = 1e-10
 linear_max_iter = 500
-water_unit_weight = 9.81
-conductivity = [1.0]
 
 [export]
 write_custom_debug_bundle = true

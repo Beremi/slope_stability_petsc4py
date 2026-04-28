@@ -69,7 +69,7 @@ def test_final_report_handles_reused_baseline_and_gated_out_bddc() -> None:
     }
 
     lines = module._final_report_lines(
-        mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+        mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
         summary_payload=summary_payload,
         baseline_summary_path=ROOT / "artifacts" / "p2_p4_compare_rank8_final_memfix" / "summary.json",
         baseline_report_path=ROOT / "benchmarks" / "slope_stability_3D_hetero_SSR_default" / "archive" / "report_p2_vs_p4_rank8_final_memfix.md",
@@ -117,13 +117,13 @@ def test_step2_and_gate_reports_include_bddc_runtime_smokes() -> None:
 
     step2_text = "\n".join(
         module._step2_report_lines(
-            mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+            mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
             summary_payload=summary_payload,
         )
     )
     gate_text = "\n".join(
         module._bddc_gate_report_lines(
-            mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+            mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
             summary_payload=summary_payload,
         )
     )
@@ -205,7 +205,7 @@ def test_bddc_short_report_marks_rejected_candidates() -> None:
 
     text = "\n".join(
         module._bddc_short_report_lines(
-            mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+            mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
             summary_payload=summary_payload,
         )
     )
@@ -246,7 +246,7 @@ def test_run_case_reuse_existing_loads_sibling_memory_guard() -> None:
             result = module._run_case(
                 variant=module.Variant(name="dummy", description="dummy", category="bddc", cli_args=()),
                 ranks=1,
-                mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+                mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
                 step_max=1,
                 out_dir=out_dir,
                 guard_limit_gib=None,
@@ -281,7 +281,7 @@ def test_run_probe_case_reuse_existing_loads_failed_probe_without_rerun() -> Non
         result = module._run_probe_case(
             variant=module.Variant(name="dummy", description="dummy", category="sweep_bddc", cli_args=()),
             ranks=1,
-            mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+            mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
             out_dir=out_dir,
             elem_type="P4",
             mode="single_solve",
@@ -401,7 +401,7 @@ def test_bddc_sweep_report_lists_linear_screen_and_promotions() -> None:
 
     text = "\n".join(
         module._bddc_sweep_report_lines(
-            mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+            mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
             summary_payload=summary_payload,
         )
     )
@@ -535,7 +535,7 @@ def test_bddc_sweep_workflow_smoke_generates_plot_artifacts() -> None:
             module._petsc_has_external_package = lambda name: False
             summary = module._run_bddc_sweep_workflow(
                 registry=registry,
-                mesh_path=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh",
+                mesh_path=ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh",
                 out_root=out_root,
                 linear_tolerance=1.0e-5,
                 linear_max_iter=500,

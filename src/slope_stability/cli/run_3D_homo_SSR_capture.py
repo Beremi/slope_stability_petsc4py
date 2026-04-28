@@ -15,7 +15,7 @@ from .run_3D_hetero_SSR_capture import run_capture as _run_generic_capture
 def run_capture(output_dir: Path, **kwargs):
     kwargs.setdefault(
         "mesh_path",
-        Path(__file__).resolve().parents[3] / "meshes" / "3d_homo_ssr" / "SSR_homo_ada_L1.msh",
+        Path(__file__).resolve().parents[3] / "meshes" / "3d_homo_slope" / "adaptive_family_a_l1.msh",
     )
     kwargs.setdefault("analysis", "ssr")
     kwargs.setdefault("mesh_boundary_type", 0)

@@ -1,15 +1,15 @@
 {
   "run_info": {
-    "timestamp": "2026-04-05T06:25:30",
+    "timestamp": "2026-04-23T08:36:19",
     "python_version": "petsc driver",
-    "runtime_seconds": 293.8221326849889,
+    "runtime_seconds": 278.725212646008,
     "mpi_size": 8,
     "mesh_nodes": 23990,
     "mesh_elements": 15356,
     "unknowns": 62963,
     "analysis": "ll",
     "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
-    "step_count": 18
+    "step_count": 19
   },
   "params": {
     "analysis": "ll",
@@ -69,6 +69,13 @@
     "r_min": 0.0001,
     "newton_stopping_criterion": "relative_residual",
     "newton_stopping_tol": null,
+    "newton_line_search": "alg5",
+    "newton_armijo_alpha0": 1.0,
+    "newton_armijo_c1": 0.0001,
+    "newton_armijo_shrink": 0.5,
+    "newton_armijo_max_ls": null,
+    "newton_armijo_rescale_trial_to_omega": true,
+    "newton_armijo_fallback_to_alg5": true,
     "factor_solver_type": null,
     "pc_backend": "hypre",
     "pmg_fine_hierarchy_mode": "default",
@@ -77,6 +84,7 @@
     "preconditioner_rebuild_policy": "every_newton",
     "preconditioner_rebuild_interval": 1,
     "elem_type": "P2",
+    "quadrature_rule": null,
     "davis_type": "B",
     "material_rows": [
       [
@@ -89,7 +97,7 @@
         20.0
       ]
     ],
-    "mesh_boundary_type": 1,
+    "mesh_boundary_type": 0,
     "node_ordering": "block_metis",
     "mpi_distribute_by_nodes": true,
     "pc_gamg_process_eq_limit": null,
@@ -130,7 +138,7 @@
     "tangent_kernel": "rows"
   },
   "mesh": {
-    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_siopt/SIOPT_L0.msh",
+    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_siopt/reference_l0.msh",
     "coord_shape": [
       3,
       23990
@@ -146,44 +154,44 @@
   },
   "timings": {
     "constitutive": {
-      "reduction": 0.0016509280540049076,
-      "stress": 8.9440663382411,
-      "stress_tangent": 3.551490363664925,
-      "build_F": 8.453047345392406,
+      "reduction": 0.0015806020237505436,
+      "stress": 8.991330791846849,
+      "stress_tangent": 3.5015423605800606,
+      "build_F": 8.27706684160512,
       "build_F_K_tangent": 0.0,
-      "build_tangent_local": 8.603251478867605,
-      "local_strain": 5.222310796612874,
-      "local_constitutive": 7.328832573257387,
+      "build_tangent_local": 8.041398091008887,
+      "local_strain": 5.167574558814522,
+      "local_constitutive": 7.298475986288395,
       "local_constitutive_comm": 0.0,
-      "local_force_assembly": 8.45118419197388,
-      "local_force_gather": 0.0,
+      "local_force_assembly": 8.273646496294532,
+      "local_force_gather": 0.0015971239772625268,
       "potential": 0.0
     },
     "linear": {
       "init_linear_iterations": 2,
-      "init_linear_solve_time": 0.0547040740493685,
-      "init_linear_preconditioner_time": 0.2838740199804306,
+      "init_linear_solve_time": 0.054605218989308923,
+      "init_linear_preconditioner_time": 0.2717862139688805,
       "init_linear_orthogonalization_time": 0.0,
-      "attempt_linear_iterations_total": 8751,
-      "attempt_linear_solve_time_total": 205.82597384159453,
-      "attempt_linear_preconditioner_time_total": 5.297189119737595,
-      "attempt_linear_orthogonalization_time_total": 39.38795438176021,
+      "attempt_linear_iterations_total": 9041,
+      "attempt_linear_solve_time_total": 197.37207401986234,
+      "attempt_linear_preconditioner_time_total": 4.937991835875437,
+      "attempt_linear_orthogonalization_time_total": 34.678332043404225,
       "pc_backend": "hypre",
       "preconditioner_matrix_source": "tangent",
       "preconditioner_matrix_policy": "current",
       "preconditioner_rebuild_policy": "every_newton",
       "preconditioner_rebuild_interval": 1,
-      "preconditioner_rebuild_count": 313,
+      "preconditioner_rebuild_count": 309,
       "preconditioner_reuse_count": 0,
       "preconditioner_age_max": 0,
-      "preconditioner_setup_time_last": 0.01590319094248116,
-      "preconditioner_setup_time_total": 5.581063139718026,
-      "preconditioner_apply_time_last": 0.016147467074915767,
-      "preconditioner_apply_time_total": 152.31302080187015,
+      "preconditioner_setup_time_last": 0.015388927015010267,
+      "preconditioner_setup_time_total": 5.209778049844317,
+      "preconditioner_apply_time_last": 0.015510350000113249,
+      "preconditioner_apply_time_total": 144.2038511360879,
       "preconditioner_last_rebuild_reason": "current_policy",
       "preconditioner_age_current": 0
     },
-    "continuation_total_wall_time": 293.47992003685795
+    "continuation_total_wall_time": 278.39448528998764
   },
   "predictor_diagnostics": {
     "attempt_initial_guess_displacement_diff_volume_integral_total": 0.0,
@@ -235,11 +243,11 @@
   "owned_tangent_pattern": {
     "stats_max": {
       "scatter_bytes": 0.0,
-      "row_slot_bytes": 7048355.0,
+      "row_slot_bytes": 7050355.0,
       "overlap_B_bytes": 0.0,
       "unique_B_bytes": 4.0,
-      "dphi_bytes": 6666000.0,
-      "avg_active_rows_per_overlap_element": 23.42124711316397,
+      "dphi_bytes": 6607920.0,
+      "avg_active_rows_per_overlap_element": 23.31321971441732,
       "max_active_rows_per_overlap_element": 30.0,
       "legacy_scatter_enabled": 0.0
     },
@@ -248,17 +256,17 @@
       "row_slot_bytes": 52935412.0,
       "overlap_B_bytes": 0.0,
       "unique_B_bytes": 32.0,
-      "dphi_bytes": 49082880.0,
-      "avg_active_rows_per_overlap_element": 181.42172676000337,
+      "dphi_bytes": 48995760.0,
+      "avg_active_rows_per_overlap_element": 181.7575310373207,
       "max_active_rows_per_overlap_element": 240.0,
       "legacy_scatter_enabled": 0.0
     },
     "timings_max": {
       "elastic_pattern_s": 0.0,
-      "overlap_geometry_s": 0.04469091910868883,
-      "unique_geometry_s": 0.00018659699708223343,
-      "structural_pattern_s": 0.19898648094385862,
-      "scatter_map_s": 0.3508542808704078,
+      "overlap_geometry_s": 0.04815981298452243,
+      "unique_geometry_s": 9.600300109013915e-05,
+      "structural_pattern_s": 0.1970123170176521,
+      "scatter_map_s": 0.3463364639901556,
       "scatter_missing_entries": 0.0,
       "elastic_pattern_reused": 1.0
     }

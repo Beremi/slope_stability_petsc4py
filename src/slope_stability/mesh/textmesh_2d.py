@@ -235,6 +235,27 @@ def _load_text_mesh_case(
     )
 
 
+def load_text_mesh_bundle(
+    elem_type: str,
+    base_dir: str | Path,
+    *,
+    coordinates_name: str,
+    elements_name: str,
+    materials_name: str,
+    shift: tuple[float, float] = (0.0, 0.0),
+    y_floor: float = 0.0,
+) -> TextMesh2D:
+    return _load_text_mesh_case(
+        Path(base_dir),
+        elem_type=elem_type,
+        coordinates_name=coordinates_name,
+        elements_name=elements_name,
+        materials_name=materials_name,
+        shift=shift,
+        y_floor=y_floor,
+    )
+
+
 def load_mesh_kozinec_2d(elem_type: str, base_dir: str | Path) -> TextMesh2D:
     base_dir = Path(base_dir)
     return _load_text_mesh_case(

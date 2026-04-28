@@ -46,6 +46,7 @@ def _import_cell(case_dir_name: str):
     return _code_cell(
         f"""
         from pathlib import Path
+        import importlib
         import sys
 
         ROOT = next(
@@ -55,7 +56,8 @@ def _import_cell(case_dir_name: str):
         if str(ROOT / "benchmarks") not in sys.path:
             sys.path.insert(0, str(ROOT / "benchmarks"))
 
-        import notebook_support as nb
+        import notebook_support
+        nb = importlib.reload(notebook_support)
 
         CASE_TOML = ROOT / "benchmarks" / "{case_dir_name}" / "case.toml"
         CASE_DIR = CASE_TOML.parent

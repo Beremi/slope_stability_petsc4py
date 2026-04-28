@@ -1,8 +1,8 @@
 {
   "run_info": {
-    "timestamp": "2026-04-04T06:03:49",
+    "timestamp": "2026-04-25T18:38:16",
     "python_version": "petsc driver",
-    "runtime_seconds": 146.9633624739945,
+    "runtime_seconds": 168.404104687972,
     "mpi_size": 8,
     "mesh_nodes": 26273,
     "mesh_elements": 16813,
@@ -69,6 +69,13 @@
     "r_min": 0.0001,
     "newton_stopping_criterion": "relative_residual",
     "newton_stopping_tol": null,
+    "newton_line_search": "alg5",
+    "newton_armijo_alpha0": 1.0,
+    "newton_armijo_c1": 0.0001,
+    "newton_armijo_shrink": 0.5,
+    "newton_armijo_max_ls": null,
+    "newton_armijo_rescale_trial_to_omega": true,
+    "newton_armijo_fallback_to_alg5": true,
     "factor_solver_type": null,
     "pc_backend": "hypre",
     "pmg_fine_hierarchy_mode": "default",
@@ -77,6 +84,7 @@
     "preconditioner_rebuild_policy": "every_newton",
     "preconditioner_rebuild_interval": 1,
     "elem_type": "P2",
+    "quadrature_rule": null,
     "davis_type": "B",
     "material_rows": [
       [
@@ -130,7 +138,7 @@
     "tangent_kernel": "rows"
   },
   "mesh": {
-    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_homo_ll/LL_homo_ada_L1.msh",
+    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_homo_slope/adaptive_family_b_l1.msh",
     "coord_shape": [
       3,
       26273
@@ -146,44 +154,44 @@
   },
   "timings": {
     "constitutive": {
-      "reduction": 0.001907888101413846,
-      "stress": 4.398381863255054,
-      "stress_tangent": 2.422138706082478,
-      "build_F": 4.737954698503017,
+      "reduction": 0.0016750729409977794,
+      "stress": 4.637106290902011,
+      "stress_tangent": 2.6250041808234528,
+      "build_F": 5.10973501089029,
       "build_F_K_tangent": 0.0,
-      "build_tangent_local": 6.501491055125371,
-      "local_strain": 2.740023026242852,
-      "local_constitutive": 4.063845176016912,
+      "build_tangent_local": 7.496132415602915,
+      "local_strain": 2.9058003305690363,
+      "local_constitutive": 4.339627069537528,
       "local_constitutive_comm": 0.0,
-      "local_force_assembly": 4.736968035111204,
-      "local_force_gather": 0.0,
+      "local_force_assembly": 5.106728785089217,
+      "local_force_gather": 0.016119703999720514,
       "potential": 0.0
     },
     "linear": {
       "init_linear_iterations": 3,
-      "init_linear_solve_time": 0.09076327690854669,
-      "init_linear_preconditioner_time": 0.331399162998423,
+      "init_linear_solve_time": 0.08464799297507852,
+      "init_linear_preconditioner_time": 0.535321066970937,
       "init_linear_orthogonalization_time": 0.0,
-      "attempt_linear_iterations_total": 3470,
-      "attempt_linear_solve_time_total": 91.19880540040322,
-      "attempt_linear_preconditioner_time_total": 4.824306110385805,
-      "attempt_linear_orthogonalization_time_total": 23.739448547828943,
+      "attempt_linear_iterations_total": 3683,
+      "attempt_linear_solve_time_total": 101.62741597893182,
+      "attempt_linear_preconditioner_time_total": 5.227889651316218,
+      "attempt_linear_orthogonalization_time_total": 31.500168255064636,
       "pc_backend": "hypre",
       "preconditioner_matrix_source": "tangent",
       "preconditioner_matrix_policy": "current",
       "preconditioner_rebuild_policy": "every_newton",
       "preconditioner_rebuild_interval": 1,
-      "preconditioner_rebuild_count": 210,
+      "preconditioner_rebuild_count": 227,
       "preconditioner_reuse_count": 0,
       "preconditioner_age_max": 0,
-      "preconditioner_setup_time_last": 0.026430355850607157,
-      "preconditioner_setup_time_total": 5.155705273384228,
-      "preconditioner_apply_time_last": 0.019410360138863325,
-      "preconditioner_apply_time_total": 70.87548153684475,
+      "preconditioner_setup_time_last": 0.022162497974932194,
+      "preconditioner_setup_time_total": 5.763210718287155,
+      "preconditioner_apply_time_last": 0.0236262179678306,
+      "preconditioner_apply_time_total": 78.18766038375907,
       "preconditioner_last_rebuild_reason": "current_policy",
       "preconditioner_age_current": 0
     },
-    "continuation_total_wall_time": 146.53700848901644
+    "continuation_total_wall_time": 167.78069461800624
   },
   "predictor_diagnostics": {
     "attempt_initial_guess_displacement_diff_volume_integral_total": 0.0,
@@ -235,11 +243,11 @@
   "owned_tangent_pattern": {
     "stats_max": {
       "scatter_bytes": 0.0,
-      "row_slot_bytes": 8340412.0,
+      "row_slot_bytes": 8353037.0,
       "overlap_B_bytes": 0.0,
       "unique_B_bytes": 4.0,
-      "dphi_bytes": 7275840.0,
-      "avg_active_rows_per_overlap_element": 25.87914789020893,
+      "dphi_bytes": 7209840.0,
+      "avg_active_rows_per_overlap_element": 25.886475409836066,
       "max_active_rows_per_overlap_element": 30.0,
       "legacy_scatter_enabled": 0.0
     },
@@ -248,17 +256,17 @@
       "row_slot_bytes": 60465058.0,
       "overlap_B_bytes": 0.0,
       "unique_B_bytes": 32.0,
-      "dphi_bytes": 52219200.0,
-      "avg_active_rows_per_overlap_element": 194.66263154183628,
+      "dphi_bytes": 52311600.0,
+      "avg_active_rows_per_overlap_element": 194.1661282210231,
       "max_active_rows_per_overlap_element": 240.0,
       "legacy_scatter_enabled": 0.0
     },
     "timings_max": {
       "elastic_pattern_s": 0.0,
-      "overlap_geometry_s": 0.04913730104453862,
-      "unique_geometry_s": 0.00015545682981610298,
-      "structural_pattern_s": 0.2466227940749377,
-      "scatter_map_s": 0.43327683489769697,
+      "overlap_geometry_s": 0.07422832900192589,
+      "unique_geometry_s": 0.0001698050182312727,
+      "structural_pattern_s": 0.24592279200442135,
+      "scatter_map_s": 0.4501760429702699,
       "scatter_missing_entries": 0.0,
       "elastic_pattern_reused": 1.0
     }

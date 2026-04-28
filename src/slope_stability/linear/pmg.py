@@ -12,7 +12,8 @@ from scipy.sparse import coo_matrix, csr_matrix
 from ..core.simplex_lagrange import tetra_reference_nodes
 from ..fem.basis import local_basis_volume_3d
 from ..fem.distributed_elastic import find_overlap_partition
-from ..mesh import MaterialSpec, load_mesh_from_file, load_mesh_gmsh_waterlevels, reorder_mesh_nodes
+from ..mesh import MaterialSpec, reorder_mesh_nodes
+from ..problem_asset_runtime import build_mesh_for_path
 from ..problem_assets import load_material_rows_for_path
 from ..utils import owned_block_range, q_to_free_indices
 
@@ -27,7 +28,6 @@ class PMGLevel:
     elem: np.ndarray
     surf: np.ndarray
     q_mask: np.ndarray
-    dof_dim: int
     material_identifier: np.ndarray
     freedofs: np.ndarray
     total_to_free_orig: np.ndarray
@@ -36,6 +36,7 @@ class PMGLevel:
     owned_node_range: tuple[int, int]
     owned_total_range: tuple[int, int]
     owned_free_range: tuple[int, int]
+    dof_dim: int | None = None
 
     @property
     def dim(self) -> int:
@@ -43,6 +44,8 @@ class PMGLevel:
 
     @property
     def dof_per_node(self) -> int:
+        if self.dof_dim is None:
+            return int(self.coord.shape[0])
         return int(self.dof_dim)
 
     @property
@@ -51,7 +54,7 @@ class PMGLevel:
 
     @property
     def total_size(self) -> int:
-        return int(self.dof_dim * self.n_nodes)
+        return int(self.dof_per_node * self.n_nodes)
 
     @property
     def free_size(self) -> int:
@@ -303,6 +306,7 @@ def _build_level(
     *,
     mesh_path: Path,
     elem_type: str,
+    profile: str | None,
     node_ordering: str,
     reorder_parts: int | None,
     boundary_type: int,
@@ -310,11 +314,7 @@ def _build_level(
     scalar_dofs: bool = False,
     q_mask_override=None,
 ) -> PMGLevel:
-    mesh_path_lower = mesh_path.as_posix().lower()
-    if "waterlevels" in mesh_path_lower:
-        mesh = load_mesh_gmsh_waterlevels(mesh_path, elem_type=elem_type)
-    else:
-        mesh = load_mesh_from_file(mesh_path, boundary_type=boundary_type, elem_type=elem_type)
+    mesh = build_mesh_for_path(mesh_path, elem_type=elem_type, profile=profile, boundary_type=boundary_type)
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,
@@ -326,7 +326,7 @@ def _build_level(
     coord = np.asarray(reordered.coord, dtype=np.float64)
     elem = np.asarray(reordered.elem, dtype=np.int64)
     surf = np.asarray(reordered.surf, dtype=np.int64)
-    triangle_labels = getattr(mesh, "triangle_labels", None)
+    triangle_labels = np.asarray(mesh.boundary_labels, dtype=np.int64).ravel()
     if callable(q_mask_override):
         q_mask = np.asarray(q_mask_override(coord, surf, triangle_labels), dtype=bool)
     elif q_mask_override is not None:
@@ -335,7 +335,7 @@ def _build_level(
         q_mask = np.ones((1, int(coord.shape[1])), dtype=bool)
     else:
         q_mask = np.asarray(reordered.q_mask, dtype=bool)
-    material_identifier = np.asarray(mesh.material, dtype=np.int64).ravel()
+    material_identifier = np.asarray(mesh.material_id, dtype=np.int64).ravel()
 
     dof_dim = int(q_mask.shape[0]) if q_mask.ndim == 2 else int(coord.shape[0])
     freedofs_total = q_to_free_indices(q_mask)
@@ -656,6 +656,7 @@ def _cross_mesh_p1_to_p1_prolongation(
 def build_3d_pmg_hierarchy(
     mesh_path: str | Path,
     *,
+    profile: str | None = None,
     boundary_type: int = 0,
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
@@ -669,6 +670,7 @@ def build_3d_pmg_hierarchy(
     level_p1 = _build_level(
         mesh_path=mesh_path,
         elem_type="P1",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -677,6 +679,7 @@ def build_3d_pmg_hierarchy(
     level_p2 = _build_level(
         mesh_path=mesh_path,
         elem_type="P2",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -685,6 +688,7 @@ def build_3d_pmg_hierarchy(
     level_p4 = _build_level(
         mesh_path=mesh_path,
         elem_type="P4",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -718,6 +722,7 @@ def build_3d_same_mesh_pmg_hierarchy(
     mesh_path: str | Path,
     *,
     fine_elem_type: str = "P4",
+    profile: str | None = None,
     boundary_type: int = 0,
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
@@ -735,6 +740,7 @@ def build_3d_same_mesh_pmg_hierarchy(
     level_p1 = _build_level(
         mesh_path=mesh_path,
         elem_type="P1",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -743,6 +749,7 @@ def build_3d_same_mesh_pmg_hierarchy(
     level_p2 = _build_level(
         mesh_path=mesh_path,
         elem_type="P2",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -766,6 +773,7 @@ def build_3d_same_mesh_pmg_hierarchy(
     level_p4 = _build_level(
         mesh_path=mesh_path,
         elem_type="P4",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -790,6 +798,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
     mesh_path: str | Path,
     *,
     fine_elem_type: str = "P4",
+    profile: str | None = None,
     boundary_type: int = 0,
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
@@ -808,6 +817,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
     level_p1 = _build_level(
         mesh_path=mesh_path,
         elem_type="P1",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -818,6 +828,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
     level_p2 = _build_level(
         mesh_path=mesh_path,
         elem_type="P2",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -845,6 +856,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
     level_p4 = _build_level(
         mesh_path=mesh_path,
         elem_type="P4",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -879,6 +891,7 @@ def build_3d_mixed_pmg_hierarchy(
     coarse_mesh_path: str | Path,
     *,
     fine_elem_type: str = "P2",
+    profile: str | None = None,
     boundary_type: int = 0,
     node_ordering: str = "original",
     reorder_parts: int | None = None,
@@ -893,6 +906,7 @@ def build_3d_mixed_pmg_hierarchy(
     level_coarse = _build_level(
         mesh_path=coarse_mesh_path,
         elem_type="P1",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -901,6 +915,7 @@ def build_3d_mixed_pmg_hierarchy(
     level_mid = _build_level(
         mesh_path=fine_mesh_path,
         elem_type="P1",
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -909,6 +924,7 @@ def build_3d_mixed_pmg_hierarchy(
     level_fine = _build_level(
         mesh_path=fine_mesh_path,
         elem_type=str(fine_elem_type),
+        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
         boundary_type=boundary_type,
@@ -998,6 +1014,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
     fine_mesh_path: str | Path,
     coarse_mesh_path: str | Path,
     *,
+    profile: str | None = None,
     boundary_type: int = 0,
     node_ordering: str = "original",
     reorder_parts: int | None = None,
@@ -1014,6 +1031,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
         _build_level(
             mesh_path=coarse_mesh_path,
             elem_type="P1",
+            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
             boundary_type=boundary_type,
@@ -1022,6 +1040,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
         _build_level(
             mesh_path=fine_mesh_path,
             elem_type="P1",
+            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
             boundary_type=boundary_type,
@@ -1030,6 +1049,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
         _build_level(
             mesh_path=fine_mesh_path,
             elem_type="P2",
+            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
             boundary_type=boundary_type,
@@ -1038,6 +1058,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
         _build_level(
             mesh_path=fine_mesh_path,
             elem_type="P4",
+            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
             boundary_type=boundary_type,
@@ -1065,6 +1086,7 @@ def build_3d_mixed_pmg_chain_hierarchy(
     coarse_mesh_paths: list[str | Path] | tuple[str | Path, ...],
     *,
     fine_elem_type: str = "P2",
+    profile: str | None = None,
     boundary_type: int = 0,
     node_ordering: str = "original",
     reorder_parts: int | None = None,
@@ -1086,6 +1108,7 @@ def build_3d_mixed_pmg_chain_hierarchy(
             _build_level(
                 mesh_path=mesh_path,
                 elem_type="P1",
+                profile=profile,
                 node_ordering=node_ordering,
                 reorder_parts=reorder_parts,
                 boundary_type=boundary_type,
@@ -1096,6 +1119,7 @@ def build_3d_mixed_pmg_chain_hierarchy(
         _build_level(
             mesh_path=fine_mesh_path,
             elem_type=str(fine_elem_type),
+            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
             boundary_type=boundary_type,

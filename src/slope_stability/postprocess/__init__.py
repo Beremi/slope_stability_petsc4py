@@ -1,6 +1,6 @@
 """Post-processing helpers shared by exports, notebooks, and reports."""
 
-from .case_mesh import CaseMesh, rebuild_case_mesh
+from .case_mesh import CaseMesh, rebuild_case_mesh, validate_case_mesh_alignment
 from .field_exports import build_field_exports
 
-__all__ = ["CaseMesh", "build_field_exports", "rebuild_case_mesh"]
+__all__ = ["CaseMesh", "build_field_exports", "rebuild_case_mesh", "validate_case_mesh_alignment"]

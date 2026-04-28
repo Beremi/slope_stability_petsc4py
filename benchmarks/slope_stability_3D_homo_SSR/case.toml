@@ -7,15 +7,14 @@ suite = false
 
 [problem]
 name = "slope_stability_3D_homo_SSR"
-case = "3d_homo_ssr"
+asset = "3d_homo_slope"
+mesh_variant = "adaptive_family_a_l1.msh"
 analysis = "ssr"
 dimension = 3
 variant = "homo"
 elem_type = "P2"
 davis_type = "B"
 seepage = false
-mesh_path = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
-mesh_boundary_type = 0
 
 [execution]
 node_ordering = "block_metis"

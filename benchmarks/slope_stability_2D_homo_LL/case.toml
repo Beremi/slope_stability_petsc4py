@@ -7,21 +7,14 @@ suite = false
 
 [problem]
 name = "slope_stability_2D_homo_LL"
-case = "2d_homo_ssr"
+asset = "2d_homo_slope"
+mesh_variant = "h0.5.msh"
 analysis = "ll"
 dimension = 2
 variant = "homo"
 elem_type = "P2"
 davis_type = "B"
 seepage = false
-
-[geometry]
-h = 0.5
-x1 = 15.0
-x3 = 15.0
-y1 = 10.0
-y2 = 10.0
-beta_deg = 45.0
 
 [execution]
 node_ordering = "block_metis"
@@ -57,13 +50,3 @@ write_solution_vtu = true
 
 [notebook]
 family = "2d_continuation"
-
-[[materials]]
-name = "homogeneous_slope"
-c0 = 6.0
-phi = 45.0
-psi = 0.0
-young = 40000.0
-poisson = 0.30
-gamma_sat = 20.0
-gamma_unsat = 20.0

@@ -22,7 +22,7 @@ from slope_stability.cli.assembly_policy import use_lightweight_mpi_elastic_path
 from slope_stability.cli.elastic_initial_guess import solve_elastic_initial_guess
 from slope_stability.core.elements import normalize_elem_type, validate_supported_elem_type
 from slope_stability.cli.progress import make_progress_logger
-from slope_stability.mesh import load_mesh_from_file, heterogenous_materials, MaterialSpec, reorder_mesh_nodes
+from slope_stability.mesh import heterogenous_materials, MaterialSpec, reorder_mesh_nodes
 from slope_stability.fem import (
     assemble_owned_elastic_rows_for_comm,
     assemble_strain_operator,
@@ -43,6 +43,7 @@ from slope_stability.linear.pmg import (
 from slope_stability.constitutive import ConstitutiveOperator
 from slope_stability.continuation import indirect as indirect_module
 from slope_stability.continuation import LL_indirect_continuation, SSR_indirect_continuation
+from slope_stability.problem_asset_runtime import build_mesh_for_path
 from slope_stability.problem_assets import load_material_rows_for_path
 from slope_stability.utils import (
     flatten_field,
@@ -50,6 +51,7 @@ from slope_stability.utils import (
     matvec_to_numpy,
     owned_block_range,
     q_to_free_indices,
+    release_petsc_aij_matrix,
     to_petsc_aij_matrix,
 )
 
@@ -473,11 +475,47 @@ def _save_plots(
         plt.close(fig)
 
 
+def _release_rank_local_resources(*, solvers: tuple[object, ...], const_builder, mats: tuple[object, ...]) -> None:
+    for solver in solvers:
+        if solver is None:
+            continue
+        try:
+            close_solver = getattr(solver, "close", None)
+            if callable(close_solver):
+                close_solver()
+            else:
+                solver.release_iteration_resources()
+        except Exception:
+            pass
+    if const_builder is not None:
+        try:
+            const_builder.release_petsc_caches()
+        except Exception:
+            pass
+    if PETSc is not None:
+        for mat in mats:
+            if isinstance(mat, PETSc.Mat):
+                try:
+                    release_petsc_aij_matrix(mat)
+                    mat.destroy()
+                except Exception:
+                    pass
+        cleanup = getattr(PETSc, "garbage_cleanup", None)
+        if callable(cleanup):
+            try:
+                cleanup(PETSc.COMM_WORLD)
+            except TypeError:
+                cleanup()
+            except Exception:
+                pass
+
+
 def run_capture(
     output_dir: Path,
     *,
     analysis: str = "ssr",
     mesh_path: Path | None = None,
+    profile: str | None = None,
     mesh_boundary_type: int = 0,
     elem_type: str = "P2",
     quadrature_rule: int | None = None,
@@ -610,7 +648,7 @@ def run_capture(
     elem_type = validate_supported_elem_type(3, elem_type)
 
     if mesh_path is None:
-        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh"
+        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh"
     mesh_path = Path(mesh_path)
 
     solver_type_upper = str(solver_type).upper()
@@ -676,6 +714,7 @@ def run_capture(
                 pmg_hierarchy = build_3d_same_mesh_pmg_hierarchy(
                     mesh_path,
                     fine_elem_type=elem_type,
+                    profile=profile,
                     boundary_type=int(mesh_boundary_type),
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
@@ -685,6 +724,7 @@ def run_capture(
             else:
                 pmg_hierarchy = build_3d_pmg_hierarchy(
                     mesh_path,
+                    profile=profile,
                     boundary_type=int(mesh_boundary_type),
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
@@ -698,6 +738,7 @@ def run_capture(
                 pmg_hierarchy = build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
                     mesh_path,
                     pmg_coarse_mesh_path,
+                    profile=profile,
                     boundary_type=int(mesh_boundary_type),
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
@@ -709,6 +750,7 @@ def run_capture(
                     mesh_path,
                     pmg_coarse_mesh_path,
                     fine_elem_type=elem_type,
+                    profile=profile,
                     boundary_type=int(mesh_boundary_type),
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
@@ -721,11 +763,7 @@ def run_capture(
         q_mask = pmg_hierarchy.fine_level.q_mask.astype(bool)
         material_identifier = pmg_hierarchy.fine_level.material_identifier.astype(np.int64).ravel()
     else:
-        mesh = load_mesh_from_file(mesh_path, boundary_type=int(mesh_boundary_type), elem_type=elem_type)
-        if mesh.elem_type is not None and normalize_elem_type(mesh.elem_type) != elem_type:
-            raise ValueError(
-                f"Requested elem_type {elem_type!r}, but mesh {mesh_path.name} contains {mesh.elem_type!r} elements."
-            )
+        mesh = build_mesh_for_path(mesh_path, elem_type=elem_type, profile=profile, boundary_type=int(mesh_boundary_type))
         reordered = reorder_mesh_nodes(
             mesh.coord,
             mesh.elem,
@@ -739,7 +777,7 @@ def run_capture(
         elem = reordered.elem.astype(np.int64)
         surf = reordered.surf.astype(np.int64)
         q_mask = reordered.q_mask.astype(bool)
-        material_identifier = mesh.material.astype(np.int64).ravel()
+        material_identifier = mesh.material_id.astype(np.int64).ravel()
 
     n_q = int(quadrature_volume_3d(elem_type, quadrature_rule)[0].shape[1])
     n_int = int(elem.shape[1] * n_q)
@@ -1473,6 +1511,13 @@ def run_capture(
         } if bddc_pattern is not None else None,
     }
 
+    _release_rank_local_resources(
+        solvers=(linear_system_solver,),
+        const_builder=const_builder,
+        mats=(K_elast,),
+    )
+    mpi_comm.Barrier()
+
     if rank == 0:
         np.savez_compressed(
             data_dir / "petsc_run.npz",
@@ -1488,21 +1533,6 @@ def run_capture(
             },
         )
         (data_dir / "run_info.json").write_text(json.dumps(run_payload, indent=2))
-
-        # Release solver-side PETSc objects before rank-0 postprocessing.
-        # This avoids carrying multigrid/HYPRE state through plotting/export.
-        try:
-            close_solver = getattr(linear_system_solver, "close", None)
-            if callable(close_solver):
-                close_solver()
-            else:
-                linear_system_solver.release_iteration_resources()
-        except Exception:
-            pass
-        try:
-            const_builder.release_petsc_caches()
-        except Exception:
-            pass
 
         _ensure_dir(out_dir / "plots")
         plot_B = B
@@ -1526,6 +1556,8 @@ def run_capture(
                 else r"Indirect continuation: $\omega$ vs $\lambda$"
             ),
         )
+
+    mpi_comm.Barrier()
 
     return {
         "output": str(out_dir),

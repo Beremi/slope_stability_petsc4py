@@ -1,13 +1,14 @@
 {
   "run_info": {
-    "timestamp": "2026-04-04T05:39:30",
-    "runtime_seconds": 1251.039477549959,
+    "timestamp": "2026-04-23T13:21:28",
+    "runtime_seconds": 4489.2293675019755,
     "mpi_size": 8,
     "mesh_nodes": 80226,
     "mesh_elements": 55895,
     "unknowns": 231201,
     "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
-    "step_count": 34
+    "step_count": 45,
+    "stop_reason": ""
   },
   "params": {
     "lambda_init": 1.0,
@@ -15,11 +16,15 @@
     "d_lambda_min": 1e-05,
     "d_lambda_diff_scaled_min": 0.005,
     "omega_max_stop": 340700000.0,
+    "continuation_predictor": "secant",
+    "omega_step_controller": "legacy",
     "step_max": 100,
     "it_newt_max": 50,
     "it_damp_max": 10,
     "tol": 0.0001,
     "r_min": 0.0001,
+    "newton_stopping_criterion": "relative_residual",
+    "newton_stopping_tol": null,
     "elem_type": "P2",
     "davis_type": "B",
     "material_rows": [
@@ -61,19 +66,37 @@
       ]
     ],
     "node_ordering": "block_metis",
+    "mesh_boundary_type": 0,
     "mpi_distribute_by_nodes": true,
+    "pc_backend": "hypre",
+    "pmg_coarse_mesh_path": null,
+    "pmg_fine_hierarchy_mode": "default",
     "pc_hypre_coarsen_type": "HMIS",
     "pc_hypre_interp_type": "ext+i",
     "pc_hypre_strong_threshold": null,
+    "pc_hypre_boomeramg_max_iter": 1,
+    "pc_hypre_P_max": null,
+    "pc_hypre_agg_nl": null,
+    "pc_hypre_nongalerkin_tol": null,
     "recycle_preconditioner": true,
     "constitutive_mode": "overlap",
     "tangent_kernel": "rows",
-    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_ssr_comsol/comsol_mesh.msh",
+    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_transition/transition_default.msh",
+    "boundary_mode": "canonical",
     "seepage_linear_tolerance": 1e-10,
-    "seepage_linear_max_iter": 500
+    "seepage_linear_max_iter": 500,
+    "seepage_pc_backend": "hypre",
+    "water_unit_weight": 9.81,
+    "conductivity": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "petsc_opt": []
   },
   "mesh": {
-    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_ssr_comsol/comsol_mesh.msh",
+    "mesh_file": "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_transition/transition_default.msh",
     "coord_shape": [
       3,
       80226
@@ -89,46 +112,46 @@
   },
   "timings": {
     "constitutive": {
-      "reduction": 8.872567577054724,
-      "stress": 17.085105231730267,
-      "stress_tangent": 8.094110202975571,
-      "build_F": 19.737512769177556,
+      "reduction": 121.75512906373478,
+      "stress": 280.09447344375076,
+      "stress_tangent": 64.6005303512211,
+      "build_F": 226.88836208445719,
       "build_F_K_tangent": 0.0,
-      "build_tangent_local": 39.43286826880649,
-      "local_strain": 10.363289170200005,
-      "local_constitutive": 15.01474716886878,
+      "build_tangent_local": 315.273687747831,
+      "local_strain": 138.8931653155596,
+      "local_constitutive": 210.16846361593343,
       "local_constitutive_comm": 0.0,
-      "local_force_assembly": 19.734391445526853,
+      "local_force_assembly": 226.85836371220648,
       "local_force_gather": 0.0,
       "potential": 0.0
     },
     "linear": {
-      "init_linear_iterations": 27,
-      "init_linear_solve_time": 3.1815167882014066,
-      "init_linear_preconditioner_time": 1.9901446637231857,
-      "init_linear_orthogonalization_time": 0.2997538740746677,
-      "attempt_linear_iterations_total": 7702,
-      "attempt_linear_solve_time_total": 905.9691976692993,
-      "attempt_linear_preconditioner_time_total": 34.220154916867614,
-      "attempt_linear_orthogonalization_time_total": 176.14808422559872
+      "init_linear_iterations": 86,
+      "init_linear_solve_time": 11.779098150436766,
+      "init_linear_preconditioner_time": 11.103985439636745,
+      "init_linear_orthogonalization_time": 50.27095484005986,
+      "attempt_linear_iterations_total": 4571,
+      "attempt_linear_solve_time_total": 610.6311982928892,
+      "attempt_linear_preconditioner_time_total": 274.00597653212026,
+      "attempt_linear_orthogonalization_time_total": 2159.941901426355
     },
-    "continuation_total_wall_time": 1251.03844126896,
-    "seepage_runtime": 38.93524841940962
+    "continuation_total_wall_time": 4489.228526724037,
+    "seepage_runtime": 8.46012259204872
   },
   "seepage": {
     "criterion": [
-      0.06706092631027855,
-      0.07147087610994109,
-      0.05956516279243278,
-      0.039202436104852904,
-      0.012053701479002452,
-      0.00927673148237607,
-      0.0003360754933382209,
-      4.00581048767303e-06,
-      1.315569225322678e-09,
-      5.0166208979915916e-17
+      0.06688794375615396,
+      0.07191830015462265,
+      0.059387175972467045,
+      0.03930525871396292,
+      0.011872789532732625,
+      0.009214144950408641,
+      0.0003365547003500479,
+      3.969387940099073e-06,
+      2.2432155777401997e-15
     ],
-    "iterations": 10,
-    "converged": true
+    "iterations": 9,
+    "converged": true,
+    "boundary_mode": "canonical"
   }
 }

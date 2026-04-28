@@ -8,7 +8,7 @@ from typing import Any
 import tomllib
 
 from .elements import validate_supported_elem_type
-from ..problem_assets import load_material_rows_for_path
+from ..problem_assets import load_material_rows_for_asset, load_material_rows_for_path
 
 
 TomlValue = str | int | float | bool | list[Any] | dict[str, Any]
@@ -41,15 +41,18 @@ class MaterialConfig:
 @dataclass(frozen=True)
 class ProblemConfig:
     name: str
-    case: str
+    case: str = ""
     analysis: str = "ssr"
     dimension: int = 3
     variant: str = "hetero"
     elem_type: str = "P2"
     davis_type: str = "B"
     seepage: bool = False
+    asset: str | None = None
+    mesh_variant: str | None = None
+    profile: str | None = None
     mesh_path: Path | None = None
-    mesh_boundary_type: int = 0
+    mesh_boundary_type: int | None = None
 
 
 @dataclass(frozen=True)
@@ -215,8 +218,9 @@ class RunCaseConfig:
             "alg5",
             "armijo_residual",
         }
-        if not self.problem.case:
-            raise ValueError("[problem].case must be set.")
+        mesh_dir = self.case_data.get("mesh_dir")
+        if not self.problem.asset and self.problem.mesh_path is None and mesh_dir is None:
+            raise ValueError("[problem].asset must be set.")
         if self.problem.analysis.lower() not in {"ssr", "ll", "seepage"}:
             raise ValueError(f"Unsupported analysis {self.problem.analysis!r}.")
         if str(self.newton.stopping_criterion).strip().lower() not in valid_stopping_criteria:
@@ -239,6 +243,13 @@ class RunCaseConfig:
     def material_rows(self) -> list[list[float]]:
         if self.materials:
             return [m.as_row() for m in self.materials]
+        if self.problem.asset:
+            rows = load_material_rows_for_asset(self.problem.asset)
+            return [] if rows is None else rows
+        mesh_dir = self.case_data.get("mesh_dir")
+        if mesh_dir is not None:
+            rows = load_material_rows_for_path(Path(mesh_dir))
+            return [] if rows is None else rows
         if self.problem.mesh_path is None:
             return []
         rows = load_material_rows_for_path(self.problem.mesh_path)
@@ -312,8 +323,13 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         elem_type=str(problem_data.get("elem_type", "P2")),
         davis_type=str(problem_data.get("davis_type", "B")),
         seepage=bool(problem_data.get("seepage", False)),
+        asset=None if problem_data.get("asset") is None else str(problem_data.get("asset")),
+        mesh_variant=None if problem_data.get("mesh_variant") is None else str(problem_data.get("mesh_variant")),
+        profile=None if problem_data.get("profile") is None else str(problem_data.get("profile")),
         mesh_path=None if mesh_path is None else _resolve_path(config_path, str(mesh_path)),
-        mesh_boundary_type=int(problem_data.get("mesh_boundary_type", 0)),
+        mesh_boundary_type=(
+            None if problem_data.get("mesh_boundary_type") is None else int(problem_data.get("mesh_boundary_type"))
+        ),
     )
     execution = ExecutionConfig(
         node_ordering=str(execution_data.get("node_ordering", "block_metis")),

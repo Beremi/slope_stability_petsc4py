@@ -30,18 +30,16 @@ from slope_stability.linear.pmg import (
     build_3d_same_mesh_scalar_pmg_hierarchy,
     validate_pmg_fine_level_alignment,
 )
-from slope_stability.mesh import (
-    MaterialSpec,
-    heterogenous_materials,
-    load_mesh_gmsh_waterlevels,
-    load_mesh_p2_comsol,
-    reorder_mesh_nodes,
-    seepage_boundary_3d_hetero,
-    seepage_boundary_3d_hetero_comsol,
+from slope_stability.mesh import MaterialSpec, heterogenous_materials, reorder_mesh_nodes
+from slope_stability.problem_asset_runtime import build_mesh_for_path
+from slope_stability.problem_assets import (
+    build_seepage_boundary_for_path,
+    load_hydraulic_conductivity_for_path,
+    load_material_rows_for_path,
+    load_water_unit_weight_for_path,
 )
-from slope_stability.problem_assets import load_material_rows_for_path
 from slope_stability.seepage import heter_conduct, seepage_problem_3d
-from slope_stability.utils import local_csr_to_petsc_aij_matrix, owned_block_range
+from slope_stability.utils import local_csr_to_petsc_aij_matrix, owned_block_range, release_petsc_aij_matrix
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -106,60 +104,57 @@ def _stats_value_to_npz(value):
     return np.asarray(value)
 
 
-def _default_material_rows(boundary_mode: str) -> list[list[float]]:
-    if boundary_mode == "comsol":
-        return [
-            [15.0, 30.0, 0.0, 10000.0, 0.33, 19.0, 19.0],
-            [15.0, 38.0, 0.0, 50000.0, 0.30, 22.0, 22.0],
-            [10.0, 35.0, 0.0, 50000.0, 0.30, 21.0, 21.0],
-            [18.0, 32.0, 0.0, 20000.0, 0.33, 20.0, 20.0],
-        ]
-    return [
-        [15.0, 38.0, 0.0, 50000.0, 0.30, 22.0, 22.0],
-        [10.0, 35.0, 0.0, 50000.0, 0.30, 21.0, 21.0],
-        [18.0, 32.0, 0.0, 20000.0, 0.33, 20.0, 20.0],
-        [15.0, 30.0, 0.0, 10000.0, 0.33, 19.0, 19.0],
-    ]
+def _release_rank_local_resources(*, solvers: tuple[object, ...], const_builder, mats: tuple[object, ...]) -> None:
+    for solver in solvers:
+        if solver is None:
+            continue
+        try:
+            close_solver = getattr(solver, "close", None)
+            if callable(close_solver):
+                close_solver()
+            else:
+                solver.release_iteration_resources()
+        except Exception:
+            pass
+    if const_builder is not None:
+        try:
+            const_builder.release_petsc_caches()
+        except Exception:
+            pass
+    if PETSc is not None:
+        for mat in mats:
+            if isinstance(mat, PETSc.Mat):
+                try:
+                    release_petsc_aij_matrix(mat)
+                    mat.destroy()
+                except Exception:
+                    pass
+        cleanup = getattr(PETSc, "garbage_cleanup", None)
+        if callable(cleanup):
+            try:
+                cleanup(PETSc.COMM_WORLD)
+            except TypeError:
+                cleanup()
+            except Exception:
+                pass
 
 
 def _resolve_boundary_mode(mesh_path: Path, boundary_mode: str) -> str:
     raw = str(boundary_mode).strip().lower()
     if raw and raw != "auto":
         return raw
-    if "comsol" in mesh_path.as_posix().lower():
-        return "comsol"
-    return "waterlevels"
+    return "canonical"
 
 
 def _load_labeled_mesh(
     mesh_path: Path,
     *,
-    boundary_mode: str,
     elem_type: str,
+    profile: str | None,
     node_ordering: str,
     partition_count: int | None,
 ):
-    if boundary_mode == "comsol":
-        mesh = load_mesh_p2_comsol(mesh_path, boundary_type=1)
-        reordered = reorder_mesh_nodes(
-            mesh.coord,
-            mesh.elem,
-            mesh.surf,
-            mesh.q_mask,
-            strategy=node_ordering,
-            n_parts=partition_count,
-        )
-        return {
-            "coord": np.asarray(reordered.coord, dtype=np.float64),
-            "elem": np.asarray(reordered.elem, dtype=np.int64),
-            "surf": np.asarray(reordered.surf, dtype=np.int64),
-            "q_mask": np.asarray(reordered.q_mask, dtype=bool),
-            "material_identifier": np.asarray(mesh.material, dtype=np.int64).ravel(),
-            "triangle_labels": np.asarray(mesh.triangle_labels, dtype=np.int64).ravel(),
-            "mesh_boundary_type": 1,
-        }
-
-    mesh = load_mesh_gmsh_waterlevels(mesh_path, elem_type=elem_type)
+    mesh = build_mesh_for_path(mesh_path, elem_type=elem_type, profile=profile)
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,
@@ -173,8 +168,8 @@ def _load_labeled_mesh(
         "elem": np.asarray(reordered.elem, dtype=np.int64),
         "surf": np.asarray(reordered.surf, dtype=np.int64),
         "q_mask": np.asarray(reordered.q_mask, dtype=bool),
-        "material_identifier": np.asarray(mesh.material, dtype=np.int64).ravel(),
-        "triangle_labels": np.asarray(mesh.triangle_labels, dtype=np.int64).ravel(),
+        "material_identifier": np.asarray(mesh.material_id, dtype=np.int64).ravel(),
+        "triangle_labels": np.asarray(mesh.boundary_labels, dtype=np.int64).ravel(),
         "mesh_boundary_type": 0,
     }
 
@@ -183,6 +178,7 @@ def run_capture(
     output_dir: Path,
     *,
     mesh_path: Path | None = None,
+    profile: str | None = None,
     boundary_mode: str = "auto",
     elem_type: str = "P2",
     node_ordering: str = "block_metis",
@@ -224,7 +220,7 @@ def run_capture(
     seepage_pc_backend: str = "hypre",
     seepage_max_deflation_basis_vectors: int = 48,
     max_deflation_basis_vectors: int = 48,
-    water_unit_weight: float = 9.81,
+    water_unit_weight: float | None = None,
     conductivity: list[float] | np.ndarray | None = None,
 ) -> dict:
     rank = int(PETSc.COMM_WORLD.getRank())
@@ -236,7 +232,7 @@ def run_capture(
         progress_callback = _make_progress_logger(data_dir)
 
     if mesh_path is None:
-        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_seepage" / "slope_with_waterlevels_concave_L2.msh"
+        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_seepage" / "concave_family_b.msh"
     mesh_path = Path(mesh_path)
     run_t0 = perf_counter()
     _stage_log(rank, "start", run_t0)
@@ -264,7 +260,7 @@ def run_capture(
     _stage_log(rank, "resolved_boundary_mode", run_t0)
     material_rows = load_material_rows_for_path(mesh_path)
     if material_rows is None:
-        material_rows = _default_material_rows(boundary_mode_name)
+        raise ValueError(f"No material rows found in mesh-family definition for {mesh_path}.")
     mat_props = np.asarray(material_rows, dtype=np.float64)
     materials = [
         MaterialSpec(
@@ -282,8 +278,8 @@ def run_capture(
     partition_count = int(PETSc.COMM_WORLD.getSize()) if str(node_ordering).lower() == "block_metis" else None
     labeled = _load_labeled_mesh(
         mesh_path,
-        boundary_mode=boundary_mode_name,
         elem_type=elem_type,
+        profile=profile,
         node_ordering=node_ordering,
         partition_count=partition_count,
     )
@@ -302,6 +298,7 @@ def run_capture(
             pmg_hierarchy = build_3d_same_mesh_pmg_hierarchy(
                 mesh_path,
                 fine_elem_type=elem_type,
+                profile=profile,
                 boundary_type=mesh_boundary_type,
                 node_ordering=node_ordering,
                 reorder_parts=partition_count,
@@ -313,6 +310,7 @@ def run_capture(
                 mesh_path,
                 pmg_coarse_mesh_path,
                 fine_elem_type=elem_type,
+                profile=profile,
                 boundary_type=mesh_boundary_type,
                 node_ordering=node_ordering,
                 reorder_parts=partition_count,
@@ -338,38 +336,22 @@ def run_capture(
         _stage_log(rank, "built_pmg_hierarchy", run_t0)
 
     n_q = int(quadrature_volume_3d(elem_type)[0].shape[1])
-    grho = float(water_unit_weight)
-    if boundary_mode_name == "comsol":
-        seepage_material_identifier = np.zeros(elem.shape[1], dtype=np.int64)
-        required_conductivity_count = int(seepage_material_identifier.max()) + 1 if seepage_material_identifier.size else 1
-        conductivity_values = np.asarray(
-            np.ones(required_conductivity_count, dtype=np.float64) if conductivity is None else conductivity,
-            dtype=np.float64,
-        ).ravel()
-        if conductivity_values.size == 1 and required_conductivity_count > 1:
-            conductivity_values = np.repeat(conductivity_values, required_conductivity_count)
-        if conductivity_values.size < required_conductivity_count:
-            raise ValueError(
-                f"Conductivity vector has {conductivity_values.size} entries, "
-                f"but seepage material ids require {required_conductivity_count}."
-            )
-        conduct0 = heter_conduct(seepage_material_identifier, n_q, conductivity_values)
-        q_w, pw_d = seepage_boundary_3d_hetero_comsol(coord, surf, triangle_labels, grho)
-    else:
-        required_conductivity_count = int(material_identifier.max()) + 1 if material_identifier.size else 1
-        conductivity_values = np.asarray(
-            np.ones(required_conductivity_count, dtype=np.float64) if conductivity is None else conductivity,
-            dtype=np.float64,
-        ).ravel()
-        if conductivity_values.size == 1 and required_conductivity_count > 1:
-            conductivity_values = np.repeat(conductivity_values, required_conductivity_count)
-        if conductivity_values.size < required_conductivity_count:
-            raise ValueError(
-                f"Conductivity vector has {conductivity_values.size} entries, "
-                f"but seepage material ids require {required_conductivity_count}."
-            )
-        conduct0 = heter_conduct(material_identifier, n_q, conductivity_values)
-        q_w, pw_d = seepage_boundary_3d_hetero(coord, surf, triangle_labels, grho)
+    resolved_grho = load_water_unit_weight_for_path(mesh_path, required=True)
+    grho = float(resolved_grho if water_unit_weight is None else water_unit_weight)
+    conductivity_values = np.asarray(
+        load_hydraulic_conductivity_for_path(mesh_path, required=True) if conductivity is None else conductivity,
+        dtype=np.float64,
+    ).ravel()
+    required_conductivity_count = int(material_identifier.max()) + 1 if material_identifier.size else 1
+    if conductivity_values.size == 1 and required_conductivity_count > 1:
+        conductivity_values = np.repeat(conductivity_values, required_conductivity_count)
+    if conductivity_values.size < required_conductivity_count:
+        raise ValueError(
+            f"Conductivity vector has {conductivity_values.size} entries, "
+            f"but seepage material ids require {required_conductivity_count}."
+        )
+    conduct0 = heter_conduct(material_identifier, n_q, conductivity_values)
+    q_w, pw_d = build_seepage_boundary_for_path(mesh_path, coord, surf, triangle_labels, grho=grho)
 
     seepage_solver = None
     if rank == 0:
@@ -381,31 +363,26 @@ def run_capture(
             "pc_hypre_boomeramg_coarsen_type": pc_hypre_coarsen_type,
             "pc_hypre_boomeramg_interp_type": pc_hypre_interp_type,
             "max_deflation_basis_vectors": int(seepage_max_deflation_basis_vectors),
+            "null_space": np.empty((0, 0), dtype=np.float64),
         }
         seepage_pc_backend_norm = str(seepage_pc_backend or "hypre").strip().lower()
         if seepage_pc_backend_norm in {"pmg", "pmg_shell"}:
             def _seepage_q_mask_builder(level_coord, level_surf, level_triangle_labels):
                 if level_triangle_labels is None:
                     raise ValueError("Seepage PMG hierarchy requires triangle labels for boundary detection.")
-                if boundary_mode_name == "comsol":
-                    level_q_w, _ = seepage_boundary_3d_hetero_comsol(
-                        level_coord,
-                        level_surf,
-                        level_triangle_labels,
-                        grho,
-                    )
-                else:
-                    level_q_w, _ = seepage_boundary_3d_hetero(
-                        level_coord,
-                        level_surf,
-                        level_triangle_labels,
-                        grho,
-                    )
+                level_q_w, _ = build_seepage_boundary_for_path(
+                    mesh_path,
+                    level_coord,
+                    level_surf,
+                    level_triangle_labels,
+                    grho=grho,
+                )
                 return np.asarray(level_q_w, dtype=bool).reshape(1, -1)
 
             seepage_pmg_hierarchy = build_3d_same_mesh_scalar_pmg_hierarchy(
                 mesh_path,
                 fine_elem_type=elem_type,
+                profile=profile,
                 boundary_type=mesh_boundary_type,
                 node_ordering=node_ordering,
                 reorder_parts=partition_count,
@@ -735,6 +712,13 @@ def run_capture(
         },
     }
 
+    _release_rank_local_resources(
+        solvers=(linear_system_solver, seepage_solver),
+        const_builder=const_builder,
+        mats=(K_elast,),
+    )
+    mpi_comm.Barrier()
+
     if rank == 0:
         np.savez_compressed(
             data_dir / "petsc_run.npz",
@@ -749,18 +733,8 @@ def run_capture(
             **{"stats_" + key: _stats_value_to_npz(value) for key, value in stats.items() if key != "step_U"},
         )
         (data_dir / "run_info.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
-        try:
-            linear_system_solver.release_iteration_resources()
-        except Exception:
-            pass
-        try:
-            seepage_solver.release_iteration_resources()
-        except Exception:
-            pass
-        try:
-            const_builder.release_petsc_caches()
-        except Exception:
-            pass
+
+    mpi_comm.Barrier()
 
     return {
         "output": str(out_dir),
@@ -833,7 +807,7 @@ def main() -> None:
     parser.add_argument("--seepage_pc_backend", type=str, default="hypre")
     parser.add_argument("--seepage_max_deflation_basis_vectors", type=int, default=48)
     parser.add_argument("--max_deflation_basis_vectors", type=int, default=48)
-    parser.add_argument("--water_unit_weight", type=float, default=9.81)
+    parser.add_argument("--water_unit_weight", type=float, default=None)
     parser.add_argument("--conductivity", type=float, action="append", default=None)
     args = parser.parse_args()
 

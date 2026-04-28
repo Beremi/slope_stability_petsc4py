@@ -7,14 +7,14 @@ suite = false
 
 [problem]
 name = "slope_stability_3D_hetero_SSR_default"
-case = "3d_hetero_ssr"
+asset = "3d_hetero_slope"
+mesh_variant = "adaptive_family_a_l1.msh"
 analysis = "ssr"
 dimension = 3
 variant = "hetero"
 elem_type = "P4"
 davis_type = "B"
 seepage = false
-mesh_path = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
 
 [execution]
 node_ordering = "block_metis"

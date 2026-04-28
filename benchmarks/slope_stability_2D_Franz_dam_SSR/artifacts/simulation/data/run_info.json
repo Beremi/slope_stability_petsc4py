@@ -1,7 +1,7 @@
 {
   "run_info": {
-    "timestamp": "2026-04-04T05:03:44",
-    "runtime_seconds": 289.69466441799887,
+    "timestamp": "2026-04-23T13:26:45",
+    "runtime_seconds": 276.76972695597215,
     "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     "analysis": "ssr",
     "continuation_method": "indirect",
@@ -119,6 +119,8 @@
       5e-05,
       0.0005
     ],
+    "asset_name": "2d_franz_dam",
+    "mesh_variant": "default.msh",
     "node_ordering": "none",
     "lambda_init": 0.7,
     "d_lambda_init": 0.1,
@@ -160,16 +162,16 @@
   },
   "timings": {
     "constitutive": {
-      "reduction": 5.366854943102226,
-      "stress": 39.18434628774412,
-      "stress_tangent": 8.862475024536252,
-      "build_F": 3.230396398343146,
+      "reduction": 4.633274494379293,
+      "stress": 33.40282483067131,
+      "stress_tangent": 8.696140530810226,
+      "build_F": 2.81025414733449,
       "build_F_K_tangent": 0.0,
-      "build_tangent_local": 86.30457100830972,
-      "local_strain": 1.584659158717841,
-      "local_constitutive": 45.51990474388003,
+      "build_tangent_local": 86.06609675625805,
+      "local_strain": 1.3727795126033016,
+      "local_constitutive": 39.63979735574685,
       "local_constitutive_comm": 0.0,
-      "local_force_assembly": 3.2276887965854257,
+      "local_force_assembly": 2.8078013248741627,
       "local_force_gather": 0.0,
       "potential": 0.0
     },
@@ -178,11 +180,11 @@
       "init_linear_solve_time": 0.0,
       "init_linear_preconditioner_time": 0.0,
       "init_linear_orthogonalization_time": 0.0,
-      "attempt_linear_iterations_total": 24820,
-      "attempt_linear_solve_time_total": 131.87703562737443,
-      "attempt_linear_preconditioner_time_total": 0.5966656072996557,
-      "attempt_linear_orthogonalization_time_total": 8.47658497444354
+      "attempt_linear_iterations_total": 23855,
+      "attempt_linear_solve_time_total": 125.95259352168068,
+      "attempt_linear_preconditioner_time_total": 0.5955659516621381,
+      "attempt_linear_orthogonalization_time_total": 8.575674659979995
     },
-    "continuation_total_wall_time": 289.69429945992306
+    "continuation_total_wall_time": 276.76927995099686
   }
 }

@@ -1,16 +1,36 @@
 # Mesh Assets
 
-This directory is a temporary problem-family sorting layer.
+Each subdirectory in `meshes/` is a canonical problem asset.
 
-Current intent:
+Canonical runtime contract:
 
-- keep one canonical mesh file per mesh variant
-- keep material and boundary-condition tagging in the mesh whenever practical
-- keep extra derived setup in Python `definition.py` files
+- `meshes/<asset>/definition.py`
+- one or more canonical Gmsh `MSH 4.1` files at `meshes/<asset>/*.msh`
+- optional legacy inputs and rerun helpers under `meshes/<asset>/legacy/`
 
-Each subfolder may contain:
+Runtime rules:
 
-- one or more mesh files
-- `definition.py` with temporary metadata and setup hints
+- runtime problem definitions are loaded only from `definition.py`
+- runtime geometry/topology comes only from canonical `.msh` variants
+- `definition.py` may declare only variants, materials, region-to-material assignment, mechanics BCs, seepage BCs, and named profiles
+- runtime code outside `meshes/` is asset-agnostic; it does not contain case-specific geometry or BC logic
 
-Longer term, this should converge toward a more uniform mesh-plus-metadata contract.
+Canonical mesh naming:
+
+- volume regions: `region:<name>`
+- support boundaries: `boundary:<name>`
+- optional node supports: `nodeset:<name>`
+- optional curved geometry patches: `boundary_geom:<name>`
+
+Canonical mesh rules:
+
+- 2D volume cells are linear `triangle`
+- 3D volume cells are linear `tetra`
+- support boundaries are linear `line` in 2D and linear `triangle` in 3D
+- higher-order solver meshes are generated on demand from the canonical linear mesh
+
+Migration notes:
+
+- old text bundles, generated geometry inputs, and pre-canonical `.msh` files are kept under each asset’s `legacy/source/`
+- rerun scripts live under each asset’s `legacy/`
+- the converter index is tracked in [CONVERTERS.md](CONVERTERS.md)

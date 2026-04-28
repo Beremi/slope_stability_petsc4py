@@ -11,13 +11,13 @@ family = "3d_seepage"
 
 [problem]
 name = "run_3D_hetero_seepage_capture"
-case = "3d_hetero_seepage"
+asset = "3d_hetero_seepage"
+mesh_variant = "concave_family_b.msh"
 analysis = "seepage"
 dimension = 3
 variant = "hetero"
 elem_type = "P2"
 seepage = true
-mesh_path = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
 
 [linear_solver]
 solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"
@@ -29,8 +29,6 @@ pc_hypre_interp_type = "ext+i"
 [seepage]
 linear_tolerance = 1e-10
 linear_max_iter = 500
-water_unit_weight = 9.81
-conductivity = [1.0, 1.0, 1.0, 1.0]
 
 [export]
 write_custom_debug_bundle = true

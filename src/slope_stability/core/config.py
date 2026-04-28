@@ -35,12 +35,12 @@ class MaterialConfig:
 
 @dataclass(frozen=True)
 class Problem3DConfig:
-    name: str = "3d_hetero_ssr"
+    name: str = "3d_hetero_slope"
     variant: str = "hetero"
     elem_type: str = "P2"
     davis_type: str = "B"
     seepage: bool = False
-    mesh_path: Path = Path("meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh")
+    mesh_path: Path = Path("meshes/3d_hetero_slope/adaptive_family_a_l1.msh")
     materials: tuple[MaterialConfig, ...] = ()
 
 
@@ -293,12 +293,12 @@ def load_run_3d_ssr_config(path: str | Path) -> Run3DSSRConfig:
     linear_data = data.get("linear_solver", {})
 
     problem = Problem3DConfig(
-        name=str(problem_data.get("name", "3d_hetero_ssr")),
+        name=str(problem_data.get("name", "3d_hetero_slope")),
         variant=str(problem_data.get("variant", "hetero")),
         elem_type=str(problem_data.get("elem_type", "P2")),
         davis_type=str(problem_data.get("davis_type", "B")),
         seepage=bool(problem_data.get("seepage", False)),
-        mesh_path=_resolve_path(config_path, str(problem_data.get("mesh_path", "meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"))),
+        mesh_path=_resolve_path(config_path, str(problem_data.get("mesh_path", "meshes/3d_hetero_slope/adaptive_family_a_l1.msh"))),
         materials=_load_materials(data),
     )
 

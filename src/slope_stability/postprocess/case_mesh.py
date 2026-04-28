@@ -3,22 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 
 import numpy as np
 
 from slope_stability.core.elements import simplex_vtk_cell_block
 from slope_stability.core.run_config import RunCaseConfig
-from slope_stability.mesh import (
-    generate_homogeneous_slope_mesh_2d,
-    generate_sloan2013_mesh_2d,
-    load_mesh_franz_dam_2d,
-    load_mesh_from_file,
-    load_mesh_gmsh_waterlevels,
-    load_mesh_kozinec_2d,
-    load_mesh_luzec_2d,
-    load_mesh_p2_comsol,
-    reorder_mesh_nodes,
-)
+from slope_stability.mesh import reorder_mesh_nodes
+from slope_stability.problem_asset_runtime import build_mesh_for_resolved_asset, resolve_problem_asset_from_config
 
 
 @dataclass(frozen=True)
@@ -34,121 +26,28 @@ class CaseMesh:
 
 
 def rebuild_case_mesh(cfg: RunCaseConfig, *, mpi_size: int = 1) -> CaseMesh:
-    case = cfg.problem.case
+    resolved = resolve_problem_asset_from_config(cfg)
+    built = build_mesh_for_resolved_asset(resolved, elem_type=cfg.problem.elem_type)
     part_count = int(mpi_size) if cfg.execution.node_ordering.lower() == "block_metis" else None
 
-    if case == "2d_homo_ssr":
-        geom = cfg.geometry
-        beta_deg = float(geom.get("beta_deg", 45.0))
-        y2 = float(geom.get("y2", 10.0))
-        x2 = y2 / np.tan(np.deg2rad(beta_deg))
-        mesh = generate_homogeneous_slope_mesh_2d(
-            elem_type=cfg.problem.elem_type,
-            h=float(geom.get("h", 1.0)),
-            x1=float(geom.get("x1", 15.0)),
-            x2=float(x2),
-            x3=float(geom.get("x3", 15.0)),
-            y1=float(geom.get("y1", 10.0)),
-            y2=y2,
-        )
-        reordered = _maybe_reorder(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, cfg, part_count)
-        return _build_case_mesh(
-            dim=2,
-            coord=reordered[0],
-            elem=reordered[1],
-            surf=reordered[2],
-            q_mask=reordered[3],
-            elem_type=cfg.problem.elem_type,
-            material=np.asarray(mesh.material, dtype=np.int64),
-        )
+    coord, elem, surf, q_mask = _maybe_reorder(
+        built.coord,
+        built.elem,
+        built.surf,
+        built.q_mask,
+        cfg,
+        part_count,
+    )
 
-    if case == "2d_sloan2013_seepage":
-        mesh = generate_sloan2013_mesh_2d(elem_type=cfg.problem.elem_type)
-        return _build_case_mesh(
-            dim=2,
-            coord=np.asarray(mesh.coord, dtype=np.float64),
-            elem=np.asarray(mesh.elem, dtype=np.int64),
-            surf=np.asarray(mesh.surf, dtype=np.int64),
-            q_mask=np.asarray(mesh.q_mask, dtype=bool),
-            elem_type=cfg.problem.elem_type,
-            material=np.asarray(mesh.material, dtype=np.int64),
-        )
-
-    if case in {"2d_kozinec_ssr", "2d_kozinec_ll", "2d_luzec_ssr", "2d_franz_dam_ssr"}:
-        mesh_dir = cfg.case_data["mesh_dir"]
-        if case.startswith("2d_kozinec"):
-            mesh = load_mesh_kozinec_2d(cfg.problem.elem_type, mesh_dir)
-        elif case == "2d_luzec_ssr":
-            mesh = load_mesh_luzec_2d(cfg.problem.elem_type, mesh_dir)
-        else:
-            mesh = load_mesh_franz_dam_2d(cfg.problem.elem_type, mesh_dir)
-        reordered = _maybe_reorder(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, cfg, part_count)
-        return _build_case_mesh(
-            dim=2,
-            coord=reordered[0],
-            elem=reordered[1],
-            surf=reordered[2],
-            q_mask=reordered[3],
-            elem_type=cfg.problem.elem_type,
-            material=np.asarray(mesh.material, dtype=np.int64),
-        )
-
-    if case in {"3d_homo_ssr", "3d_hetero_ssr", "3d_siopt_ssr"}:
-        mesh = load_mesh_from_file(
-            cfg.problem.mesh_path,
-            boundary_type=cfg.problem.mesh_boundary_type,
-            elem_type=cfg.problem.elem_type,
-        )
-        reordered = _maybe_reorder(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, cfg, part_count)
-        return _build_case_mesh(
-            dim=3,
-            coord=reordered[0],
-            elem=reordered[1],
-            surf=reordered[2],
-            q_mask=reordered[3],
-            elem_type=cfg.problem.elem_type,
-            material=np.asarray(mesh.material, dtype=np.int64),
-        )
-
-    if case == "3d_hetero_seepage":
-        mesh = load_mesh_gmsh_waterlevels(cfg.problem.mesh_path)
-        return _build_case_mesh(
-            dim=3,
-            coord=np.asarray(mesh.coord, dtype=np.float64),
-            elem=np.asarray(mesh.elem, dtype=np.int64),
-            surf=np.asarray(mesh.surf, dtype=np.int64),
-            q_mask=np.asarray(mesh.q_mask, dtype=bool),
-            elem_type=cfg.problem.elem_type,
-            material=np.asarray(mesh.material, dtype=np.int64),
-        )
-
-    if case == "3d_hetero_seepage_ssr_comsol":
-        mesh = load_mesh_p2_comsol(cfg.problem.mesh_path, boundary_type=1)
-        reordered = _maybe_reorder(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, cfg, part_count)
-        return _build_case_mesh(
-            dim=3,
-            coord=reordered[0],
-            elem=reordered[1],
-            surf=reordered[2],
-            q_mask=reordered[3],
-            elem_type=cfg.problem.elem_type,
-            material=np.asarray(mesh.material, dtype=np.int64),
-        )
-
-    if case in {"3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
-        mesh = load_mesh_gmsh_waterlevels(cfg.problem.mesh_path)
-        reordered = _maybe_reorder(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, cfg, part_count)
-        return _build_case_mesh(
-            dim=3,
-            coord=reordered[0],
-            elem=reordered[1],
-            surf=reordered[2],
-            q_mask=reordered[3],
-            elem_type=cfg.problem.elem_type,
-            material=np.asarray(mesh.material, dtype=np.int64),
-        )
-
-    raise KeyError(f"No mesh reconstruction registered for case {case!r}")
+    return _build_case_mesh(
+        dim=int(resolved.dimension),
+        coord=np.asarray(coord, dtype=np.float64),
+        elem=np.asarray(elem, dtype=np.int64),
+        surf=np.asarray(surf, dtype=np.int64),
+        q_mask=np.asarray(q_mask, dtype=bool),
+        elem_type=cfg.problem.elem_type,
+        material=np.asarray(built.material_id, dtype=np.int64),
+    )
 
 
 def _maybe_reorder(
@@ -203,3 +102,27 @@ def _points_2d(coord: np.ndarray) -> np.ndarray:
     pts = np.zeros((coord.shape[1], 3), dtype=np.float64)
     pts[:, :2] = coord.T
     return pts
+
+
+def validate_case_mesh_alignment(case_mesh: CaseMesh, arrays: Mapping[str, np.ndarray]) -> None:
+    coord = arrays.get("coord")
+    if coord is not None:
+        coord_arr = np.asarray(coord, dtype=np.float64)
+        if coord_arr.shape != case_mesh.coord.shape:
+            raise ValueError(
+                "Export mesh coordinate shape mismatch: "
+                f"saved {coord_arr.shape}, rebuilt {case_mesh.coord.shape}."
+            )
+        if not np.array_equal(coord_arr, case_mesh.coord):
+            raise ValueError("Export mesh coordinates do not match the saved solver ordering.")
+
+    elem = arrays.get("elem")
+    if elem is not None:
+        elem_arr = np.asarray(elem, dtype=np.int64)
+        if elem_arr.shape != case_mesh.elem.shape:
+            raise ValueError(
+                "Export mesh connectivity shape mismatch: "
+                f"saved {elem_arr.shape}, rebuilt {case_mesh.elem.shape}."
+            )
+        if not np.array_equal(elem_arr, case_mesh.elem):
+            raise ValueError("Export mesh connectivity does not match the saved solver ordering.")

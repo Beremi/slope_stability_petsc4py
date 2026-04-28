@@ -10,6 +10,7 @@ from .slope_2d import Slope2DMesh, generate_homogeneous_slope_mesh_2d, mesh_p1_2
 from .textmesh_2d import (
     TextMesh2D,
     franz_dam_pressure_boundary,
+    load_text_mesh_bundle,
     load_mesh_franz_dam_2d,
     load_mesh_kozinec_2d,
     load_mesh_luzec_2d,
@@ -36,6 +37,7 @@ __all__ = [
     "mesh_p1_2d",
     "mesh_p2_2d",
     "TextMesh2D",
+    "load_text_mesh_bundle",
     "load_mesh_kozinec_2d",
     "load_mesh_luzec_2d",
     "load_mesh_franz_dam_2d",

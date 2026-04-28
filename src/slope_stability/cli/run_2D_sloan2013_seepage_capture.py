@@ -16,7 +16,13 @@ from petsc4py import PETSc
 ROOT = Path(__file__).resolve().parents[3]
 
 from slope_stability.linear.solver import SolverFactory
-from slope_stability.mesh import generate_sloan2013_mesh_2d
+from slope_stability.mesh import reorder_mesh_nodes
+from slope_stability.problem_asset_runtime import (
+    build_mesh_for_resolved_asset,
+    build_seepage_boundary_for_resolved_asset,
+    load_seepage_problem_spec,
+    resolve_problem_asset,
+)
 from slope_stability.fem import quadrature_volume_2d
 from slope_stability.seepage import heter_conduct, seepage_problem_2d
 
@@ -54,7 +60,11 @@ def _plot_saturation(coord: np.ndarray, elem: np.ndarray, mater_sat: np.ndarray,
 def run_capture(
     *,
     out_dir: Path,
+    asset_name: str | None = "2d_sloan2013",
+    mesh_variant: str | None = None,
+    profile: str | None = None,
     elem_type: str = "P1",
+    node_ordering: str = "block_metis",
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE",
     linear_tolerance: float = 1.0e-10,
     linear_max_iter: int = 300,
@@ -77,40 +87,48 @@ def run_capture(
     plots_dir.mkdir(exist_ok=True)
 
     elem_type = str(elem_type).upper()
-    mesh = generate_sloan2013_mesh_2d(elem_type=elem_type)
-    coord, elem, material_identifier = mesh.coord, mesh.elem, mesh.material
+    resolved_asset = resolve_problem_asset(asset_name=str(asset_name or "2d_sloan2013"), mesh_variant=mesh_variant, profile=profile)
+    built_mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
+    partition_count = int(size) if str(node_ordering).lower() == "block_metis" else None
+    reordered = reorder_mesh_nodes(
+        built_mesh.coord,
+        built_mesh.elem,
+        built_mesh.surf,
+        built_mesh.q_mask,
+        strategy=node_ordering,
+        n_parts=partition_count,
+    )
+    seepage_spec = load_seepage_problem_spec(resolved_asset)
+    coord = np.asarray(reordered.coord, dtype=np.float64)
+    elem = np.asarray(reordered.elem, dtype=np.int64)
+    surf = np.asarray(reordered.surf, dtype=np.int64)
+    material_identifier = np.asarray(built_mesh.material_id, dtype=np.int64)
 
-    x1 = 15.0
-    x3 = 20.0
-    y11 = 6.75
-    y12 = 0.5
-    y13 = 0.75
-    y21 = 1.0
-    y22 = 9.25
-    y23 = 2.0
+    params = dict(resolved_asset.variant.get("source", {}).get("parameters", resolved_asset.variant.get("parameters", {})))
+    x1 = float(params.get("x1", 15.0))
+    x3 = float(params.get("x3", 20.0))
+    y11 = float(params.get("y11", 6.75))
+    y12 = float(params.get("y12", 0.5))
+    y13 = float(params.get("y13", 0.75))
+    y21 = float(params.get("y21", 1.0))
+    y22 = float(params.get("y22", 9.25))
+    y23 = float(params.get("y23", 2.0))
     y1 = y11 + y12 + y13
     y2 = y21 + y22 + y23
-    beta_deg = 26.6
+    beta_deg = float(params.get("beta_deg", 26.6))
     beta = np.deg2rad(beta_deg)
-    x2 = y2 / np.tan(beta)
-    grho = 9.81
-    k = np.array([1.0, 1.0], dtype=np.float64)
+    x2 = float(y2 / np.tan(beta))
+    grho = float(seepage_spec.seepage.water_unit_weight)
+    k = np.asarray(seepage_spec.conductivity, dtype=np.float64)
     n_q = int(quadrature_volume_2d(elem_type)[0].shape[1])
     conduct0 = heter_conduct(material_identifier, n_q, k)
-
-    q_w = np.ones(coord.shape[1], dtype=bool)
-    q_w[coord[0, :] <= 0.001] = False
-    q_w[coord[0, :] >= x1 + x2 + x3 - 0.001] = False
-    q_w[coord[1, :] >= y1 + y2 - 0.001] = False
-    q_w[(coord[1, :] >= y1 - 0.001) & (coord[0, :] >= x1 + x2 - 0.001)] = False
-    q_w[(coord[1, :] >= y1 - 0.001) & (coord[1, :] >= -(y2 / x2) * coord[0, :] + y1 + y2 * (1.0 + x1 / x2) - 0.001)] = False
-
-    pw_d = np.zeros(coord.shape[1], dtype=np.float64)
-    x_bar = x1 + (1.0 - y21 / y2) * x2
-    part1 = (coord[0, :] < x_bar) & (coord[1, :] <= -(y22 / x_bar) * coord[0, :] + y1 + y21 + y22)
-    part2 = coord[0, :] >= x_bar
-    pw_d[part1] = grho * ((y22 / x_bar) * (x_bar - coord[0, part1]) + y1 + y21 - coord[1, part1])
-    pw_d[part2] = grho * (y1 + y21 - coord[1, part2])
+    q_w, pw_d = build_seepage_boundary_for_resolved_asset(
+        resolved_asset,
+        coord,
+        surf,
+        built_mesh.boundary_labels,
+        grho=grho,
+    )
 
     solver = SolverFactory.create(
         solver_type,
@@ -171,9 +189,13 @@ def run_capture(
             "mesh_elements": int(elem.shape[1]),
             "n_int": int(assembly.n_int),
             "solver_type": solver_type,
+            "node_ordering": str(node_ordering),
         },
         "params": {
             "elem_type": elem_type,
+            "asset_name": resolved_asset.asset_name,
+            "mesh_variant": resolved_asset.variant_name,
+            "node_ordering": str(node_ordering),
             "h": 0.5,
             "x1": x1,
             "x2": x2,
@@ -225,6 +247,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run 2D Sloan2013 seepage capture.")
     parser.add_argument("--out_dir", type=Path, required=True)
     parser.add_argument("--elem_type", type=str, default="P1", choices=["P1", "P2", "P4"])
+    parser.add_argument("--node_ordering", type=str, default="block_metis")
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE")
     parser.add_argument("--linear_tolerance", type=float, default=1.0e-10)
     parser.add_argument("--linear_max_iter", type=int, default=300)
@@ -233,6 +256,7 @@ def main() -> None:
     run_capture(
         out_dir=args.out_dir,
         elem_type=args.elem_type,
+        node_ordering=args.node_ordering,
         solver_type=args.solver_type,
         linear_tolerance=args.linear_tolerance,
         linear_max_iter=args.linear_max_iter,

@@ -1,13 +1,13 @@
 {
   "run_info": {
-    "timestamp": "2026-04-04T05:10:54",
-    "runtime_seconds": 63.031341776950285,
+    "timestamp": "2026-04-23T13:31:14",
+    "runtime_seconds": 57.996204636991024,
     "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     "analysis": "ssr",
     "continuation_method": "indirect",
     "case_name": "kozinec",
     "rank_count": 8,
-    "step_count": 8
+    "step_count": 7
   },
   "params": {
     "case_name": "kozinec",
@@ -81,6 +81,8 @@
       ]
     ],
     "hydraulic_conductivity": null,
+    "asset_name": "2d_kozinec",
+    "mesh_variant": "default.msh",
     "node_ordering": "none",
     "lambda_init": 0.7,
     "d_lambda_init": 0.1,
@@ -122,16 +124,16 @@
   },
   "timings": {
     "constitutive": {
-      "reduction": 0.9254055947531015,
-      "stress": 8.478029443416744,
-      "stress_tangent": 2.715396802406758,
-      "build_F": 0.6645007259212434,
+      "reduction": 0.9022891980712302,
+      "stress": 8.44151882501319,
+      "stress_tangent": 2.3882927879458293,
+      "build_F": 0.5600328044383787,
       "build_F_K_tangent": 0.0,
-      "build_tangent_local": 16.75563631928526,
-      "local_strain": 1.0671447890345007,
-      "local_constitutive": 10.102009553927928,
+      "build_tangent_local": 16.175641375419218,
+      "local_strain": 1.0519152312772349,
+      "local_constitutive": 9.20205291279126,
       "local_constitutive_comm": 0.0,
-      "local_force_assembly": 0.6626949138008058,
+      "local_force_assembly": 0.5589142282260582,
       "local_force_gather": 0.0,
       "potential": 0.0
     },
@@ -140,11 +142,11 @@
       "init_linear_solve_time": 0.0,
       "init_linear_preconditioner_time": 0.0,
       "init_linear_orthogonalization_time": 0.0,
-      "attempt_linear_iterations_total": 6917,
-      "attempt_linear_solve_time_total": 29.400073767872527,
-      "attempt_linear_preconditioner_time_total": 0.29740170831792057,
-      "attempt_linear_orthogonalization_time_total": 1.7755994477774948
+      "attempt_linear_iterations_total": 6113,
+      "attempt_linear_solve_time_total": 25.90347243513679,
+      "attempt_linear_preconditioner_time_total": 0.5376483352738433,
+      "attempt_linear_orthogonalization_time_total": 1.7126881729927845
     },
-    "continuation_total_wall_time": 63.030719908187166
+    "continuation_total_wall_time": 57.99588303203927
   }
 }

@@ -43,6 +43,28 @@ from .preconditioners import attach_near_nullspace, build_preconditioner, make_n
 PreconditionerFactory = Callable[[object], Callable[[np.ndarray], np.ndarray]]
 
 
+def _default_elasticity_null_space_if_compatible(
+    coord: np.ndarray | None,
+    q_mask: np.ndarray | None,
+    *,
+    return_full: bool,
+) -> np.ndarray | None:
+    if coord is None or q_mask is None:
+        return None
+    q_mask = np.asarray(q_mask, dtype=bool)
+    if q_mask.ndim != 2 or q_mask.size == 0:
+        return None
+    dim, n_nodes = coord.shape
+    if q_mask.shape != (dim, n_nodes):
+        return None
+    return make_near_nullspace_elasticity(
+        coord,
+        q_mask=q_mask,
+        center_coordinates=True,
+        return_full=return_full,
+    )
+
+
 @dataclass
 class PreconditionerDiagnostics:
     pc_backend: str
@@ -1536,9 +1558,9 @@ class PetscKSPFGMRESSolver:
         if self._pc_backend == "pmg":
             diagnostics.update(self._pmg_diagnostics_snapshot())
         if self._pc_backend == "pmg_shell" and self._manualmg_context is not None:
-            diagnostics.update(self._manualmg_context.diagnostics())
             diagnostics.update({str(k): v for k, v in self._manualmg_last_setup_info.items()})
             diagnostics.update({str(k): v for k, v in self._manualmg_last_apply_info.items()})
+            diagnostics.update(self._manualmg_context.diagnostics())
         return diagnostics
 
     def get_preconditioner_matrix_source(self) -> str:
@@ -2180,11 +2202,10 @@ class PetscKSPFGMRESSolver:
             self._A_petsc.setBlockSize(int(self.q_mask.shape[0]))
 
         null_space = self.preconditioner_options.get("null_space")
-        if null_space is None and self.pc_type in {"GAMG", "HYPRE"} and self.coord is not None and self.q_mask.size:
-            null_space = make_near_nullspace_elasticity(
+        if null_space is None and self.pc_type in {"GAMG", "HYPRE"}:
+            null_space = _default_elasticity_null_space_if_compatible(
                 self.coord,
-                q_mask=self.q_mask,
-                center_coordinates=True,
+                self.q_mask,
                 return_full=self._using_full_system,
             )
 
@@ -2553,11 +2574,10 @@ class PetscKSPGMRESDeflationSolver(PetscKSPFGMRESSolver):
             self._A_petsc.setBlockSize(int(self.q_mask.shape[0]))
 
         null_space = self.preconditioner_options.get("null_space")
-        if null_space is None and self.pc_type in {"GAMG", "HYPRE"} and self.coord is not None and self.q_mask.size:
-            null_space = make_near_nullspace_elasticity(
+        if null_space is None and self.pc_type in {"GAMG", "HYPRE"}:
+            null_space = _default_elasticity_null_space_if_compatible(
                 self.coord,
-                q_mask=self.q_mask,
-                center_coordinates=True,
+                self.q_mask,
                 return_full=self._using_full_system,
             )
 
@@ -3029,11 +3049,10 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
             self._A_petsc.setBlockSize(int(self.q_mask.shape[0]))
 
         null_space = self.preconditioner_options.get("null_space")
-        if null_space is None and self.pc_type in {"GAMG", "HYPRE"} and self.coord is not None and self.q_mask.size:
-            null_space = make_near_nullspace_elasticity(
+        if null_space is None and self.pc_type in {"GAMG", "HYPRE"}:
+            null_space = _default_elasticity_null_space_if_compatible(
                 self.coord,
-                q_mask=self.q_mask,
-                center_coordinates=True,
+                self.q_mask,
                 return_full=self._using_full_system,
             )
 
@@ -3265,12 +3284,11 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         null_space = self.preconditioner_options.get("null_space")
         if null_space is not None:
             return null_space
-        if self._pc_backend not in {"gamg", "hypre"} or self.coord is None or not self.q_mask.size:
+        if self._pc_backend not in {"gamg", "hypre"}:
             return None
-        return make_near_nullspace_elasticity(
+        return _default_elasticity_null_space_if_compatible(
             self.coord,
-            q_mask=self.q_mask,
-            center_coordinates=True,
+            self.q_mask,
             return_full=self._using_full_system,
         )
 

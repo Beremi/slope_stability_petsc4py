@@ -11,7 +11,7 @@ import numpy as np
 
 from .core.elements import infer_simplex_elem_type, SIMPLEX_NODES_PER_SURFACE
 from .core.simplex_lagrange import triangle_lagrange_interior_tuples
-from .problem_assets import load_problem_asset_definition_for_path
+from .problem_assets import build_dirichlet_mask_for_path
 
 
 @dataclass
@@ -25,39 +25,6 @@ class MeshData:
     elem_type: str | None = None
 
 
-_AXES_BY_DIM: dict[int, tuple[str, ...]] = {
-    2: ("x", "y"),
-    3: ("x", "y", "z"),
-}
-
-
-def _default_dirichlet_labels(dim: int) -> dict[str, tuple[int, ...]]:
-    axes = _AXES_BY_DIM[int(dim)]
-    if int(dim) == 2:
-        return {"x": (1, 2), "y": (3,)}
-    if int(dim) == 3:
-        return {"x": (1, 2), "y": (5,), "z": (3, 4)}
-    raise ValueError(f"Unsupported dimension {dim}.")
-
-
-def _dirichlet_labels_for_path(path: Path, dim: int) -> dict[str, tuple[int, ...]]:
-    asset = load_problem_asset_definition_for_path(path)
-    if asset is None:
-        return _default_dirichlet_labels(dim)
-
-    raw = asset.payload.get("dirichlet_labels")
-    if not isinstance(raw, dict):
-        return _default_dirichlet_labels(dim)
-
-    labels = _default_dirichlet_labels(dim)
-    for axis in _AXES_BY_DIM[int(dim)]:
-        value = raw.get(axis)
-        if value is None:
-            continue
-        labels[axis] = tuple(int(v) for v in value)
-    return labels
-
-
 def _build_dirichlet_mask(
     dim: int,
     n_nodes: int,
@@ -65,32 +32,18 @@ def _build_dirichlet_mask(
     boundary: np.ndarray,
     *,
     path: Path,
+    coord: np.ndarray | None = None,
     boundary_type: int = 0,
 ) -> np.ndarray:
-    face = np.asarray(surf, dtype=np.int64)
-    labels = np.asarray(boundary, dtype=np.int64).ravel()
-    q = np.ones((int(dim), int(n_nodes)), dtype=bool)
-    axis_to_labels = _dirichlet_labels_for_path(path, dim)
-    axis_names = _AXES_BY_DIM[int(dim)]
-
-    for axis_idx, axis_name in enumerate(axis_names):
-        constrained = tuple(int(v) for v in axis_to_labels.get(axis_name, ()))
-        if not constrained or face.size == 0:
-            continue
-        mask = np.isin(labels, np.asarray(constrained, dtype=np.int64))
-        if np.any(mask):
-            q[axis_idx, face[:, mask].ravel()] = False
-
-    # Replicate the MATLAB tetrahedral mesh loader convention: when boundary_type
-    # is enabled, the family-local "bottom" labels (carried on the y-axis label set
-    # for 3D slope meshes) are glued in all displacement components.
-    if int(dim) == 3 and int(boundary_type) and face.size:
-        glued = tuple(int(v) for v in axis_to_labels.get("y", ()))
-        if glued:
-            mask = np.isin(labels, np.asarray(glued, dtype=np.int64))
-            if np.any(mask):
-                q[:, face[:, mask].ravel()] = False
-    return q
+    return build_dirichlet_mask_for_path(
+        path,
+        dim=dim,
+        n_nodes=n_nodes,
+        surf=surf,
+        boundary=boundary,
+        coord=coord,
+        boundary_type=boundary_type,
+    )
 
 
 def _to_zero_based(indices: np.ndarray) -> np.ndarray:
@@ -140,7 +93,7 @@ def _load_lagrange_tet_mesh(path: Path, *, boundary_type: int = 0) -> MeshData:
 
     # MATLAB exports stored as (x, z, y) in this helper.
     coord = np.asarray(node[[0, 2, 1], :], dtype=np.float64)
-    q = _build_dirichlet_mask(3, coord.shape[1], face, boundary, path=path, boundary_type=boundary_type)
+    q = _build_dirichlet_mask(3, coord.shape[1], face, boundary, path=path, coord=coord, boundary_type=boundary_type)
 
     return MeshData(
         coord=coord,
@@ -480,7 +433,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
 
     target = None if elem_type is None else str(elem_type).strip().upper()
     if target in {None, "", "P1"}:
-        q_mask = _build_dirichlet_mask(3, coord.shape[1], surf, boundary, path=path, boundary_type=boundary_type)
+        q_mask = _build_dirichlet_mask(3, coord.shape[1], surf, boundary, path=path, coord=coord, boundary_type=boundary_type)
         return MeshData(
             coord=coord,
             elem=elem,
@@ -492,7 +445,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
         )
     if target == "P2":
         coord_p2, elem_p2, surf_p2 = _elevate_tet4_mesh_to_tet10(coord, elem, surf)
-        q_mask = _build_dirichlet_mask(3, coord_p2.shape[1], surf_p2, boundary, path=path, boundary_type=boundary_type)
+        q_mask = _build_dirichlet_mask(3, coord_p2.shape[1], surf_p2, boundary, path=path, coord=coord_p2, boundary_type=boundary_type)
         return MeshData(
             coord=coord_p2,
             elem=elem_p2,
@@ -504,7 +457,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
         )
     if target == "P3":
         coord_p3, elem_p3, surf_p3 = _elevate_tet4_mesh_to_tet20(coord, elem, surf)
-        q_mask = _build_dirichlet_mask(3, coord_p3.shape[1], surf_p3, boundary, path=path, boundary_type=boundary_type)
+        q_mask = _build_dirichlet_mask(3, coord_p3.shape[1], surf_p3, boundary, path=path, coord=coord_p3, boundary_type=boundary_type)
         return MeshData(
             coord=coord_p3,
             elem=elem_p3,
@@ -516,7 +469,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
         )
     if target == "P4":
         coord_p4, elem_p4, surf_p4 = _elevate_tet4_mesh_to_tet35(coord, elem, surf)
-        q_mask = _build_dirichlet_mask(3, coord_p4.shape[1], surf_p4, boundary, path=path, boundary_type=boundary_type)
+        q_mask = _build_dirichlet_mask(3, coord_p4.shape[1], surf_p4, boundary, path=path, coord=coord_p4, boundary_type=boundary_type)
         return MeshData(
             coord=coord_p4,
             elem=elem_p4,

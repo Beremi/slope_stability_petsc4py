@@ -1,12 +1,14 @@
 [problem]
 name = "run_2D_sloan2013_seepage_capture"
-case = "2d_sloan2013_seepage"
+asset = "2d_sloan2013"
+mesh_variant = "default.msh"
 analysis = "seepage"
 dimension = 2
 variant = "hetero"
 elem_type = "P1"
 davis_type = "B"
 seepage = true
+mesh_path = "/home/beremi/repos/slope_stability-1/meshes/2d_sloan2013/default.msh"
 
 [linear_solver]
 solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"
@@ -20,8 +22,6 @@ threads = 1
 linear_tolerance = 1e-10
 linear_max_iter = 300
 nonlinear_max_iter = 100
-water_unit_weight = 9.81
-conductivity = [1.0, 1.0]
 
 [export]
 write_custom_debug_bundle = false

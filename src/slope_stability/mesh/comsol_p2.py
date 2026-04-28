@@ -9,6 +9,11 @@ import h5py
 import numpy as np
 
 from ..io import _collect_meshio_blocks, _elevate_tet4_mesh_to_tet10, _map_physical_ids
+from ..problem_assets import build_dirichlet_mask_for_path, build_seepage_boundary_for_path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_COMSOL_MESH_PATH = ROOT / "meshes" / "3d_hetero_seepage_transition" / "transition_default.msh"
 
 
 @dataclass(frozen=True)
@@ -19,26 +24,6 @@ class ComsolP2Mesh3D:
     q_mask: np.ndarray
     material: np.ndarray
     triangle_labels: np.ndarray
-
-
-def _comsol_q_mask(n_nodes: int, surf: np.ndarray, boundary: np.ndarray, *, boundary_type: int) -> np.ndarray:
-    q = np.ones((3, int(n_nodes)), dtype=bool)
-    labels = np.asarray(boundary, dtype=np.int64).ravel()
-
-    tmp = surf[:, labels == 1]
-    q[0, tmp.ravel()] = False
-    tmp = surf[:, labels == 2]
-    q[0, tmp.ravel()] = False
-    tmp = surf[:, labels == 3]
-    q[2, tmp.ravel()] = False
-    tmp = surf[:, labels == 4]
-    q[2, tmp.ravel()] = False
-    tmp = surf[:, labels == 5]
-    if int(boundary_type):
-        q[:, tmp.ravel()] = False
-    else:
-        q[1, tmp.ravel()] = False
-    return q
 
 
 def _as_nodes_by_count(arr: np.ndarray, width: int) -> np.ndarray:
@@ -74,7 +59,15 @@ def load_mesh_p2_comsol(path: str | Path, boundary_type: int = 1) -> ComsolP2Mes
         coord, elem, surf = _elevate_tet4_mesh_to_tet10(coord_p1, elem_p1, surf_p1)
         boundary = _map_physical_ids(boundary, msh.field_data, 2, "boundary")
         material = _map_physical_ids(tetra_tags, msh.field_data, 3, "material")
-        q = _comsol_q_mask(coord.shape[1], surf, boundary, boundary_type=boundary_type)
+        q = build_dirichlet_mask_for_path(
+            path,
+            dim=3,
+            n_nodes=coord.shape[1],
+            surf=surf,
+            boundary=boundary,
+            coord=coord,
+            boundary_type=boundary_type,
+        )
         return ComsolP2Mesh3D(
             coord=coord,
             elem=elem,
@@ -92,7 +85,15 @@ def load_mesh_p2_comsol(path: str | Path, boundary_type: int = 1) -> ComsolP2Mes
         node = _as_nodes_by_count(np.asarray(h5["node"][:], dtype=np.float64), 3)
 
     coord = np.asarray(node[[0, 2, 1], :], dtype=np.float64)
-    q = _comsol_q_mask(coord.shape[1], face, boundary, boundary_type=boundary_type)
+    q = build_dirichlet_mask_for_path(
+        path,
+        dim=3,
+        n_nodes=coord.shape[1],
+        surf=face,
+        boundary=boundary,
+        coord=coord,
+        boundary_type=boundary_type,
+    )
     return ComsolP2Mesh3D(
         coord=coord,
         elem=np.asarray(elem, dtype=np.int64),
@@ -109,99 +110,12 @@ def seepage_boundary_3d_hetero_comsol(
     triangle_labels: np.ndarray,
     grho: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Replicate MATLAB ``MESH.seepage_boundary_3D_hetero_comsol`` exactly."""
+    """Resolve seepage BCs from the COMSOL mesh-family definition."""
 
-    coord = np.asarray(coord, dtype=np.float64)
-    surf = np.asarray(surf, dtype=np.int64)
-    triangle_labels = np.asarray(triangle_labels, dtype=np.int64).ravel()
-
-    n_n = int(coord.shape[1])
-    y_free_water_level = 35.0
-    y_porous_water_level = 55.0
-
-    pw_d = np.zeros(n_n, dtype=np.float64)
-    x = coord[0, :]
-    y = coord[1, :]
-    boundary_nodes = np.unique(surf.ravel())
-
-    q_dry = np.zeros(n_n, dtype=bool)
-    tmp = surf[:, triangle_labels == 6]
-    q_dry[tmp.ravel()] = True
-
-    q_wet1 = np.zeros(n_n, dtype=bool)
-    tmp = surf[:, triangle_labels == 2]
-    nodes_tmp = np.unique(tmp.ravel())
-    selected_nodes_wet = nodes_tmp[y[nodes_tmp] < y_porous_water_level]
-    q_wet1[selected_nodes_wet] = True
-    pw_d[q_wet1] = grho * (y_porous_water_level - coord[1, q_wet1])
-    dry = nodes_tmp[y[nodes_tmp] >= y_porous_water_level]
-    q_dry[dry] = True
-
-    q_wet2 = np.zeros(n_n, dtype=bool)
-    triangles = surf[:3, :]
-    v1 = coord[:, triangles[0, :]]
-    v2 = coord[:, triangles[1, :]]
-    v3 = coord[:, triangles[2, :]]
-    e1 = v2 - v1
-    e2 = v3 - v1
-    normals = np.cross(e1.T, e2.T).T
-    tol = 1.0e-1
-    condition = np.all(np.abs(normals) > tol, axis=0)
-    selected_triangles = surf[:, condition]
-    nodes_tmp = np.unique(selected_triangles.ravel())
-
-    tol = 1.0e-6
-    c = np.array([55.0, 30.0, 0.0], dtype=np.float64)
-    t = np.array([115.0, 60.0, 0.0], dtype=np.float64)
-    a_left = np.array([30.0, 30.0, 43.3], dtype=np.float64)
-    a_right = a_left.copy()
-    a_right[2] = -a_right[2]
-    normal_left = np.cross(t - c, a_left - c)
-    normal_right = np.cross(t - c, a_right - c)
-    X = coord[:, nodes_tmp].T
-    V = X - c
-    d_left = np.abs(V @ normal_left)
-    d_right = np.abs(V @ normal_right)
-    mask = (d_left < tol) | (d_right < tol)
-    nodes_tmp = nodes_tmp[mask]
-
-    selected_nodes = nodes_tmp[y[nodes_tmp] < y_free_water_level]
-    q_wet2[selected_nodes] = True
-    selected_nodes_dry = nodes_tmp[y[nodes_tmp] >= y_free_water_level]
-    q_dry[selected_nodes_dry] = True
-
-    tol = 1.0e-1
-    y_bed = 30.0
-    selected = boundary_nodes[np.abs(y[boundary_nodes] - y_bed) < tol]
-
-    tol = 1.0e-10
-    c = np.array([55.0, 30.0, 0.0], dtype=np.float64)
-    a_left = np.array([30.0, 30.0, 43.3], dtype=np.float64)
-    a_right = a_left.copy()
-    a_right[2] = -a_right[2]
-    n = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-    X = coord[:, selected].T
-    dL = a_left - c
-    dR = a_right - c
-    VL = X - c
-    kL = np.cross(n, dL)
-    kR = np.cross(n, dR)
-    kL = kL / np.linalg.norm(kL)
-    kR = kR / np.linalg.norm(kR)
-    sL = VL @ kL
-    sR = VL @ kR
-    sL = sL / np.linalg.norm(sL)
-    sR = sR / np.linalg.norm(sR)
-    mask = (sL < tol) & (sR > tol)
-    selected = selected[mask]
-    q_wet2[selected] = True
-
-    tmp = surf[:, triangle_labels == 1]
-    q_wet2[tmp.ravel()] = True
-    pw_d[q_wet2] = grho * (y_free_water_level - coord[1, q_wet2])
-
-    q_w = np.ones(n_n, dtype=bool)
-    q_w[q_dry] = False
-    q_w[q_wet2] = False
-    q_w[q_wet1] = False
-    return q_w, pw_d
+    return build_seepage_boundary_for_path(
+        DEFAULT_COMSOL_MESH_PATH,
+        coord,
+        surf,
+        triangle_labels,
+        grho=grho,
+    )

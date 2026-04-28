@@ -1,13 +1,15 @@
 [problem]
 name = "run_3D_hetero_seepage_SSR_comsol_capture"
-case = "3d_hetero_seepage_ssr_comsol"
+asset = "3d_hetero_seepage_transition"
+mesh_variant = "transition_default.msh"
+profile = "fixed_base"
 analysis = "ssr"
 dimension = 3
 variant = "hetero"
 elem_type = "P2"
 davis_type = "B"
 seepage = true
-mesh_path = "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_ssr_comsol/comsol_mesh.msh"
+mesh_path = "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_seepage_transition/transition_default.msh"
 
 [execution]
 node_ordering = "block_metis"
@@ -41,8 +43,6 @@ threads = 1
 [seepage]
 linear_tolerance = 1e-10
 linear_max_iter = 300
-water_unit_weight = 9.81
-conductivity = [1.0]
 
 [export]
 write_custom_debug_bundle = false

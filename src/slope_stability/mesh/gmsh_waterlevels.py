@@ -9,6 +9,11 @@ import h5py
 import numpy as np
 
 from ..io import _collect_meshio_blocks, _elevate_tet4_mesh_to_tet10, _map_physical_ids, load_mesh_file
+from ..problem_assets import build_dirichlet_mask_for_path, build_seepage_boundary_for_path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_WATERLEVELS_MESH_PATH = ROOT / "meshes" / "3d_hetero_seepage" / "concave_family_b.msh"
 
 
 @dataclass(frozen=True)
@@ -28,24 +33,6 @@ def _normalize_elem_type(elem_type: str | None) -> str:
     if text not in {"P1", "P2", "P4"}:
         raise NotImplementedError(f"Waterlevels mesh loader currently supports only 'P1', 'P2', and 'P4', got {elem_type!r}.")
     return text
-
-
-def _waterlevels_q_mask(n_nodes: int, surf: np.ndarray, triangle_labels: np.ndarray) -> np.ndarray:
-    q_mask = np.ones((3, int(n_nodes)), dtype=bool)
-    labels = np.asarray(triangle_labels, dtype=np.int64).ravel()
-    tmp = surf[:, labels == 7]
-    q_mask[0, tmp.ravel()] = False
-    tmp = surf[:, labels == 8]
-    q_mask[0, tmp.ravel()] = False
-    tmp = surf[:, labels == 9]
-    q_mask[0, tmp.ravel()] = False
-    tmp = surf[:, labels == 10]
-    q_mask[1, tmp.ravel()] = False
-    tmp = surf[:, labels == 11]
-    q_mask[1, tmp.ravel()] = False
-    tmp = surf[:, labels == 12]
-    q_mask[:, tmp.ravel()] = False
-    return q_mask
 
 
 def _compact_p1_connectivity(
@@ -82,39 +69,15 @@ def seepage_boundary_3d_hetero(
     triangle_labels: np.ndarray,
     grho: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Replicate MATLAB ``MESH.seepage_boundary_3D_hetero``."""
+    """Resolve seepage BCs from the waterlevels mesh-family definition."""
 
-    coord = np.asarray(coord, dtype=np.float64)
-    surf = np.asarray(surf, dtype=np.int64)
-    triangle_labels = np.asarray(triangle_labels, dtype=np.int64).ravel()
-
-    n_n = int(coord.shape[1])
-    y_free_water_level = 35.0
-    y_porous_water_level = 55.0
-
-    pw_d = np.zeros(n_n, dtype=np.float64)
-
-    q_dry = np.zeros(n_n, dtype=bool)
-    for label in (13, 5, 7):
-        tmp = surf[:, triangle_labels == label]
-        q_dry[tmp.ravel()] = True
-
-    q_wet1 = np.zeros(n_n, dtype=bool)
-    tmp = surf[:, triangle_labels == 8]
-    q_wet1[tmp.ravel()] = True
-    pw_d[q_wet1] = grho * (y_porous_water_level - coord[1, q_wet1])
-
-    q_wet2 = np.zeros(n_n, dtype=bool)
-    for label in (6, 14, 9):
-        tmp = surf[:, triangle_labels == label]
-        q_wet2[tmp.ravel()] = True
-    pw_d[q_wet2] = grho * (y_free_water_level - coord[1, q_wet2])
-
-    q_w = np.ones(n_n, dtype=bool)
-    q_w[q_dry] = False
-    q_w[q_wet1] = False
-    q_w[q_wet2] = False
-    return q_w, pw_d
+    return build_seepage_boundary_for_path(
+        DEFAULT_WATERLEVELS_MESH_PATH,
+        coord,
+        surf,
+        triangle_labels,
+        grho=grho,
+    )
 
 
 def load_mesh_gmsh_waterlevels(path: str | Path, elem_type: str | None = "P2") -> WaterlevelsMesh3D:
@@ -124,12 +87,11 @@ def load_mesh_gmsh_waterlevels(path: str | Path, elem_type: str | None = "P2") -
         if elem_type_norm == "P4":
             mesh = load_mesh_file(path, elem_type="P4", boundary_type=0)
             triangle_labels = np.asarray(mesh.boundary, dtype=np.int64).ravel()
-            q_mask = _waterlevels_q_mask(mesh.coord.shape[1], mesh.surf, triangle_labels)
             return WaterlevelsMesh3D(
                 coord=np.asarray(mesh.coord, dtype=np.float64),
                 elem=np.asarray(mesh.elem, dtype=np.int64),
                 surf=np.asarray(mesh.surf, dtype=np.int64),
-                q_mask=q_mask,
+                q_mask=np.asarray(mesh.q_mask, dtype=bool),
                 material=np.asarray(mesh.material, dtype=np.int64),
                 triangle_labels=triangle_labels,
             )
@@ -156,7 +118,15 @@ def load_mesh_gmsh_waterlevels(path: str | Path, elem_type: str | None = "P2") -
             surf = surf_p1
         else:
             coord, elem, surf = _elevate_tet4_mesh_to_tet10(coord_p1, elem_p1, surf_p1)
-        q_mask = _waterlevels_q_mask(coord.shape[1], surf, triangle_labels)
+        q_mask = build_dirichlet_mask_for_path(
+            path,
+            dim=3,
+            n_nodes=coord.shape[1],
+            surf=surf,
+            boundary=triangle_labels,
+            coord=coord,
+            boundary_type=0,
+        )
         return WaterlevelsMesh3D(
             coord=coord,
             elem=elem,
@@ -184,7 +154,15 @@ def load_mesh_gmsh_waterlevels(path: str | Path, elem_type: str | None = "P2") -
     else:
         elem = tetra_cells[[0, 1, 2, 3, 4, 5, 6, 9, 8, 7], :]
         surf = triangle_cells
-    q_mask = _waterlevels_q_mask(coord.shape[1], surf, triangle_labels)
+    q_mask = build_dirichlet_mask_for_path(
+        path,
+        dim=3,
+        n_nodes=coord.shape[1],
+        surf=surf,
+        boundary=triangle_labels,
+        coord=coord,
+        boundary_type=0,
+    )
 
     return WaterlevelsMesh3D(
         coord=coord,

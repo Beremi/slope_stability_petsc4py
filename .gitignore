@@ -35,6 +35,7 @@ archives/
 tests_local/
 slope_stability_matlab/
 scripts_local/
+gmsh_test/
 
 # Local C/HYPRE build artifacts
 third_party/hypre/

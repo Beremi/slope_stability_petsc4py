@@ -35,6 +35,13 @@ from slope_stability.mesh import (
     luzec_pressure_boundary,
     reorder_mesh_nodes,
 )
+from slope_stability.problem_asset_runtime import (
+    build_mesh_for_resolved_asset,
+    build_seepage_boundary_for_resolved_asset,
+    load_seepage_problem_spec,
+    resolve_problem_asset,
+)
+from slope_stability.problem_assets import load_material_rows_for_asset
 from slope_stability.nonlinear.newton import _destroy_petsc_mat, _prefers_full_system_operator, _setup_linear_system, _solve_linear_system
 from slope_stability.seepage import heter_conduct, seepage_problem_2d
 from slope_stability.utils import extract_submatrix_free, full_field_from_free_values, local_csr_to_petsc_aij_matrix, owned_block_range, q_to_free_indices
@@ -95,6 +102,32 @@ def _kozinec_saturation(coord: np.ndarray, elem: np.ndarray, hatp: np.ndarray) -
     return coord_y_int <= level
 
 
+def _hydraulic_state_saturation(coord: np.ndarray, elem: np.ndarray, hatp: np.ndarray, state) -> np.ndarray:
+    n_p = int(elem.shape[0])
+    n_e = int(elem.shape[1])
+    n_q = int(hatp.shape[1])
+    hatphi = np.tile(np.asarray(hatp, dtype=np.float64), (1, n_e))
+    coord_x = np.reshape(coord[0, elem.reshape(-1, order="F")], (n_p, n_e), order="F")
+    coord_y = np.reshape(coord[1, elem.reshape(-1, order="F")], (n_p, n_e), order="F")
+    coord_x_int = np.sum(np.kron(coord_x, np.ones((1, n_q), dtype=np.float64)) * hatphi, axis=0)
+    coord_y_int = np.sum(np.kron(coord_y, np.ones((1, n_q), dtype=np.float64)) * hatphi, axis=0)
+
+    kind = str(state.kind).strip().lower()
+    if kind == "piecewise_linear_level":
+        points = np.asarray(state.value_model.get("points"), dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 2:
+            raise ValueError("Hydraulic state 'piecewise_linear_level' requires at least two [x, level] points.")
+        level = np.interp(coord_x_int, points[:, 0], points[:, 1])
+        if str(state.value_model.get("left_mode", "constant")).strip().lower() == "constant":
+            level[coord_x_int < points[0, 0]] = float(points[0, 1])
+        if str(state.value_model.get("right_mode", "constant")).strip().lower() == "constant":
+            level[coord_x_int > points[-1, 0]] = float(points[-1, 1])
+        return coord_y_int <= level
+    if kind == "constant_level":
+        return coord_y_int <= float(state.value_model["level"])
+    raise ValueError(f"Unsupported hydraulic_state kind {state.kind!r}.")
+
+
 def _load_case_mesh(case_name: str, elem_type: str, mesh_dir: Path):
     case_key = case_name.lower()
     if case_key == "kozinec":
@@ -109,13 +142,16 @@ def _load_case_mesh(case_name: str, elem_type: str, mesh_dir: Path):
 def run_capture(
     output_dir: Path,
     *,
-    case_name: str,
+    asset_name: str | None = None,
+    mesh_variant: str | None = None,
+    profile: str | None = None,
+    case_name: str | None = None,
     analysis: str = "ssr",
     continuation_method: str = "indirect",
-    mesh_dir: Path,
+    mesh_dir: Path | None = None,
     elem_type: str = "P2",
     davis_type: str = "B",
-    material_rows: list[list[float]] | np.ndarray,
+    material_rows: list[list[float]] | np.ndarray | None = None,
     hydraulic_conductivity: list[float] | np.ndarray | None = None,
     node_ordering: str = "block_metis",
     lambda_init: float = 0.7,
@@ -144,7 +180,7 @@ def run_capture(
     tangent_kernel: str = "rows",
     seepage_linear_tolerance: float = 1e-10,
     seepage_linear_max_iter: int = 500,
-    seepage_water_unit_weight: float = 9.81,
+    seepage_water_unit_weight: float | None = None,
 ) -> dict:
     rank = int(PETSc.COMM_WORLD.getRank())
     out_dir = _ensure_dir(output_dir) if rank == 0 else output_dir
@@ -154,20 +190,53 @@ def run_capture(
         _ensure_dir(data_dir)
         progress_callback = _make_progress_logger(data_dir)
 
-    case_key = str(case_name).lower()
+    case_key = "" if case_name is None else str(case_name).lower()
     analysis_key = str(analysis).lower()
     method_key = str(continuation_method).lower()
-
-    mesh = _load_case_mesh(case_key, elem_type, Path(mesh_dir))
     partition_count = int(PETSc.COMM_WORLD.getSize()) if str(node_ordering).lower() == "block_metis" else None
-    reordered = reorder_mesh_nodes(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, strategy=node_ordering, n_parts=partition_count)
+    resolved_asset = None
+    seepage_spec = None
+    if asset_name is not None:
+        resolved_asset = resolve_problem_asset(asset_name=str(asset_name), mesh_variant=mesh_variant, profile=profile)
+        built_mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
+        case_key = str(resolved_asset.asset_name).removeprefix("2d_").lower()
+        reordered = reorder_mesh_nodes(
+            built_mesh.coord,
+            built_mesh.elem,
+            built_mesh.surf,
+            built_mesh.q_mask,
+            strategy=node_ordering,
+            n_parts=partition_count,
+        )
+        coord = reordered.coord.astype(np.float64)
+        elem = reordered.elem.astype(np.int64)
+        surf = reordered.surf.astype(np.int64)
+        q_mask = reordered.q_mask.astype(bool)
+        material_identifier = np.asarray(built_mesh.material_id, dtype=np.int64)
+        if material_rows is None:
+            material_rows = load_material_rows_for_asset(str(asset_name))
+        if "seepage" in resolved_asset.definition.capabilities:
+            seepage_spec = load_seepage_problem_spec(resolved_asset)
+            if hydraulic_conductivity is None:
+                hydraulic_conductivity = seepage_spec.conductivity
+            if seepage_water_unit_weight is None:
+                seepage_water_unit_weight = float(seepage_spec.seepage.water_unit_weight)
+        if mesh_dir is None:
+            mesh_dir = resolved_asset.definition.asset_dir
+    else:
+        if case_name is None or mesh_dir is None:
+            raise ValueError("Either asset_name or the legacy case_name + mesh_dir inputs must be provided.")
+        mesh = _load_case_mesh(case_key, elem_type, Path(mesh_dir))
+        reordered = reorder_mesh_nodes(mesh.coord, mesh.elem, mesh.surf, mesh.q_mask, strategy=node_ordering, n_parts=partition_count)
 
-    coord = reordered.coord.astype(np.float64)
-    elem = reordered.elem.astype(np.int64)
-    surf = reordered.surf.astype(np.int64)
-    q_mask = reordered.q_mask.astype(bool)
-    material_identifier = np.asarray(mesh.material, dtype=np.int64)
+        coord = reordered.coord.astype(np.float64)
+        elem = reordered.elem.astype(np.int64)
+        surf = reordered.surf.astype(np.int64)
+        q_mask = reordered.q_mask.astype(bool)
+        material_identifier = np.asarray(mesh.material, dtype=np.int64)
 
+    if material_rows is None:
+        raise ValueError(f"material_rows are required for 2D mechanical asset {asset_name or case_name!r}.")
     material_rows_arr = np.asarray(material_rows, dtype=np.float64)
     materials = [
         MaterialSpec(
@@ -187,19 +256,33 @@ def run_capture(
     n_int = int(elem.shape[1] * n_q)
 
     seepage_payload: dict[str, np.ndarray] = {}
-    if case_key == "kozinec":
+    hydraulic_state = None if resolved_asset is None else resolved_asset.definition.hydraulic_state()
+    if resolved_asset is None and case_key == "kozinec":
         hatp, _, _ = local_basis_volume_2d(elem_type, xi)
         saturation = _kozinec_saturation(coord, elem, hatp)
+    elif resolved_asset is not None and seepage_spec is None and hydraulic_state is not None:
+        hatp, _, _ = local_basis_volume_2d(elem_type, xi)
+        saturation = _hydraulic_state_saturation(coord, elem, hatp, hydraulic_state)
+    elif resolved_asset is not None and seepage_spec is None:
+        saturation = np.ones(n_int, dtype=bool)
     else:
         if hydraulic_conductivity is None:
-            raise ValueError(f"hydraulic_conductivity is required for seepage-coupled case {case_name!r}")
+            raise ValueError(f"hydraulic_conductivity is required for seepage-coupled case {asset_name or case_name!r}")
         conduct0 = heter_conduct(material_identifier, n_q, np.asarray(hydraulic_conductivity, dtype=np.float64))
-        if case_key == "luzec":
+        if resolved_asset is not None and seepage_spec is not None:
+            q_w, pw_d = build_seepage_boundary_for_resolved_asset(
+                resolved_asset,
+                coord,
+                surf,
+                np.zeros(surf.shape[1], dtype=np.int64),
+                grho=seepage_water_unit_weight,
+            )
+        elif case_key == "luzec":
             q_w, pw_d = luzec_pressure_boundary(coord, surf, float(seepage_water_unit_weight))
         elif case_key == "franz_dam":
             q_w, pw_d = franz_dam_pressure_boundary(coord, surf, float(seepage_water_unit_weight))
         else:
-            raise KeyError(case_name)
+            raise KeyError(asset_name or case_name)
         seepage_solver = SolverFactory.create(
             solver_type.replace("_NULLSPACE", ""),
             tolerance=seepage_linear_tolerance,
@@ -365,6 +448,8 @@ def run_capture(
         "davis_type": davis_type,
         "material_rows": material_rows_arr.tolist(),
         "hydraulic_conductivity": None if hydraulic_conductivity is None else np.asarray(hydraulic_conductivity, dtype=np.float64).tolist(),
+        "asset_name": asset_name,
+        "mesh_variant": mesh_variant,
         "node_ordering": node_ordering,
         "lambda_init": float(lambda_init),
         "d_lambda_init": float(d_lambda_init),
@@ -388,7 +473,7 @@ def run_capture(
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": constitutive_mode,
         "tangent_kernel": str(tangent_kernel),
-        "mesh_dir": str(mesh_dir),
+        "mesh_dir": None if mesh_dir is None else str(mesh_dir),
     }
 
     t0 = perf_counter()

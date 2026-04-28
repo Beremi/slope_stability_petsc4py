@@ -36,19 +36,19 @@ These folders are part of the unified case registry, but they are not included i
 
 | Folder | Problem case | Analysis | Dimension | Element | README | Run | Config |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SIOPT_LL` | 3d_siopt_ssr | ll | 3D | P2 | [README](SIOPT_LL/README.md) | [run.sh](SIOPT_LL/run.sh) | [case.toml](SIOPT_LL/case.toml) |
-| `SIOPT_SSR` | 3d_siopt_ssr | ssr | 3D | P2 | [README](SIOPT_SSR/README.md) | [run.sh](SIOPT_SSR/run.sh) | [case.toml](SIOPT_SSR/case.toml) |
-| `slope_stability_2D_Franz_dam_SSR` | 2d_franz_dam_ssr | ssr | 2D | P2 | [README](slope_stability_2D_Franz_dam_SSR/README.md) | [run.sh](slope_stability_2D_Franz_dam_SSR/run.sh) | [case.toml](slope_stability_2D_Franz_dam_SSR/case.toml) |
-| `slope_stability_2D_Kozinec_LL` | 2d_kozinec_ll | ll | 2D | P2 | [README](slope_stability_2D_Kozinec_LL/README.md) | [run.sh](slope_stability_2D_Kozinec_LL/run.sh) | [case.toml](slope_stability_2D_Kozinec_LL/case.toml) |
-| `slope_stability_2D_Kozinec_SSR` | 2d_kozinec_ssr | ssr | 2D | P2 | [README](slope_stability_2D_Kozinec_SSR/README.md) | [run.sh](slope_stability_2D_Kozinec_SSR/run.sh) | [case.toml](slope_stability_2D_Kozinec_SSR/case.toml) |
-| `slope_stability_2D_Luzec_SSR` | 2d_luzec_ssr | ssr | 2D | P2 | [README](slope_stability_2D_Luzec_SSR/README.md) | [run.sh](slope_stability_2D_Luzec_SSR/run.sh) | [case.toml](slope_stability_2D_Luzec_SSR/case.toml) |
-| `slope_stability_2D_homo_LL` | 2d_homo_ssr | ll | 2D | P2 | [README](slope_stability_2D_homo_LL/README.md) | [run.sh](slope_stability_2D_homo_LL/run.sh) | [case.toml](slope_stability_2D_homo_LL/case.toml) |
-| `slope_stability_3D_hetero_LL` | 3d_hetero_ssr | ll | 3D | P2 | [README](slope_stability_3D_hetero_LL/README.md) | [run.sh](slope_stability_3D_hetero_LL/run.sh) | [case.toml](slope_stability_3D_hetero_LL/case.toml) |
-| `slope_stability_3D_hetero_SSR_default` | 3d_hetero_ssr | ssr | 3D | P4 | [README](slope_stability_3D_hetero_SSR_default/README.md) | [run.sh](slope_stability_3D_hetero_SSR_default/run.sh) | [case.toml](slope_stability_3D_hetero_SSR_default/case.toml) |
-| `slope_stability_3D_homo_LL` | 3d_homo_ssr | ll | 3D | P2 | [README](slope_stability_3D_homo_LL/README.md) | [run.sh](slope_stability_3D_homo_LL/run.sh) | [case.toml](slope_stability_3D_homo_LL/case.toml) |
-| `slope_stability_3D_homo_SSR` | 3d_homo_ssr | ssr | 3D | P2 | [README](slope_stability_3D_homo_SSR/README.md) | [run.sh](slope_stability_3D_homo_SSR/run.sh) | [case.toml](slope_stability_3D_homo_SSR/case.toml) |
-| `slope_stability_3D_homo_SSR_default` | 3d_homo_ssr | ssr | 3D | P2 | [README](slope_stability_3D_homo_SSR_default/README.md) | [run.sh](slope_stability_3D_homo_SSR_default/run.sh) | [case.toml](slope_stability_3D_homo_SSR_default/case.toml) |
-| `slope_stability_3D_homo_seepage_SSR_concave` | 3d_concave_seepage_ssr | ssr | 3D | P2 | [README](slope_stability_3D_homo_seepage_SSR_concave/README.md) | [run.sh](slope_stability_3D_homo_seepage_SSR_concave/run.sh) | [case.toml](slope_stability_3D_homo_seepage_SSR_concave/case.toml) |
+| `SIOPT_LL` | 3d_siopt | ll | 3D | P2 | [README](SIOPT_LL/README.md) | [run.sh](SIOPT_LL/run.sh) | [case.toml](SIOPT_LL/case.toml) |
+| `SIOPT_SSR` | 3d_siopt | ssr | 3D | P2 | [README](SIOPT_SSR/README.md) | [run.sh](SIOPT_SSR/run.sh) | [case.toml](SIOPT_SSR/case.toml) |
+| `slope_stability_2D_Franz_dam_SSR` | 2d_franz_dam | ssr | 2D | P2 | [README](slope_stability_2D_Franz_dam_SSR/README.md) | [run.sh](slope_stability_2D_Franz_dam_SSR/run.sh) | [case.toml](slope_stability_2D_Franz_dam_SSR/case.toml) |
+| `slope_stability_2D_Kozinec_LL` | 2d_kozinec | ll | 2D | P2 | [README](slope_stability_2D_Kozinec_LL/README.md) | [run.sh](slope_stability_2D_Kozinec_LL/run.sh) | [case.toml](slope_stability_2D_Kozinec_LL/case.toml) |
+| `slope_stability_2D_Kozinec_SSR` | 2d_kozinec | ssr | 2D | P2 | [README](slope_stability_2D_Kozinec_SSR/README.md) | [run.sh](slope_stability_2D_Kozinec_SSR/run.sh) | [case.toml](slope_stability_2D_Kozinec_SSR/case.toml) |
+| `slope_stability_2D_Luzec_SSR` | 2d_luzec | ssr | 2D | P2 | [README](slope_stability_2D_Luzec_SSR/README.md) | [run.sh](slope_stability_2D_Luzec_SSR/run.sh) | [case.toml](slope_stability_2D_Luzec_SSR/case.toml) |
+| `slope_stability_2D_homo_LL` | 2d_homo_slope | ll | 2D | P2 | [README](slope_stability_2D_homo_LL/README.md) | [run.sh](slope_stability_2D_homo_LL/run.sh) | [case.toml](slope_stability_2D_homo_LL/case.toml) |
+| `slope_stability_3D_hetero_LL` | 3d_hetero_slope | ll | 3D | P2 | [README](slope_stability_3D_hetero_LL/README.md) | [run.sh](slope_stability_3D_hetero_LL/run.sh) | [case.toml](slope_stability_3D_hetero_LL/case.toml) |
+| `slope_stability_3D_hetero_SSR_default` | 3d_hetero_slope | ssr | 3D | P4 | [README](slope_stability_3D_hetero_SSR_default/README.md) | [run.sh](slope_stability_3D_hetero_SSR_default/run.sh) | [case.toml](slope_stability_3D_hetero_SSR_default/case.toml) |
+| `slope_stability_3D_homo_LL` | 3d_homo_slope | ll | 3D | P2 | [README](slope_stability_3D_homo_LL/README.md) | [run.sh](slope_stability_3D_homo_LL/run.sh) | [case.toml](slope_stability_3D_homo_LL/case.toml) |
+| `slope_stability_3D_homo_SSR` | 3d_homo_slope | ssr | 3D | P2 | [README](slope_stability_3D_homo_SSR/README.md) | [run.sh](slope_stability_3D_homo_SSR/run.sh) | [case.toml](slope_stability_3D_homo_SSR/case.toml) |
+| `slope_stability_3D_homo_SSR_default` | 3d_homo_slope | ssr | 3D | P2 | [README](slope_stability_3D_homo_SSR_default/README.md) | [run.sh](slope_stability_3D_homo_SSR_default/run.sh) | [case.toml](slope_stability_3D_homo_SSR_default/case.toml) |
+| `slope_stability_3D_homo_seepage_SSR_concave` | 3d_hetero_seepage_transition | ssr | 3D | P2 | [README](slope_stability_3D_homo_seepage_SSR_concave/README.md) | [run.sh](slope_stability_3D_homo_seepage_SSR_concave/run.sh) | [case.toml](slope_stability_3D_homo_seepage_SSR_concave/case.toml) |
 
 ## Notes
 

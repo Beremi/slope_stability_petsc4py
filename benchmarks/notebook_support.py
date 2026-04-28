@@ -217,6 +217,12 @@ def load_case_sections(case_toml: Path) -> dict[str, dict[str, Any]]:
             sections[name] = merged
         else:
             sections[name] = _resolve_section_paths(case_toml, value) if isinstance(value, dict) else {}
+    problem = dict(sections.get("problem", {}))
+    if problem and problem.get("mesh_path") is None and problem.get("asset"):
+        resolved_mesh_path = _resolved_problem_mesh_path(problem)
+        if resolved_mesh_path is not None:
+            problem["mesh_path"] = resolved_mesh_path
+            sections["problem"] = problem
     return sections
 
 
@@ -619,29 +625,91 @@ def _vtu_2d_topology(vtu: VtuData) -> tuple[np.ndarray, np.ndarray, str]:
     return coord, elem, elem_type
 
 
+def _canonicalize_triangle6_vtu_elem(coord: np.ndarray, elem: np.ndarray) -> np.ndarray:
+    elem_arr = np.asarray(elem, dtype=np.int64)
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    if elem_arr.shape[0] != 6:
+        raise ValueError(f"Expected triangle6 connectivity with width 6, got {elem_arr.shape[0]}.")
+
+    vertex_pts = coord_arr[:, elem_arr[:3, :]]
+    midside_pts = coord_arr[:, elem_arr[3:, :]]
+    edge_midpoints = np.stack(
+        (
+            0.5 * (vertex_pts[:, 0, :] + vertex_pts[:, 1, :]),
+            0.5 * (vertex_pts[:, 1, :] + vertex_pts[:, 2, :]),
+            0.5 * (vertex_pts[:, 2, :] + vertex_pts[:, 0, :]),
+        ),
+        axis=1,
+    )
+    dist2 = np.sum((midside_pts[:, :, None, :] - edge_midpoints[:, None, :, :]) ** 2, axis=0)
+    permutations = np.asarray(
+        [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ],
+        dtype=np.int64,
+    )
+    errors = np.stack(
+        [dist2[perm[0], 0, :] + dist2[perm[1], 1, :] + dist2[perm[2], 2, :] for perm in permutations],
+        axis=0,
+    )
+    best_idx = np.argmin(errors, axis=0)
+    ordered_errors = np.sort(errors, axis=0)
+    edge_lengths_sq = np.stack(
+        (
+            np.sum((vertex_pts[:, 1, :] - vertex_pts[:, 0, :]) ** 2, axis=0),
+            np.sum((vertex_pts[:, 2, :] - vertex_pts[:, 1, :]) ** 2, axis=0),
+            np.sum((vertex_pts[:, 0, :] - vertex_pts[:, 2, :]) ** 2, axis=0),
+        ),
+        axis=0,
+    )
+    edge_scale = np.sqrt(np.maximum(np.max(edge_lengths_sq, axis=0), 1.0))
+    tol = np.square(1.0e-6 + 1.0e-2 * edge_scale)
+    if np.any(ordered_errors[0, :] > tol):
+        raise ValueError("triangle6 midside nodes cannot be matched to edge midpoints.")
+    if np.any(ordered_errors[1, :] - ordered_errors[0, :] <= tol):
+        raise ValueError("triangle6 midside-node roles are ambiguous.")
+
+    role_to_local = permutations[best_idx, :]
+    midside_nodes = elem_arr[3:, :].T
+    e01 = midside_nodes[np.arange(elem_arr.shape[1]), role_to_local[:, 0]]
+    e12 = midside_nodes[np.arange(elem_arr.shape[1]), role_to_local[:, 1]]
+    e20 = midside_nodes[np.arange(elem_arr.shape[1]), role_to_local[:, 2]]
+    return np.vstack((elem_arr[:3, :], e12[None, :], e20[None, :], e01[None, :]))
+
+
 def _vtu_internal_elem_2d(elem: np.ndarray, elem_type: str) -> np.ndarray:
     elem_arr = np.asarray(elem, dtype=np.int64)
     if elem_type == "P2":
-        # Reloaded triangle6 cells come back in [v0, v1, v2, e20, e01, e12]
-        # order for the committed notebook artifacts; the FEM operators expect
-        # [v0, v1, v2, e12, e20, e01].
-        return elem_arr[[0, 1, 2, 5, 3, 4], :]
+        return elem_arr
     return elem_arr
 
 
 def _vtu_linear_triangles_2d(vtu: VtuData) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     coord, elem, elem_type = _vtu_2d_topology(vtu)
     if elem_type == "P2":
+        elem = _canonicalize_triangle6_vtu_elem(coord, elem)
         n_elem = elem.shape[1]
         triangles = np.empty((n_elem * 4, 3), dtype=np.int64)
         parents = np.repeat(np.arange(n_elem, dtype=np.int64), 4)
-        e20 = elem[3, :]
-        e01 = elem[4, :]
-        e12 = elem[5, :]
+        e12 = elem[3, :]
+        e20 = elem[4, :]
+        e01 = elem[5, :]
         triangles[0::4, :] = np.stack((elem[0, :], e01, e20), axis=1)
         triangles[1::4, :] = np.stack((e01, elem[1, :], e12), axis=1)
         triangles[2::4, :] = np.stack((e20, e12, elem[2, :]), axis=1)
         triangles[3::4, :] = np.stack((e01, e12, e20), axis=1)
+        pts = coord.T
+        areas = 0.5 * (
+            (pts[triangles[:, 1], 0] - pts[triangles[:, 0], 0]) * (pts[triangles[:, 2], 1] - pts[triangles[:, 0], 1])
+            - (pts[triangles[:, 1], 1] - pts[triangles[:, 0], 1]) * (pts[triangles[:, 2], 0] - pts[triangles[:, 0], 0])
+        )
+        if np.any(areas <= 0.0):
+            raise ValueError(f"triangle6 subdivision produced {int(np.count_nonzero(areas <= 0.0))} non-positive subtriangles.")
     else:
         triangles, parents = _linear_triangles_2d(elem, elem_type)
     return coord, triangles, parents, elem, elem_type
@@ -755,7 +823,7 @@ def get_material_palette(name: str) -> dict[int, tuple[float, float, float]]:
 
 def plot_2d_mesh(case_toml: Path):
     case_mesh = _load_case_mesh(case_toml)
-    triangles, _ = _linear_triangles_2d(case_mesh.elem, _elem_type(case_toml))
+    triangles, _ = _parent_triangles_2d(case_mesh.elem)
     triang = mtri.Triangulation(case_mesh.coord[0], case_mesh.coord[1], triangles)
     fig, ax = plt.subplots(figsize=(7.0, 4.8), dpi=160)
     ax.triplot(triang, color="black", linewidth=0.55)
@@ -768,12 +836,13 @@ def plot_2d_mesh(case_toml: Path):
 
 def plot_2d_heterogeneity(case_toml: Path, *, palette_name: str):
     case_mesh = _load_case_mesh(case_toml)
-    triangles, parents = _linear_triangles_2d(case_mesh.elem, _elem_type(case_toml))
+    triangles, parents = _parent_triangles_2d(case_mesh.elem)
     values = case_mesh.material_id[parents]
     triang = mtri.Triangulation(case_mesh.coord[0], case_mesh.coord[1], triangles)
     cmap, norm = _categorical_cmap(get_material_palette(palette_name), values)
     fig, ax = plt.subplots(figsize=(7.0, 4.8), dpi=160)
     artist = ax.tripcolor(triang, facecolors=values, cmap=cmap, norm=norm, edgecolors="k", linewidth=0.15)
+    _seal_2d_triangle_artist(artist)
     ax.set_aspect("equal")
     ax.set_axis_off()
     ax.set_title("Material zones")
@@ -786,17 +855,20 @@ def plot_2d_pore_pressure(artifacts: RunArtifacts, case_toml: Path):
     vtu = load_vtu(artifacts.vtu_path)
     coord, triangles, parents, elem, _ = _vtu_linear_triangles_2d(vtu)
     pore_pressure = _pore_pressure_field(artifacts, case_toml, vtu=vtu)
-    triang = mtri.Triangulation(coord[0], coord[1], triangles)
+    parent_triangles, parent_ids = _parent_triangles_2d(elem)
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=160)
     if pore_pressure.size == coord.shape[1]:
+        triang = mtri.Triangulation(coord[0], coord[1], triangles)
         artist = ax.tripcolor(triang, pore_pressure, shading="gouraud", cmap=PARULA_EQUIV)
     elif pore_pressure.size == elem.shape[1]:
-        artist = ax.tripcolor(triang, facecolors=pore_pressure[parents], cmap=PARULA_EQUIV, edgecolors="none")
+        triang = mtri.Triangulation(coord[0], coord[1], parent_triangles)
+        artist = ax.tripcolor(triang, facecolors=pore_pressure[parent_ids], cmap=PARULA_EQUIV, edgecolors="none")
     else:
         raise ValueError(
             f"Pore-pressure field size {pore_pressure.size} does not match VTU point count {coord.shape[1]} "
             f"or cell count {elem.shape[1]}"
         )
+    _seal_2d_triangle_artist(artist)
     ax.set_aspect("equal")
     ax.set_axis_off()
     ax.set_title("Pore pressure [kPa]")
@@ -807,13 +879,15 @@ def plot_2d_pore_pressure(artifacts: RunArtifacts, case_toml: Path):
 
 def plot_2d_saturation(artifacts: RunArtifacts, case_toml: Path):
     vtu = load_vtu(artifacts.vtu_path)
-    coord, triangles, parents, elem, _ = _vtu_linear_triangles_2d(vtu)
+    coord, _triangles, _parents, elem, _ = _vtu_linear_triangles_2d(vtu)
     saturation = _saturation_field(artifacts, vtu=vtu, n_cells=elem.shape[1])
+    triangles, parents = _parent_triangles_2d(elem)
     values = saturation[parents]
     triang = mtri.Triangulation(coord[0], coord[1], triangles)
     cmap, norm = _categorical_cmap(SATURATION_PALETTE, values)
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=160)
     artist = ax.tripcolor(triang, facecolors=values, cmap=cmap, norm=norm, edgecolors="k", linewidth=0.1)
+    _seal_2d_triangle_artist(artist)
     ax.set_aspect("equal")
     ax.set_axis_off()
     ax.set_title("Saturation")
@@ -832,6 +906,7 @@ def plot_2d_displacement(artifacts: RunArtifacts, case_toml: Path, *, warp_scale
     triang = mtri.Triangulation(deformed[:, 0], deformed[:, 1], triangles)
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=160)
     artist = ax.tripcolor(triang, displacement_mag, shading="gouraud", cmap=PARULA_EQUIV)
+    _seal_2d_triangle_artist(artist)
     ax.set_aspect("equal")
     ax.set_axis_off()
     ax.set_title(f"Displacement magnitude (warp scale = {scale:.4g})")
@@ -842,18 +917,18 @@ def plot_2d_displacement(artifacts: RunArtifacts, case_toml: Path, *, warp_scale
 
 def plot_2d_deviatoric_strain(artifacts: RunArtifacts, case_toml: Path):
     vtu = load_vtu(artifacts.vtu_path)
-    coord, triangles, parents, elem, elem_type = _vtu_linear_triangles_2d(vtu)
+    coord, _triangles, _parents, elem, elem_type = _vtu_linear_triangles_2d(vtu)
     displacement = _displacement_field(artifacts, vtu, dim=2)[:, :2].T
-    values = compute_element_deviatoric_strain(
+    display_coord, display_triangles, display_values = _build_discontinuous_deviatoric_plot_mesh_2d(
         coord,
         _vtu_internal_elem_2d(elem, elem_type),
         elem_type,
         displacement,
-        dim=2,
     )
-    triang = mtri.Triangulation(coord[0], coord[1], triangles)
+    triang = mtri.Triangulation(display_coord[:, 0], display_coord[:, 1], display_triangles)
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=160)
-    artist = ax.tripcolor(triang, facecolors=values[parents], cmap=PARULA_EQUIV, edgecolors="none")
+    artist = ax.tripcolor(triang, display_values, shading="gouraud", cmap=PARULA_EQUIV)
+    _seal_2d_triangle_artist(artist)
     ax.set_aspect("equal")
     ax.set_axis_off()
     ax.set_title("Deviatoric strain norm")
@@ -874,15 +949,7 @@ def show_3d_mesh_view(
         return viz_support_message()
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
-    subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
-    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
-    surface = _surface_for_display(
-        grid,
-        case_toml=case_toml,
-        artifacts=artifacts,
-        nonlinear_subdivision=subdivision,
-    )
-    surface = _decimate_display_mesh(surface, reduction=reduction)
+    surface = _build_parent_boundary_surface(grid, case_toml=case_toml, artifacts=artifacts)
     surface = _optimize_display_mesh(surface)
     plotter = _new_plotter(pv, title="Mesh outline")
     plotter.add_mesh(surface, color="white", show_edges=True, edge_color="#2a62d0")
@@ -903,7 +970,9 @@ def show_3d_pore_pressure_view(
         return viz_support_message()
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
-    grid.point_data["pore_pressure"] = _pore_pressure_field(artifacts, case_toml)
+    if "pore_pressure" not in grid.point_data:
+        vtu = load_vtu(artifacts.vtu_path)
+        grid.point_data["pore_pressure"] = _pore_pressure_field(artifacts, case_toml, vtu=vtu)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
     reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
     surface = _surface_for_display(
@@ -937,61 +1006,34 @@ def show_3d_saturation_view(
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
     saturation = _saturation_field(artifacts, n_cells=int(grid.n_cells))
-    subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
-    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
     plotter = _new_plotter(pv, title="Saturation")
     legend_entries: list[list[str]] = []
     value_labels = {0.0: "unsaturated", 1.0: "saturated"}
-    if _use_explicit_surface_builder(case_toml):
-        surface = _surface_for_display(
-            grid,
-            case_toml=case_toml,
-            artifacts=artifacts,
-            nonlinear_subdivision=subdivision,
-            cell_data_from_parent={"saturation": saturation},
+    surface = _build_parent_boundary_surface(
+        grid,
+        case_toml=case_toml,
+        artifacts=artifacts,
+        cell_data_from_parent={"saturation": saturation},
+    )
+    surface = _optimize_display_mesh(surface, keep_cell_arrays=("saturation",))
+    for value in sorted(float(v) for v in np.unique(surface.cell_data["saturation"])):
+        cell_ids = np.flatnonzero(np.isclose(np.asarray(surface.cell_data["saturation"], dtype=np.float64), value))
+        if cell_ids.size == 0:
+            continue
+        region = surface.extract_cells(cell_ids)
+        if region.n_cells == 0:
+            continue
+        color = SATURATION_PALETTE.get(int(round(value)), (0.8, 0.8, 0.8))
+        plotter.add_mesh(
+            region,
+            color=color,
+            show_edges=True,
+            edge_color="#222222",
+            line_width=0.35,
+            lighting=False,
+            opacity=1.0,
         )
-        surface = _decimate_display_mesh(surface, reduction=reduction)
-        surface = _optimize_display_mesh(surface, keep_cell_arrays=("saturation",))
-        for value in sorted(float(v) for v in np.unique(surface.cell_data["saturation"])):
-            cell_ids = np.flatnonzero(np.isclose(np.asarray(surface.cell_data["saturation"], dtype=np.float64), value))
-            if cell_ids.size == 0:
-                continue
-            region = surface.extract_cells(cell_ids)
-            if region.n_cells == 0:
-                continue
-            color = SATURATION_PALETTE.get(int(round(value)), (0.8, 0.8, 0.8))
-            plotter.add_mesh(
-                region,
-                color=color,
-                show_edges=True,
-                edge_color="#222222",
-                line_width=0.35,
-                lighting=False,
-                opacity=1.0,
-            )
-            legend_entries.append([value_labels.get(value, f"saturation={value:g}"), color])
-    else:
-        for value in sorted(float(v) for v in np.unique(saturation)):
-            cell_ids = np.flatnonzero(np.isclose(saturation, value))
-            if cell_ids.size == 0:
-                continue
-            region = grid.extract_cells(cell_ids)
-            surface = _extract_surface_for_display(region, nonlinear_subdivision=subdivision)
-            surface = _decimate_display_mesh(surface, reduction=reduction)
-            surface = _optimize_display_mesh(surface)
-            if surface.n_cells == 0:
-                continue
-            color = SATURATION_PALETTE.get(int(round(value)), (0.8, 0.8, 0.8))
-            plotter.add_mesh(
-                surface,
-                color=color,
-                show_edges=True,
-                edge_color="#222222",
-                line_width=0.35,
-                lighting=False,
-                opacity=1.0,
-            )
-            legend_entries.append([value_labels.get(value, f"saturation={value:g}"), color])
+        legend_entries.append([value_labels.get(value, f"saturation={value:g}"), color])
     if not legend_entries:
         return "No saturation field available for 3D rendering."
     plotter.add_legend(legend_entries, bcolor="white", face="rectangle")
@@ -1059,8 +1101,35 @@ def show_3d_deviatoric_surface_view(
         return viz_support_message()
     pv = _import_pyvista()
     grid = pv.read(artifacts.vtu_path)
+    cfg = _load_runtime_config(case_toml)
+    elem_type = str(cfg.problem.elem_type).strip().upper()
+    case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
     reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    if elem_type in {"P1", "P2"} and case_mesh.surf is not None:
+        displacement = np.asarray(artifacts.npz["U"], dtype=np.float64)
+        surface = _build_discontinuous_deviatoric_surface_3d(
+            case_mesh.coord,
+            case_mesh.elem,
+            case_mesh.surf,
+            elem_type,
+            displacement,
+        )
+        surface = _decimate_display_mesh(surface, reduction=reduction)
+        surface = _optimize_display_mesh(surface, keep_point_arrays=("deviatoric_strain",))
+        plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
+        plotter.add_mesh(
+            surface,
+            scalars="deviatoric_strain",
+            cmap="jet",
+            preference="point",
+            show_edges=False,
+            lighting=False,
+        )
+        if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
+            _add_boundary_edge_overlay(plotter, grid, case_toml=case_toml, artifacts=artifacts)
+        _apply_matlab_camera(plotter)
+        return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
     if "deviatoric_strain" in grid.point_data:
         surface = _surface_for_display(
             grid,
@@ -1108,8 +1177,6 @@ def show_3d_deviatoric_surface_view(
         _apply_matlab_camera(plotter)
         return _show_plotter(plotter, case_toml, jupyter_backend=jupyter_backend)
 
-    cfg = _load_runtime_config(case_toml)
-    case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
     if case_mesh.surf is None:
         return "No boundary surface is available for deviatoric strain rendering."
     displacement = np.asarray(artifacts.npz["U"], dtype=np.float64)
@@ -1120,7 +1187,7 @@ def show_3d_deviatoric_surface_view(
         displacement,
         dim=3,
     )
-    triangles, face_ids = _build_plotting_mesh_with_face_ids(np.asarray(case_mesh.surf, dtype=np.int64))
+    triangles, face_ids = _build_plotting_mesh_with_face_ids(np.asarray(case_mesh.coord, dtype=np.float64), np.asarray(case_mesh.surf, dtype=np.int64))
     face_parent = _surface_parent_elements(np.asarray(case_mesh.elem, dtype=np.int64), np.asarray(case_mesh.surf, dtype=np.int64))
     tri_vals = np.asarray(values, dtype=np.float64)[face_parent[face_ids]]
     faces = np.column_stack((np.full(triangles.shape[0], 3, dtype=np.int64), triangles)).reshape(-1)
@@ -1308,7 +1375,7 @@ def _build_explicit_boundary_surface(
     if surf.size == 0:
         return pv.PolyData()
 
-    triangles, face_ids = _build_plotting_mesh_with_face_ids(surf)
+    triangles, face_ids = _build_plotting_mesh_with_face_ids(np.asarray(dataset.points, dtype=np.float64), surf)
     used_nodes, inverse = np.unique(triangles.reshape(-1), return_inverse=True)
     local_triangles = inverse.reshape(triangles.shape)
     faces = np.column_stack((np.full(local_triangles.shape[0], 3, dtype=np.int64), local_triangles)).reshape(-1)
@@ -1348,6 +1415,39 @@ def _surface_for_display(
     )
 
 
+def _build_parent_boundary_surface(
+    dataset,
+    *,
+    case_toml: Path,
+    artifacts: RunArtifacts,
+    point_array_names: tuple[str, ...] = (),
+    cell_data_from_parent: dict[str, np.ndarray] | None = None,
+):
+    pv = _import_pyvista()
+    case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
+    surf = np.asarray(case_mesh.surf, dtype=np.int64)
+    if surf.size == 0:
+        return pv.PolyData()
+
+    faces_arr = _surface_faces_by_width(surf)[:, :3]
+    used_nodes, inverse = np.unique(faces_arr.reshape(-1), return_inverse=True)
+    local_faces = inverse.reshape(faces_arr.shape)
+    faces = np.column_stack((np.full(local_faces.shape[0], 3, dtype=np.int64), local_faces)).reshape(-1)
+    surface = pv.PolyData(np.asarray(dataset.points[used_nodes], dtype=np.float64), faces)
+
+    for name in point_array_names:
+        if name not in dataset.point_data:
+            continue
+        surface.point_data[name] = np.asarray(dataset.point_data[name])[used_nodes]
+
+    if cell_data_from_parent:
+        parent = _surface_parent_elements(np.asarray(case_mesh.elem, dtype=np.int64), surf)
+        for name, values in cell_data_from_parent.items():
+            arr = np.asarray(values).reshape(-1)
+            surface.cell_data[name] = arr[parent]
+    return surface
+
+
 def _add_boundary_edge_overlay(
     plotter,
     dataset,
@@ -1359,11 +1459,10 @@ def _add_boundary_edge_overlay(
     color: str = "#1f1f1f",
     line_width: float = 1.2,
 ):
-    edge_surface = _surface_for_display(
+    edge_surface = _build_parent_boundary_surface(
         dataset,
         case_toml=case_toml,
         artifacts=artifacts,
-        nonlinear_subdivision=0,
         point_array_names=((warp_vector_name,) if warp_vector_name is not None else ()),
     )
     keep_arrays = (warp_vector_name,) if warp_vector_name is not None else ()
@@ -1467,6 +1566,193 @@ def deviatoric_strain_norm(strain: np.ndarray, *, dim: int) -> np.ndarray:
     return np.sqrt(np.maximum(0.0, np.sum(strain_arr * dev_e, axis=0)))
 
 
+def _expand_display_derivatives(derivatives: tuple[np.ndarray, ...], n_q: int) -> tuple[np.ndarray, ...]:
+    expanded: list[np.ndarray] = []
+    for deriv in derivatives:
+        arr = np.asarray(deriv, dtype=np.float64)
+        if arr.ndim != 2:
+            raise ValueError(f"Expected derivative array with shape (n_p, n_q), got {arr.shape}.")
+        if arr.shape[1] == 1 and int(n_q) > 1:
+            arr = np.tile(arr, (1, int(n_q)))
+        expanded.append(arr)
+    return tuple(expanded)
+
+
+def _reference_nodes_internal_2d(elem_type: str) -> np.ndarray:
+    elem_key = str(elem_type).strip().upper()
+    if elem_key == "P1":
+        return np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+    if elem_key == "P2":
+        return np.array(
+            [
+                [0.0, 1.0, 0.0, 0.5, 0.0, 0.5],
+                [0.0, 0.0, 1.0, 0.5, 0.5, 0.0],
+            ],
+            dtype=np.float64,
+        )
+    raise NotImplementedError(f"2D deviatoric display is only implemented for P1/P2, got {elem_type!r}.")
+
+
+def _reference_nodes_internal_3d(elem_type: str) -> np.ndarray:
+    from slope_stability.core.simplex_lagrange import tetra_reference_nodes
+
+    elem_key = str(elem_type).strip().upper()
+    if elem_key == "P1":
+        return tetra_reference_nodes(1)
+    if elem_key == "P2":
+        return tetra_reference_nodes(2)
+    raise NotImplementedError(f"3D deviatoric display is only implemented for P1/P2, got {elem_type!r}.")
+
+
+def _evaluate_deviatoric_strain_at_reference_points(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    elem_type: str,
+    displacement: np.ndarray,
+    *,
+    dim: int,
+    xi: np.ndarray,
+) -> np.ndarray:
+    from slope_stability.fem import local_basis_volume_2d, local_basis_volume_3d
+
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    elem_arr = np.asarray(elem, dtype=np.int64)
+    disp_arr = np.asarray(displacement, dtype=np.float64)
+    xi_arr = np.asarray(xi, dtype=np.float64)
+    n_elem = elem_arr.shape[1]
+    n_q = xi_arr.shape[1]
+
+    if dim == 2:
+        _, dhat1, dhat2 = local_basis_volume_2d(elem_type, xi_arr)
+        dhat1, dhat2 = _expand_display_derivatives((dhat1, dhat2), n_q)
+        x = coord_arr[0, elem_arr]
+        y = coord_arr[1, elem_arr]
+        ux = disp_arr[0, elem_arr]
+        uy = disp_arr[1, elem_arr]
+
+        x_rep = np.repeat(x, n_q, axis=1)
+        y_rep = np.repeat(y, n_q, axis=1)
+        ux_rep = np.repeat(ux, n_q, axis=1)
+        uy_rep = np.repeat(uy, n_q, axis=1)
+        dhat1_t = np.tile(dhat1, (1, n_elem))
+        dhat2_t = np.tile(dhat2, (1, n_elem))
+
+        j11 = np.sum(x_rep * dhat1_t, axis=0)
+        j12 = np.sum(y_rep * dhat1_t, axis=0)
+        j21 = np.sum(x_rep * dhat2_t, axis=0)
+        j22 = np.sum(y_rep * dhat2_t, axis=0)
+        det_j = j11 * j22 - j12 * j21
+        inv_det = 1.0 / det_j
+
+        dphi1 = (j22 * dhat1_t - j12 * dhat2_t) * inv_det
+        dphi2 = (-j21 * dhat1_t + j11 * dhat2_t) * inv_det
+        strain = np.vstack(
+            (
+                np.sum(ux_rep * dphi1, axis=0),
+                np.sum(uy_rep * dphi2, axis=0),
+                np.sum(ux_rep * dphi2 + uy_rep * dphi1, axis=0),
+            )
+        )
+    elif dim == 3:
+        _, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi_arr)
+        dhat1, dhat2, dhat3 = _expand_display_derivatives((dhat1, dhat2, dhat3), n_q)
+        x = coord_arr[0, elem_arr]
+        y = coord_arr[1, elem_arr]
+        z = coord_arr[2, elem_arr]
+        ux = disp_arr[0, elem_arr]
+        uy = disp_arr[1, elem_arr]
+        uz = disp_arr[2, elem_arr]
+
+        x_rep = np.repeat(x, n_q, axis=1)
+        y_rep = np.repeat(y, n_q, axis=1)
+        z_rep = np.repeat(z, n_q, axis=1)
+        ux_rep = np.repeat(ux, n_q, axis=1)
+        uy_rep = np.repeat(uy, n_q, axis=1)
+        uz_rep = np.repeat(uz, n_q, axis=1)
+        dhat1_t = np.tile(dhat1, (1, n_elem))
+        dhat2_t = np.tile(dhat2, (1, n_elem))
+        dhat3_t = np.tile(dhat3, (1, n_elem))
+
+        j11 = np.sum(x_rep * dhat1_t, axis=0)
+        j12 = np.sum(y_rep * dhat1_t, axis=0)
+        j13 = np.sum(z_rep * dhat1_t, axis=0)
+        j21 = np.sum(x_rep * dhat2_t, axis=0)
+        j22 = np.sum(y_rep * dhat2_t, axis=0)
+        j23 = np.sum(z_rep * dhat2_t, axis=0)
+        j31 = np.sum(x_rep * dhat3_t, axis=0)
+        j32 = np.sum(y_rep * dhat3_t, axis=0)
+        j33 = np.sum(z_rep * dhat3_t, axis=0)
+
+        det_j = j11 * (j22 * j33 - j23 * j32) - j12 * (j21 * j33 - j23 * j31) + j13 * (j21 * j32 - j22 * j31)
+        inv_det = 1.0 / det_j
+
+        dphi1 = ((j22 * j33 - j23 * j32) * dhat1_t - (j12 * j33 - j13 * j32) * dhat2_t + (j12 * j23 - j13 * j22) * dhat3_t) * inv_det
+        dphi2 = (-(j21 * j33 - j23 * j31) * dhat1_t + (j11 * j33 - j13 * j31) * dhat2_t - (j11 * j23 - j13 * j21) * dhat3_t) * inv_det
+        dphi3 = ((j21 * j32 - j22 * j31) * dhat1_t - (j11 * j32 - j12 * j31) * dhat2_t + (j11 * j22 - j12 * j21) * dhat3_t) * inv_det
+        strain = np.vstack(
+            (
+                np.sum(ux_rep * dphi1, axis=0),
+                np.sum(uy_rep * dphi2, axis=0),
+                np.sum(uz_rep * dphi3, axis=0),
+                np.sum(ux_rep * dphi2 + uy_rep * dphi1, axis=0),
+                np.sum(uy_rep * dphi3 + uz_rep * dphi2, axis=0),
+                np.sum(ux_rep * dphi3 + uz_rep * dphi1, axis=0),
+            )
+        )
+    else:
+        raise ValueError(f"Unsupported dim {dim}")
+
+    values = deviatoric_strain_norm(strain, dim=dim)
+    return values.reshape(n_elem, n_q, order="C").T
+
+
+def _triangle_display_local_split(elem_type: str) -> np.ndarray:
+    elem_key = str(elem_type).strip().upper()
+    if elem_key == "P2":
+        return np.array(
+            [
+                [0, 5, 4],
+                [5, 1, 3],
+                [4, 3, 2],
+                [5, 3, 4],
+            ],
+            dtype=np.int64,
+        )
+    return np.array([[0, 1, 2]], dtype=np.int64)
+
+
+def _build_discontinuous_deviatoric_plot_mesh_2d(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    elem_type: str,
+    displacement: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    elem_arr = np.asarray(elem, dtype=np.int64)
+    values = _evaluate_deviatoric_strain_at_reference_points(
+        coord_arr,
+        elem_arr,
+        elem_type,
+        displacement,
+        dim=2,
+        xi=_reference_nodes_internal_2d(elem_type),
+    )
+    n_local = elem_arr.shape[0]
+    n_elem = elem_arr.shape[1]
+    local_split = _triangle_display_local_split(elem_type)
+    display_coord = coord_arr[:, elem_arr.T.reshape(-1)].T
+    display_values = values.T.reshape(-1)
+    base = (np.arange(n_elem, dtype=np.int64) * n_local)[:, None, None]
+    triangles = (base + local_split[None, :, :]).reshape(-1, 3)
+    return display_coord, triangles, display_values
+
+
 def _surface_faces_by_width(surf: np.ndarray) -> np.ndarray:
     surf_arr = np.asarray(surf, dtype=np.int64)
     if surf_arr.ndim != 2:
@@ -1486,14 +1772,50 @@ def _surface_faces_by_width(surf: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported surface array shape {surf_arr.shape}")
 
 
-def _build_plotting_mesh_with_face_ids(surf: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _surface_display_local_split(n_face_nodes: int) -> np.ndarray:
+    if int(n_face_nodes) == 6:
+        # Internal quadratic triangle order is [v0, v1, v2, e12, e20, e01].
+        return np.array([[0, 5, 4], [5, 1, 3], [4, 3, 2], [5, 3, 4]], dtype=np.int64)
+    if int(n_face_nodes) == 3:
+        return np.array([[0, 1, 2]], dtype=np.int64)
+    raise ValueError(f"Unsupported surface face width {n_face_nodes}")
+
+
+def _canonical_surface_faces_for_display(coord: np.ndarray, surf: np.ndarray) -> np.ndarray:
     surf_faces = _surface_faces_by_width(surf)
+    if surf_faces.shape[1] != 6:
+        return surf_faces
+
+    coord_arr = np.asarray(coord, dtype=np.float64)
+    if coord_arr.ndim != 2:
+        raise ValueError(f"Expected coordinate array with shape (dim, n_nodes) or (n_nodes, dim), got {coord_arr.shape}.")
+    if coord_arr.shape[0] > coord_arr.shape[1]:
+        coord_arr = coord_arr.T
+    if coord_arr.shape[0] not in {2, 3}:
+        raise ValueError(f"Unsupported coordinate shape {coord_arr.shape} for quadratic surface canonicalization.")
+    try:
+        return _canonicalize_triangle6_vtu_elem(coord_arr, surf_faces.T).T
+    except ValueError:
+        return surf_faces
+
+
+def _build_plotting_mesh_with_face_ids(
+    coord_or_surf: np.ndarray,
+    surf: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if surf is None:
+        coord = None
+        surf_arr = coord_or_surf
+    else:
+        coord = np.asarray(coord_or_surf, dtype=np.float64)
+        surf_arr = surf
+    surf_faces = _surface_faces_by_width(surf_arr) if coord is None else _canonical_surface_faces_for_display(coord, surf_arr)
     if surf_faces.shape[1] != 6:
         tri = surf_faces.astype(np.int64)
         face_ids = np.arange(tri.shape[0], dtype=np.int64)
         return tri, face_ids
 
-    split = np.array([[0, 3, 5], [3, 1, 4], [3, 4, 5], [5, 4, 2]], dtype=np.int64)
+    split = _surface_display_local_split(surf_faces.shape[1])
     triangles: list[np.ndarray] = []
     face_ids: list[int] = []
     for face_id, face in enumerate(surf_faces):
@@ -1529,6 +1851,57 @@ def _surface_parent_elements(elem: np.ndarray, surf: np.ndarray) -> np.ndarray:
     return parent
 
 
+def _surface_parent_local_node_indices(coord: np.ndarray, elem: np.ndarray, surf: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    elem_arr = np.asarray(elem, dtype=np.int64)
+    surf_faces = _canonical_surface_faces_for_display(coord, surf)
+    parents = _surface_parent_elements(elem_arr, surf)
+    local_ids = np.empty_like(surf_faces)
+    for face_id, parent_id in enumerate(parents):
+        parent_nodes = elem_arr[:, int(parent_id)]
+        lookup = {int(node): idx for idx, node in enumerate(parent_nodes)}
+        for local_face_id, node in enumerate(surf_faces[face_id]):
+            local_ids[face_id, local_face_id] = lookup[int(node)]
+    return parents, local_ids
+
+
+def _build_discontinuous_deviatoric_surface_3d(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    surf: np.ndarray,
+    elem_type: str,
+    displacement: np.ndarray,
+):
+    pv = _import_pyvista()
+    surf_faces = _canonical_surface_faces_for_display(coord, surf)
+    if surf_faces.size == 0:
+        return pv.PolyData()
+
+    nodal_values = _evaluate_deviatoric_strain_at_reference_points(
+        np.asarray(coord, dtype=np.float64),
+        np.asarray(elem, dtype=np.int64),
+        elem_type,
+        np.asarray(displacement, dtype=np.float64),
+        dim=3,
+        xi=_reference_nodes_internal_3d(elem_type),
+    )
+    parents, local_ids = _surface_parent_local_node_indices(
+        np.asarray(coord, dtype=np.float64),
+        np.asarray(elem, dtype=np.int64),
+        np.asarray(surf, dtype=np.int64),
+    )
+    face_values = nodal_values[local_ids, parents[:, None]]
+
+    n_faces, n_face_nodes = surf_faces.shape
+    local_split = _surface_display_local_split(n_face_nodes)
+    display_points = np.asarray(coord, dtype=np.float64)[:, surf_faces.reshape(-1)].T
+    base = (np.arange(n_faces, dtype=np.int64) * n_face_nodes)[:, None, None]
+    triangles = (base + local_split[None, :, :]).reshape(-1, 3)
+    faces = np.column_stack((np.full(triangles.shape[0], 3, dtype=np.int64), triangles)).reshape(-1)
+    surface = pv.PolyData(display_points, faces)
+    surface.point_data["deviatoric_strain"] = np.asarray(face_values, dtype=np.float64).reshape(-1)
+    return surface
+
+
 def summarize_sections(sections: dict[str, dict[str, Any]], materials: list[dict[str, Any]]) -> str:
     lines = ["Editable runtime sections:"]
     for name in RUNTIME_SECTION_ORDER:
@@ -1543,7 +1916,18 @@ def summarize_sections(sections: dict[str, dict[str, Any]], materials: list[dict
 def _load_runtime_config(case_toml: Path):
     from slope_stability.core.run_config import load_run_case_config
 
-    return load_run_case_config(case_toml)
+    case_toml = Path(case_toml).resolve()
+    try:
+        return load_run_case_config(case_toml)
+    except Exception:
+        # Some committed historical artifacts still carry legacy generated configs
+        # that predate the canonical asset-based run contract. When a notebook is
+        # pointed at such an artifact, fall back to the owning benchmark case.
+        if case_toml.name == "generated_case.toml":
+            benchmark_case = case_toml.parents[2] / "case.toml"
+            if benchmark_case.exists():
+                return load_run_case_config(benchmark_case)
+        raise
 
 
 def _load_case_mesh(case_toml: Path, *, artifacts: RunArtifacts | None = None):
@@ -1564,14 +1948,22 @@ def _artifacts_mpi_size(artifacts: RunArtifacts | None) -> int:
         return 1
 
 
-def _comsol_ssr_node_permutation(case_toml: Path, artifacts: RunArtifacts) -> np.ndarray | None:
-    from slope_stability.mesh import load_mesh_p2_comsol, reorder_mesh_nodes
+def _seepage_ssr_node_permutation(case_toml: Path, artifacts: RunArtifacts) -> np.ndarray | None:
+    from slope_stability.mesh import reorder_mesh_nodes
+    from slope_stability.problem_asset_runtime import build_mesh_for_resolved_asset, resolve_problem_asset_from_config
 
     cfg = _load_runtime_config(case_toml)
-    if cfg.problem.case not in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
+    if int(getattr(cfg.problem, "dimension", 0)) != 3:
         return None
+    if str(getattr(cfg.problem, "analysis", "")).strip().lower() != "ssr":
+        return None
+
+    resolved = resolve_problem_asset_from_config(cfg)
+    if "seepage" not in resolved.definition.capabilities:
+        return None
+
     part_count = _artifacts_mpi_size(artifacts) if cfg.execution.node_ordering.lower() == "block_metis" else None
-    mesh = load_mesh_p2_comsol(cfg.problem.mesh_path, boundary_type=1)
+    mesh = build_mesh_for_resolved_asset(resolved, elem_type=cfg.problem.elem_type)
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,
@@ -1587,19 +1979,21 @@ def _linear_triangles_2d(elem: np.ndarray, elem_type: str) -> tuple[np.ndarray, 
     elem_arr = np.asarray(elem, dtype=np.int64)
     n_elem = elem_arr.shape[1]
     if elem_type == "P2":
-        tris = np.empty((n_elem * 4, 3), dtype=np.int64)
-        parents = np.repeat(np.arange(n_elem, dtype=np.int64), 4)
-        e01 = elem_arr[5, :]
-        e12 = elem_arr[3, :]
-        e20 = elem_arr[4, :]
-        tris[0::4, :] = np.stack((elem_arr[0, :], e01, e20), axis=1)
-        tris[1::4, :] = np.stack((e01, elem_arr[1, :], e12), axis=1)
-        tris[2::4, :] = np.stack((e20, e12, elem_arr[2, :]), axis=1)
-        tris[3::4, :] = np.stack((e01, e12, e20), axis=1)
+        local = _triangle_display_local_split(elem_type)
+        base = (np.arange(n_elem, dtype=np.int64) * elem_arr.shape[0])[:, None, None]
+        flat_tri = (base + local[None, :, :]).reshape(-1, 3)
+        flat_nodes = elem_arr.T.reshape(-1)
+        tris = flat_nodes[flat_tri]
+        parents = np.repeat(np.arange(n_elem, dtype=np.int64), local.shape[0])
         return tris, parents
     tris = elem_arr[:3, :].T.copy()
     parents = np.arange(n_elem, dtype=np.int64)
     return tris, parents
+
+
+def _parent_triangles_2d(elem: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    elem_arr = np.asarray(elem, dtype=np.int64)
+    return elem_arr[:3, :].T.copy(), np.arange(elem_arr.shape[1], dtype=np.int64)
 
 
 def _point_field(vtu: VtuData, name: str, *, default: np.ndarray | None = None) -> np.ndarray:
@@ -1614,6 +2008,39 @@ def _cell_field(vtu: VtuData, name: str) -> np.ndarray:
     if name not in vtu.cell_data:
         raise KeyError(f"Cell field {name!r} not found in VTU export")
     return np.asarray(vtu.cell_data[name])
+
+
+def _seal_2d_triangle_artist(artist):
+    # Notebook backends can show white seams between adjacent triangles even
+    # when the connectivity is correct. Disable collection antialiasing and
+    # edge drawing so the 2D fills render watertight.
+    for setter in ("set_antialiased", "set_antialiaseds"):
+        if hasattr(artist, setter):
+            try:
+                getattr(artist, setter)(False)
+            except TypeError:
+                pass
+    if hasattr(artist, "set_linewidth"):
+        try:
+            artist.set_linewidth(0.0)
+        except TypeError:
+            pass
+    if hasattr(artist, "set_edgecolor"):
+        try:
+            artist.set_edgecolor("none")
+        except (TypeError, ValueError):
+            pass
+    if hasattr(artist, "set_snap"):
+        try:
+            artist.set_snap(True)
+        except TypeError:
+            pass
+    if hasattr(artist, "set_rasterized"):
+        try:
+            artist.set_rasterized(True)
+        except TypeError:
+            pass
+    return artist
 
 
 def _saturation_field(
@@ -1670,11 +2097,9 @@ def _pore_pressure_field(
             return _point_field(vtu, "pore_pressure")
         raise KeyError("No pore-pressure field available in artifacts or VTU export")
 
-    cfg = _load_runtime_config(case_toml)
-    if cfg.problem.case in {"3d_hetero_seepage_ssr_comsol", "3d_homo_seepage_ssr", "3d_concave_seepage_ssr"}:
-        perm = _comsol_ssr_node_permutation(case_toml, artifacts)
-        if perm is not None and perm.size == raw.size:
-            return raw[perm]
+    perm = _seepage_ssr_node_permutation(case_toml, artifacts)
+    if perm is not None and perm.size == raw.size:
+        return raw[perm]
     return raw
 
 
@@ -1709,6 +2134,24 @@ def _resolve_section_paths(case_toml: Path, data: dict[str, Any]) -> dict[str, A
     return resolved
 
 
+def _resolved_problem_mesh_path(problem: dict[str, Any]) -> Path | None:
+    asset_name = problem.get("asset")
+    if asset_name is None:
+        return None
+    try:
+        from slope_stability.problem_asset_runtime import resolve_problem_asset
+
+        resolved = resolve_problem_asset(
+            asset_name=str(asset_name),
+            mesh_variant=None if problem.get("mesh_variant") is None else str(problem.get("mesh_variant")),
+            mesh_path=problem.get("mesh_path"),
+            profile=None if problem.get("profile") is None else str(problem.get("profile")),
+        )
+    except Exception:
+        return None
+    return resolved.mesh_path
+
+
 def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], execution_profile: str) -> dict[str, dict[str, Any]]:
     profile = str(execution_profile).strip().lower()
     cloned = {name: dict(value) for name, value in sections.items()}
@@ -1724,6 +2167,8 @@ def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], exec
     execution = dict(cloned.get("execution", {}))
     export = dict(cloned.get("export", default_export_section()))
     case_id = str(problem.get("case", "")).lower()
+    asset_id = str(problem.get("asset", "")).lower()
+    analysis = str(problem.get("analysis", "")).lower()
     benchmark_name = case_toml.parent.name.lower()
 
     if continuation:
@@ -1743,14 +2188,22 @@ def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], exec
     export["write_history_json"] = False
     export["write_solution_vtu"] = True
     cloned["export"] = export
-    if str(problem.get("analysis", "")).lower() == "seepage" and "linear_solver" in cloned:
+    if analysis == "seepage" and "linear_solver" in cloned:
         cloned["linear_solver"]["max_iterations"] = min(int(cloned["linear_solver"].get("max_iterations", 500)), 300)
     if case_id in {
         "2d_franz_dam_ssr",
         "2d_kozinec_ll",
         "2d_kozinec_ssr",
         "2d_luzec_ssr",
-    }:
+    } or benchmark_name in {
+        "slope_stability_2d_franz_dam_ssr",
+        "slope_stability_2d_kozinec_ll",
+        "slope_stability_2d_kozinec_ssr",
+        "slope_stability_2d_luzec_ssr",
+    } or (
+        asset_id in {"2d_franz_dam", "2d_kozinec", "2d_luzec"}
+        and analysis in {"ll", "ssr"}
+    ):
         execution = dict(cloned.get("execution", {}))
         execution["mpi_distribute_by_nodes"] = False
         execution["constitutive_mode"] = "global"

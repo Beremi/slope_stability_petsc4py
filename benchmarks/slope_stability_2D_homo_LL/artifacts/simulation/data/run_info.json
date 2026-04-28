@@ -1,37 +1,35 @@
 {
   "run_info": {
-    "timestamp": "2026-04-04T05:06:13",
-    "runtime_seconds": 145.3284499309957,
-    "mpi_size": 8,
-    "mesh_nodes": 10641,
-    "mesh_elements": 5200,
-    "unknowns": 20840,
-    "analysis": "ll",
+    "timestamp": "2026-04-23T13:36:04",
+    "runtime_seconds": 133.74683567602187,
     "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
-    "step_count": 17
+    "analysis": "ll",
+    "continuation_method": "indirect",
+    "case_name": "homo_slope",
+    "rank_count": 8,
+    "step_count": 15
   },
   "params": {
+    "case_name": "homo_slope",
     "analysis": "ll",
+    "continuation_method": "indirect",
     "elem_type": "P2",
     "davis_type": "B",
-    "h": 0.5,
-    "x1": 15.0,
-    "x2": 10.000000000000002,
-    "x3": 15.0,
-    "y1": 10.0,
-    "y2": 10.0,
-    "beta_deg": 45.0,
-    "material_row": [
-      6.0,
-      45.0,
-      0.0,
-      40000.0,
-      0.3,
-      20.0,
-      20.0
+    "material_rows": [
+      [
+        6.0,
+        45.0,
+        0.0,
+        40000.0,
+        0.3,
+        20.0,
+        20.0
+      ]
     ],
+    "hydraulic_conductivity": null,
+    "asset_name": "2d_homo_slope",
+    "mesh_variant": "h0.5.msh",
     "node_ordering": "block_metis",
-    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     "lambda_init": 1.0,
     "d_lambda_init": 0.1,
     "d_lambda_min": 0.001,
@@ -47,13 +45,14 @@
     "r_min": 0.0001,
     "linear_tolerance": 0.1,
     "linear_max_iter": 100,
-    "mpi_distribute_by_nodes": true,
+    "solver_type": "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
+    "pc_hypre_coarsen_type": "HMIS",
+    "pc_hypre_interp_type": "ext+i",
+    "pc_hypre_strong_threshold": null,
     "recycle_preconditioner": true,
     "constitutive_mode": "overlap",
     "tangent_kernel": "rows",
-    "pc_hypre_coarsen_type": "HMIS",
-    "pc_hypre_interp_type": "ext+i",
-    "pc_hypre_strong_threshold": null
+    "mesh_dir": "/home/beremi/repos/slope_stability-1/meshes/2d_homo_slope"
   },
   "mesh": {
     "coord_shape": [
@@ -71,29 +70,29 @@
   },
   "timings": {
     "constitutive": {
-      "reduction": 0.0002924001310020685,
-      "stress": 3.3266276030335575,
-      "stress_tangent": 2.722808143356815,
-      "build_F": 0.704884760081768,
+      "reduction": 0.00028608698630705476,
+      "stress": 2.9943807854433544,
+      "stress_tangent": 2.630443917703815,
+      "build_F": 0.6625753707485273,
       "build_F_K_tangent": 0.0,
-      "build_tangent_local": 24.110989578301087,
-      "local_strain": 0.5028724179137498,
-      "local_constitutive": 5.399255215656012,
+      "build_tangent_local": 23.397729109972715,
+      "local_strain": 0.4804190677241422,
+      "local_constitutive": 4.9661724312463775,
       "local_constitutive_comm": 0.0,
-      "local_force_assembly": 0.7031024573370814,
+      "local_force_assembly": 0.660879896953702,
       "local_force_gather": 0.0,
       "potential": 0.0
     },
     "linear": {
       "init_linear_iterations": 3,
-      "init_linear_solve_time": 0.010506872786208987,
-      "init_linear_preconditioner_time": 0.030468858079984784,
+      "init_linear_solve_time": 0.010282743955031037,
+      "init_linear_preconditioner_time": 0.023664384963922203,
       "init_linear_orthogonalization_time": 0.0,
-      "attempt_linear_iterations_total": 29556,
-      "attempt_linear_solve_time_total": 95.40020506014116,
-      "attempt_linear_preconditioner_time_total": 1.0500101721845567,
-      "attempt_linear_orthogonalization_time_total": 11.290556925581768
+      "attempt_linear_iterations_total": 27692,
+      "attempt_linear_solve_time_total": 85.31988756218925,
+      "attempt_linear_preconditioner_time_total": 1.015429905964993,
+      "attempt_linear_orthogonalization_time_total": 11.065570902894251
     },
-    "continuation_total_wall_time": 145.28610960999504
+    "continuation_total_wall_time": 133.7107113120146
   }
 }
