@@ -10,13 +10,13 @@ import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from slope_stability.cli.run_3D_hetero_SSR_capture import load_material_rows_for_path
 from slope_stability.constitutive.problem import ConstitutiveOperator
 from slope_stability.core.elements import validate_supported_elem_type
 from slope_stability.fem.assembly import assemble_strain_operator, build_elastic_stiffness_matrix
 from slope_stability.fem.distributed_elastic import assemble_owned_elastic_rows_for_comm
 from slope_stability.fem.distributed_tangent import prepare_bddc_subdomain_pattern
 from slope_stability.mesh import load_mesh_from_file
+from slope_stability.problem_assets import load_material_rows_for_path
 from slope_stability.linear.solver import SolverFactory
 from slope_stability.mesh.materials import MaterialSpec, heterogenous_materials
 from slope_stability.mesh.reorder import reorder_mesh_nodes

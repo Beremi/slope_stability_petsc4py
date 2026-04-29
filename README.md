@@ -7,8 +7,8 @@ PETSc-based Python reimplementation of the slope-stability workflows, organized 
 - `src/`: Python/PETSc implementation, including runtime CLI entrypoints under `src/slope_stability/cli/`
 - `build_scripts/`: tracked environment/bootstrap/build helpers
 - `scripts_local/`: ignored ad hoc developer scripts and one-off investigations
-- `benchmarks/`: unified case registry; canonical benchmarks and extra runnable cases both live here
-- `meshes/`: temporary problem-family mesh sorting plus setup metadata
+- `benchmarks/`: unified asset-first case registry; canonical benchmarks and extra runnable cases both live here
+- `meshes/`: canonical mesh assets; each asset owns mesh variants, materials, hydraulics, BCs, and profiles
 - `docs/`: notes worth keeping for future work
 - `artifacts/`: ignored generated outputs
 - `archives/`: ignored archived experiments and legacy outputs
@@ -92,6 +92,11 @@ Reusable full-run plotting artifacts live under:
 
 Generated outputs go under `artifacts/...` and stay out of git.
 
+Benchmark configs are intentionally thin. `case.toml` selects an asset, mesh variant,
+optional profile, analysis type, element order, solver settings, and export settings.
+Problem physics belongs in `meshes/<asset>/definition.py`, not in benchmark TOML files or
+`src/` runtime modules.
+
 ## Exports
 
 Config-driven runs export:
@@ -105,13 +110,13 @@ The intent is straightforward postprocessing with PyVista, meshio, or ParaView.
 
 ## Mesh organization
 
-`meshes/` is currently a temporary problem-family sorting layer. The intended direction is:
+`meshes/` is the source of truth for problem assets:
 
-- one canonical mesh file per mesh variant, in a standard triangle/tetrahedral format
-- separate tags for materials and boundary-condition assignment
-- any extra derived setup handled by Python setup code, not embedded in the mesh file format
-
-The temporary setup API lives in `meshes/*/definition.py`.
+- `meshes/<asset>/definition.py` exports `ASSET`
+- `meshes/<asset>/*.msh` are canonical linear Gmsh `MSH 4.1` variants
+- `definition.py` declares materials, hydraulic conductivity, water unit weight, mechanics
+  BCs, seepage head BCs, hydraulic state, profiles, and region assignments
+- runtime code in `src/` stays problem-agnostic
 
 ## Notes / TODO
 
@@ -119,11 +124,11 @@ The temporary setup API lives in `meshes/*/definition.py`.
 - TODO: once benchmark parity is stable, freeze compact reference snapshots for regression-style testing.
 - `tests_local/` is intentionally ignored and reserved for local smoke/regression scripts during development.
 - `scripts_local/` is intentionally ignored and holds exploratory utilities that are not part of the benchmark-replication surface.
-- Mesh storage is not in its final standardized form yet; current family folders are a transition step.
 - The MATLAB tree is expected at `./slope_stability_matlab` locally for benchmark runs.
 
 ## Supporting docs
 
 - `benchmarks/README.md`
+- `docs/new_benchmark_new_geometry_guide.md`
 - `docs/config_case_matrix.md`
 - `docs/config_scheme_3d.md`

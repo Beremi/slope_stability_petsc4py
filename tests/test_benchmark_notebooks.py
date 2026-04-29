@@ -144,13 +144,15 @@ def test_support_module_imports_without_viz_extras() -> None:
     assert "Interactive 3D" in message
 
 
-def test_load_case_sections_resolves_relative_paths_for_generated_configs() -> None:
+def test_load_case_sections_keeps_problem_asset_first_for_generated_configs() -> None:
     module = _support()
     sections = module.load_case_sections(
         BENCHMARKS_DIR / "slope_stability_3D_hetero_SSR_default" / "artifacts" / "simulation" / "generated_case.toml"
     )
 
-    assert Path(sections["problem"]["mesh_path"]).is_absolute()
+    assert sections["problem"]["asset"] == "3d_hetero_slope"
+    assert sections["problem"]["mesh_variant"] == "adaptive_family_a_l1.msh"
+    assert "mesh_path" not in sections["problem"]
 
 
 def test_smoke_profile_uses_lightweight_textmesh_and_ll_overrides() -> None:

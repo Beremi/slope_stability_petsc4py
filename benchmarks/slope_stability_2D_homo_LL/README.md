@@ -18,3 +18,14 @@ geometrical parameters.
 
 - MATLAB driver: `slope_stability_2D_homo_LL.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `2d_homo_slope`
+- Mesh variant: `h0.5.msh`
+- Profile: default
+- Analysis: `ll`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/2d_homo_slope/definition.py`](../../meshes/2d_homo_slope/definition.py).

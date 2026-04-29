@@ -36,12 +36,7 @@ def _load_asset_from_definition_path(definition_path: Path, fallback_name: str) 
     asset = getattr(module, "ASSET", None)
     if asset is not None:
         return asset
-    payload = getattr(module, "DEFINITION", None)
-    if isinstance(payload, dict):
-        from .compat import asset_from_definition_dict
-
-        return asset_from_definition_dict(payload, asset_dir=definition_path.parent, fallback_name=fallback_name)
-    raise ValueError(f"Mesh definition {definition_path} must expose an ASSET object or legacy DEFINITION dictionary.")
+    raise ValueError(f"Mesh definition {definition_path} must expose an ASSET object.")
 
 
 def load_problem_asset(name: str) -> ProblemAssetAPI:

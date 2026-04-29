@@ -18,11 +18,11 @@ from slope_stability.export import write_debug_bundle_h5, write_history_csv_tabl
 from slope_stability.postprocess import build_field_exports, rebuild_case_mesh, validate_case_mesh_alignment
 from slope_stability.problem_asset_runtime import resolve_problem_asset_from_config
 
-from .run_2D_textmesh_case_capture import run_capture as run_2d_textmesh_case_capture
-from .run_2D_sloan2013_seepage_capture import run_capture as run_2d_sloan2013_seepage_capture
-from .run_3D_hetero_SSR_capture import run_capture as run_3d_ssr_capture
-from .run_3D_hetero_seepage_capture import run_capture as run_3d_hetero_seepage_capture
-from .run_3D_seepage_SSR_capture import run_capture as run_3d_seepage_ssr_capture
+from .run_2d_mechanics_capture import run_capture as run_2d_mechanics_capture
+from .run_2d_seepage_capture import run_capture as run_2d_seepage_capture
+from .run_3d_mechanics_capture import run_capture as run_3d_mechanics_capture
+from .run_3d_seepage_capture import run_capture as run_3d_seepage_capture
+from .run_3d_seepage_ssr_capture import run_capture as run_3d_seepage_ssr_capture
 
 
 def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
@@ -47,7 +47,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "linear_max_iter": cfg.seepage.linear_max_iter,
             "nonlinear_max_iter": cfg.seepage.nonlinear_max_iter,
         }
-        return run_2d_sloan2013_seepage_capture, kwargs
+        return run_2d_seepage_capture, kwargs
 
     if resolved.dimension == 2:
         kwargs = {
@@ -103,11 +103,12 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "seepage_linear_max_iter": cfg.seepage.linear_max_iter,
             **common_linear,
         }
-        return run_2d_textmesh_case_capture, kwargs
+        return run_2d_mechanics_capture, kwargs
 
     if resolved.dimension == 3 and cfg.problem.analysis.lower() == "seepage":
         kwargs = {
-            "mesh_path": resolved.mesh_path,
+            "asset_name": resolved.asset_name,
+            "mesh_variant": resolved.variant_name,
             "profile": profile,
             "elem_type": cfg.problem.elem_type,
             "node_ordering": cfg.execution.node_ordering,
@@ -115,11 +116,12 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "linear_tolerance": cfg.seepage.linear_tolerance,
             "linear_max_iter": cfg.seepage.linear_max_iter,
         }
-        return run_3d_hetero_seepage_capture, kwargs
+        return run_3d_seepage_capture, kwargs
 
     if resolved.dimension == 3 and "seepage" in resolved.definition.capabilities:
         kwargs = {
-            "mesh_path": resolved.mesh_path,
+            "asset_name": resolved.asset_name,
+            "mesh_variant": resolved.variant_name,
             "profile": profile,
             "elem_type": cfg.problem.elem_type,
             "node_ordering": cfg.execution.node_ordering,
@@ -158,11 +160,11 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
     if resolved.dimension == 3:
         kwargs = {
             "analysis": cfg.problem.analysis,
-            "mesh_path": resolved.mesh_path,
+            "asset_name": resolved.asset_name,
+            "mesh_variant": resolved.variant_name,
             "profile": profile,
             "elem_type": cfg.problem.elem_type,
             "davis_type": cfg.problem.davis_type,
-            "material_rows": cfg.material_rows(),
             "node_ordering": cfg.execution.node_ordering,
             "lambda_init": cfg.continuation.lambda_init,
             "d_lambda_init": cfg.continuation.d_lambda_init,
@@ -251,7 +253,7 @@ def _case_runner_kwargs(cfg: RunCaseConfig) -> tuple[callable, dict]:
             "tangent_kernel": cfg.execution.tangent_kernel,
             **common_linear,
         }
-        return run_3d_ssr_capture, kwargs
+        return run_3d_mechanics_capture, kwargs
 
     raise KeyError(
         f"Unsupported asset routing for asset={resolved.asset_name!r}, "

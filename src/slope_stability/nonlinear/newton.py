@@ -34,6 +34,12 @@ def _free_norm(v: np.ndarray, Q: np.ndarray) -> float:
     return float(np.linalg.norm(_to_free_vector(v, Q)))
 
 
+def _normalize_damping_info(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    return {"alpha": float(value), "line_search_iterations": 0}
+
+
 def _combine_matrices(alpha: float, A, beta: float, B):
     if PETSc is not None and isinstance(A, PETSc.Mat) and not isinstance(B, PETSc.Mat):
         B = to_petsc_aij_matrix(B, comm=A.getComm(), block_size=A.getBlockSize() or None)
@@ -1073,6 +1079,7 @@ def newton(
                     alpha_upper=float(alpha_cap),
                     return_info=True,
                 )
+                damping_info = _normalize_damping_info(damping_info)
                 alpha = float(damping_info["alpha"])
                 line_search_iterations = int(damping_info["line_search_iterations"]) + int(
                     armijo.get("line_search_evaluations", 0)
@@ -1107,6 +1114,7 @@ def newton(
                     comm=comm,
                     return_info=True,
                 )
+                damping_info = _normalize_damping_info(damping_info)
                 alpha = float(damping_info["alpha"])
                 line_search_iterations = int(damping_info["line_search_iterations"])
                 accepted_energy = energy_value
@@ -1707,6 +1715,7 @@ def newton_ind_ssr(
             armijo_fallback_to_alg5=bool(armijo_fallback_to_alg5),
             return_info=True,
         )
+        damping_info = _normalize_damping_info(damping_info)
         alpha = float(damping_info["alpha"])
         line_search_iterations = int(damping_info["line_search_iterations"])
         line_search_fallback_used = bool(damping_info.get("fallback_used", False))

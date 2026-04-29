@@ -36,7 +36,6 @@ if str(SRC_DIR) not in sys.path:
 RUNTIME_SECTION_ORDER = (
     "problem",
     "geometry",
-    "case_data",
     "execution",
     "continuation",
     "newton",
@@ -217,12 +216,6 @@ def load_case_sections(case_toml: Path) -> dict[str, dict[str, Any]]:
             sections[name] = merged
         else:
             sections[name] = _resolve_section_paths(case_toml, value) if isinstance(value, dict) else {}
-    problem = dict(sections.get("problem", {}))
-    if problem and problem.get("mesh_path") is None and problem.get("asset"):
-        resolved_mesh_path = _resolved_problem_mesh_path(problem)
-        if resolved_mesh_path is not None:
-            problem["mesh_path"] = resolved_mesh_path
-            sections["problem"] = problem
     return sections
 
 
@@ -2132,24 +2125,6 @@ def _resolve_section_paths(case_toml: Path, data: dict[str, Any]) -> dict[str, A
         else:
             resolved[key] = value
     return resolved
-
-
-def _resolved_problem_mesh_path(problem: dict[str, Any]) -> Path | None:
-    asset_name = problem.get("asset")
-    if asset_name is None:
-        return None
-    try:
-        from slope_stability.problem_asset_runtime import resolve_problem_asset
-
-        resolved = resolve_problem_asset(
-            asset_name=str(asset_name),
-            mesh_variant=None if problem.get("mesh_variant") is None else str(problem.get("mesh_variant")),
-            mesh_path=problem.get("mesh_path"),
-            profile=None if problem.get("profile") is None else str(problem.get("profile")),
-        )
-    except Exception:
-        return None
-    return resolved.mesh_path
 
 
 def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], execution_profile: str) -> dict[str, dict[str, Any]]:

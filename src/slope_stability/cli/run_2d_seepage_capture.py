@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the 2D Sloan2013 seepage benchmark and save MATLAB-comparison artifacts."""
+"""Run a 2D asset-backed seepage case and save artifacts."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _plot_saturation(coord: np.ndarray, elem: np.ndarray, mater_sat: np.ndarray,
 def run_capture(
     *,
     out_dir: Path,
-    asset_name: str | None = "2d_sloan2013",
+    asset_name: str,
     mesh_variant: str | None = None,
     profile: str | None = None,
     elem_type: str = "P1",
@@ -87,7 +87,7 @@ def run_capture(
     plots_dir.mkdir(exist_ok=True)
 
     elem_type = str(elem_type).upper()
-    resolved_asset = resolve_problem_asset(asset_name=str(asset_name or "2d_sloan2013"), mesh_variant=mesh_variant, profile=profile)
+    resolved_asset = resolve_problem_asset(asset_name=str(asset_name), mesh_variant=mesh_variant, profile=profile)
     built_mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
     partition_count = int(size) if str(node_ordering).lower() == "block_metis" else None
     reordered = reorder_mesh_nodes(
@@ -104,20 +104,6 @@ def run_capture(
     surf = np.asarray(reordered.surf, dtype=np.int64)
     material_identifier = np.asarray(built_mesh.material_id, dtype=np.int64)
 
-    params = dict(resolved_asset.variant.get("source", {}).get("parameters", resolved_asset.variant.get("parameters", {})))
-    x1 = float(params.get("x1", 15.0))
-    x3 = float(params.get("x3", 20.0))
-    y11 = float(params.get("y11", 6.75))
-    y12 = float(params.get("y12", 0.5))
-    y13 = float(params.get("y13", 0.75))
-    y21 = float(params.get("y21", 1.0))
-    y22 = float(params.get("y22", 9.25))
-    y23 = float(params.get("y23", 2.0))
-    y1 = y11 + y12 + y13
-    y2 = y21 + y22 + y23
-    beta_deg = float(params.get("beta_deg", 26.6))
-    beta = np.deg2rad(beta_deg)
-    x2 = float(y2 / np.tan(beta))
     grho = float(seepage_spec.seepage.water_unit_weight)
     k = np.asarray(seepage_spec.conductivity, dtype=np.float64)
     n_q = int(quadrature_volume_2d(elem_type)[0].shape[1])
@@ -195,20 +181,8 @@ def run_capture(
             "elem_type": elem_type,
             "asset_name": resolved_asset.asset_name,
             "mesh_variant": resolved_asset.variant_name,
+            "profile": resolved_asset.resolved_variant.profile,
             "node_ordering": str(node_ordering),
-            "h": 0.5,
-            "x1": x1,
-            "x2": x2,
-            "x3": x3,
-            "y11": y11,
-            "y12": y12,
-            "y13": y13,
-            "y21": y21,
-            "y22": y22,
-            "y23": y23,
-            "y1": y1,
-            "y2": y2,
-            "beta_deg": beta_deg,
             "grho": grho,
             "k": k.tolist(),
             "linear_tolerance": linear_tolerance,
@@ -244,8 +218,11 @@ def run_capture(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run 2D Sloan2013 seepage capture.")
+    parser = argparse.ArgumentParser(description="Run a 2D asset-backed seepage case.")
     parser.add_argument("--out_dir", type=Path, required=True)
+    parser.add_argument("--asset", type=str, required=True)
+    parser.add_argument("--mesh_variant", type=str, default=None)
+    parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--elem_type", type=str, default="P1", choices=["P1", "P2", "P4"])
     parser.add_argument("--node_ordering", type=str, default="block_metis")
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE")
@@ -255,6 +232,9 @@ def main() -> None:
     args = parser.parse_args()
     run_capture(
         out_dir=args.out_dir,
+        asset_name=args.asset,
+        mesh_variant=args.mesh_variant,
+        profile=args.profile,
         elem_type=args.elem_type,
         node_ordering=args.node_ordering,
         solver_type=args.solver_type,

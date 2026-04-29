@@ -10,11 +10,8 @@ name = "slope_stability_2D_homo_LL"
 asset = "2d_homo_slope"
 mesh_variant = "h0.5.msh"
 analysis = "ll"
-dimension = 2
-variant = "homo"
 elem_type = "P2"
 davis_type = "B"
-seepage = false
 
 [execution]
 node_ordering = "block_metis"

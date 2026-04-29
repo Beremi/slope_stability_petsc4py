@@ -3,12 +3,8 @@ name = "slope_stability_2D_Luzec_SSR"
 asset = "2d_luzec"
 mesh_variant = "default.msh"
 analysis = "ssr"
-dimension = 2
-variant = "hetero"
 elem_type = "P1"
 davis_type = "B"
-seepage = true
-mesh_path = "/home/beremi/repos/slope_stability-1/meshes/2d_luzec/default.msh"
 
 [execution]
 node_ordering = "none"

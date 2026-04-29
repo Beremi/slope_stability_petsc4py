@@ -19,3 +19,14 @@ that benchmark family.
 
 - MATLAB driver: `slope_stability_3D_hetero_SSR.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `3d_hetero_slope`
+- Mesh variant: `adaptive_family_a_l1.msh`
+- Profile: default
+- Analysis: `ssr`
+- Element: `P4`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/3d_hetero_slope/definition.py`](../../meshes/3d_hetero_slope/definition.py).

@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src" / "slope_stability"
+
+FORBIDDEN_SUBSTRINGS = (
+    "2d_franz_dam",
+    "2d_homo_slope",
+    "2d_kozinec",
+    "2d_luzec",
+    "2d_sloan2013",
+    "3d_hetero_seepage",
+    "3d_hetero_slope",
+    "3d_homo_slope",
+    "3d_siopt",
+    "adaptive_family",
+    "concave_family",
+    "comsol",
+    "franz",
+    "kozinec",
+    "luzec",
+    "run_2d_homo",
+    "run_2d_sloan",
+    "run_2d_textmesh",
+    "run_3d_hetero",
+    "run_3d_homo",
+    "siopt",
+    "sloan",
+    "textmesh",
+    "transition_default",
+    "waterlevels",
+)
+
+
+def test_src_does_not_commit_problem_specific_assets_or_defaults() -> None:
+    hits: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        relative = path.relative_to(ROOT)
+        text = path.read_text(encoding="utf-8").lower()
+        for token in FORBIDDEN_SUBSTRINGS:
+            if token in text:
+                hits.append(f"{relative}: {token}")
+    assert hits == []

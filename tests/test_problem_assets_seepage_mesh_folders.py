@@ -95,7 +95,7 @@ def test_config_runner_uses_asset_family_physical_inputs_for_migrated_3d_cases()
     cfg = load_run_case_config(WATERLEVELS_CASE_PATH)
     assert cfg.problem.asset == "3d_hetero_seepage"
     assert cfg.problem.mesh_variant == "concave_family_b.msh"
-    assert cfg.seepage.conductivity == ()
+    assert not hasattr(cfg.seepage, "conductivity")
 
     cfg_transition = load_run_case_config(TRANSITION_CASE_PATH)
     assert cfg_transition.problem.asset == "3d_hetero_seepage_transition"

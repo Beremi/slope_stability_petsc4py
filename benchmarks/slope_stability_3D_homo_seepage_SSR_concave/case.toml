@@ -11,11 +11,8 @@ asset = "3d_hetero_seepage_transition"
 mesh_variant = "transition_default.msh"
 profile = "fixed_base"
 analysis = "ssr"
-dimension = 3
-variant = "hetero"
 elem_type = "P2"
 davis_type = "B"
-seepage = true
 
 [execution]
 node_ordering = "block_metis"

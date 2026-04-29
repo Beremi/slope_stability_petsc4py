@@ -3,12 +3,8 @@ name = "slope_stability_3D_hetero_SSR_default"
 asset = "3d_hetero_slope"
 mesh_variant = "adaptive_family_a_l1.msh"
 analysis = "ssr"
-dimension = 3
-variant = "hetero"
 elem_type = "P4"
 davis_type = "B"
-seepage = false
-mesh_path = "/home/beremi/repos/slope_stability-1/meshes/3d_hetero_slope/adaptive_family_a_l1.msh"
 
 [execution]
 node_ordering = "block_metis"

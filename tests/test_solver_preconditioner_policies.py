@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from slope_stability.core.config import LinearSolverConfig
+from slope_stability.core.run_config import LinearSolverConfig
 from slope_stability.linear.solver import PetscMatlabExactDFGMRESSolver
 from slope_stability.linear.solver import SolverFactory
 

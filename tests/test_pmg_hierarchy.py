@@ -7,9 +7,9 @@ import pytest
 from petsc4py import PETSc
 from scipy.sparse import identity
 
-from slope_stability.cli.run_3D_hetero_SSR_capture import run_capture
-import slope_stability.cli.run_3D_hetero_SSR_capture as run_capture_mod
-from slope_stability.core.config import ContinuationConfig, LinearSolverConfig, MaterialConfig, Problem3DConfig, Run3DSSRConfig
+from slope_stability.cli.run_3d_mechanics_capture import run_capture
+import slope_stability.cli.run_3d_mechanics_capture as run_capture_mod
+from slope_stability.core.run_config import ContinuationConfig, LinearSolverConfig, ProblemConfig, RunCaseConfig
 from slope_stability.core.simplex_lagrange import tetra_lagrange_node_tuples, tetra_reference_nodes
 from slope_stability.fem.basis import local_basis_volume_3d
 from slope_stability.linear.pmg import (
@@ -160,23 +160,12 @@ def _tiny_chain_pmg_hierarchy() -> GeneralPMGHierarchy:
     )
 
 
-def test_legacy_run_3d_config_accepts_p1() -> None:
-    cfg = Run3DSSRConfig(
-        problem=Problem3DConfig(
+def test_asset_run_case_config_accepts_p1() -> None:
+    cfg = RunCaseConfig(
+        problem=ProblemConfig(
+            name="pmg_p1",
+            asset="3d_hetero_slope",
             elem_type="P1",
-            mesh_path=MESH_PATH,
-            materials=(
-                MaterialConfig(
-                    name="soil",
-                    c0=15.0,
-                    phi=30.0,
-                    psi=0.0,
-                    young=10000.0,
-                    poisson=0.33,
-                    gamma_sat=19.0,
-                    gamma_unsat=19.0,
-                ),
-            ),
         ),
         continuation=ContinuationConfig(step_max=1),
         linear_solver=LinearSolverConfig(),
@@ -907,7 +896,8 @@ def test_run_capture_rejects_pmg_on_non_p4(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="P4"):
         run_capture(
             tmp_path / "pmg_invalid_elem",
-            mesh_path=MESH_PATH,
+            asset_name="3d_hetero_slope",
+            mesh_variant="adaptive_family_a_l1.msh",
             elem_type="P2",
             pc_backend="pmg",
             preconditioner_matrix_source="tangent",
@@ -919,7 +909,8 @@ def test_run_capture_rejects_non_tangent_pmg_source(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="preconditioner_matrix_source"):
         run_capture(
             tmp_path / "pmg_invalid_source",
-            mesh_path=MESH_PATH,
+            asset_name="3d_hetero_slope",
+            mesh_variant="adaptive_family_a_l1.msh",
             elem_type="P4",
             pc_backend="pmg",
             preconditioner_matrix_source="elastic",
@@ -936,7 +927,8 @@ def test_run_capture_accepts_mixed_p2_pmg_shell_path(monkeypatch: pytest.MonkeyP
     with pytest.raises(RuntimeError, match="mixed-pmg-sentinel"):
         run_capture(
             tmp_path / "pmg_shell_mixed_p2",
-            mesh_path=MESH_PATH_L2,
+            asset_name="3d_hetero_slope",
+            mesh_variant="adaptive_family_a_l2.msh",
             elem_type="P2",
             pc_backend="pmg_shell",
             pmg_coarse_mesh_path=MESH_PATH,
@@ -958,7 +950,8 @@ def test_run_capture_accepts_mixed_p4_with_intermediate_p2_path(
     with pytest.raises(RuntimeError, match="mixed-pmg-p4-p2-sentinel"):
         run_capture(
             tmp_path / "pmg_shell_mixed_p4_p2",
-            mesh_path=MESH_PATH_L2,
+            asset_name="3d_hetero_slope",
+            mesh_variant="adaptive_family_a_l2.msh",
             elem_type="P4",
             pc_backend="pmg_shell",
             pmg_coarse_mesh_path=MESH_PATH,
@@ -993,7 +986,8 @@ def test_run_capture_accepts_same_mesh_p2_pmg_shell_path(monkeypatch: pytest.Mon
     with pytest.raises(RuntimeError, match="same-mesh-pmg-sentinel"):
         run_capture(
             tmp_path / "pmg_shell_same_mesh_p2",
-            mesh_path=MESH_PATH,
+            asset_name="3d_hetero_slope",
+            mesh_variant="adaptive_family_a_l1.msh",
             elem_type="P2",
             pc_backend="pmg_shell",
             preconditioner_matrix_source="tangent",

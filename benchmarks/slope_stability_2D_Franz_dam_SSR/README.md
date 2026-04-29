@@ -18,3 +18,14 @@ dam with unconfined seepage is considered, see (Sysala et al., CAS 2023).
 
 - MATLAB driver: `slope_stability_2D_Franz_dam_SSR.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `2d_franz_dam`
+- Mesh variant: `default.msh`
+- Profile: default
+- Analysis: `ssr`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/2d_franz_dam/definition.py`](../../meshes/2d_franz_dam/definition.py).

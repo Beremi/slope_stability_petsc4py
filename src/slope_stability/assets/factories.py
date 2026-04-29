@@ -24,6 +24,7 @@ from .api import (
     SeepageSpec,
     SolverMesh,
 )
+from .evaluators import head_values
 from .support.canonical_gmsh import build_solver_mesh, gmsh_variants_from_dir, load_canonical_gmsh_mesh
 
 
@@ -253,25 +254,6 @@ def build_seepage_spec(
     return spec
 
 
-def _profile_head_values(coords: np.ndarray, spec: dict[str, Any]) -> np.ndarray:
-    axis = str(spec.get("axis", "x")).strip().lower()
-    axis_idx = {"x": 0, "y": 1, "z": 2}.get(axis)
-    if axis_idx is None:
-        raise ValueError(f"Unsupported piecewise-linear axis {axis!r}.")
-    points = np.asarray(spec.get("points"), dtype=np.float64)
-    if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 2:
-        raise ValueError("piecewise_linear_level requires at least two [position, level] points.")
-    x = np.asarray(coords[axis_idx, :], dtype=np.float64)
-    head = np.interp(x, points[:, 0], points[:, 1])
-    left_mode = str(spec.get("left_mode", "constant")).strip().lower()
-    right_mode = str(spec.get("right_mode", "constant")).strip().lower()
-    if left_mode == "constant":
-        head[x < points[0, 0]] = float(points[0, 1])
-    if right_mode == "constant":
-        head[x > points[-1, 0]] = float(points[-1, 1])
-    return head
-
-
 def _surface_edge_groups(elem_type: str) -> dict[tuple[int, int], tuple[int, ...]]:
     elem_key = str(elem_type).strip().upper()
     if elem_key == "P1":
@@ -458,16 +440,8 @@ class CanonicalProblemAsset(ProblemAssetAPI):
             scope = str(bc.value_model.get("scope", "support_only")).strip().lower()
             if kind == "dry":
                 continue
-            if kind == "constant_level":
-                level = float(bc.value_model["level"])
-                values = rho_g * np.maximum(level - y, 0.0)
-                if scope == "domain_below_head":
-                    pw_d = np.maximum(pw_d, values)
-                else:
-                    pw_d[nodes] = np.maximum(pw_d[nodes], values[nodes])
-                continue
-            if kind == "piecewise_linear_level":
-                head = _profile_head_values(mesh.coord, bc.value_model)
+            if kind in {"constant_level", "piecewise_linear_level"}:
+                head = head_values(mesh.coord, bc.value_model, kind=kind)
                 values = rho_g * np.maximum(head - y, 0.0)
                 if scope == "domain_below_head":
                     pw_d = np.maximum(pw_d, values)

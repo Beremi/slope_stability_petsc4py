@@ -17,3 +17,14 @@ Doubrava-Kozinec is considered, see (Sysala et al., NAG 2021)
 
 - MATLAB driver: `slope_stability_2D_Kozinec_LL.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `2d_kozinec`
+- Mesh variant: `default.msh`
+- Profile: default
+- Analysis: `ll`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/2d_kozinec/definition.py`](../../meshes/2d_kozinec/definition.py).

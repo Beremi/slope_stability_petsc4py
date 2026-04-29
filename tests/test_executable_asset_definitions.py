@@ -54,6 +54,21 @@ def test_seepage_and_mechanics_capabilities_match_asset_families() -> None:
     assert load_problem_asset("3d_hetero_seepage").capabilities == frozenset({"mechanics", "seepage"})
 
 
+def test_asset_definitions_own_materials_and_hydraulics() -> None:
+    for asset_name in sorted(CANONICAL_ASSETS):
+        asset = load_problem_asset(asset_name)
+        if "mechanics" in asset.capabilities:
+            rows = asset.material_rows()
+            assert rows is not None
+            assert len(rows) > 0
+        if "seepage" in asset.capabilities:
+            spec = asset.seepage_spec()
+            assert spec is not None
+            assert spec.water_unit_weight > 0.0
+            assert spec.head_bcs
+            assert asset.hydraulic_conductivity() is not None
+
+
 def test_removed_legacy_asset_aliases_are_not_loadable() -> None:
     for legacy_name in (
         "2d_generated_homo",

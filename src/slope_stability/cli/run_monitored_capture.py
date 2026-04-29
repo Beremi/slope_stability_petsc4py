@@ -132,7 +132,7 @@ def main() -> None:
     parser.add_argument("--rss_limit_gb", type=float, default=6.0, help="Kill the run if any monitored rank exceeds this RSS.")
     parser.add_argument("--sample_sec", type=float, default=1.0)
     parser.add_argument("--python", type=Path, default=Path(".venv/bin/python"))
-    parser.add_argument("--capture_script", type=Path, default=Path("src/slope_stability/cli/run_3D_hetero_SSR_capture.py"))
+    parser.add_argument("--capture_script", type=Path, default=Path("src/slope_stability/cli/run_3d_mechanics_capture.py"))
     parser.add_argument("--use_hwthread_cpus", action="store_true", help="Pass --use-hwthread-cpus to mpiexec.")
     parser.add_argument("--oversubscribe", action="store_true", help="Pass --map-by :OVERSUBSCRIBE to mpiexec.")
     args, capture_args = parser.parse_known_args()

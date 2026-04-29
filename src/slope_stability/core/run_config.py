@@ -8,34 +8,11 @@ from typing import Any
 import tomllib
 
 from .elements import validate_supported_elem_type
-from ..problem_assets import load_material_rows_for_asset, load_material_rows_for_path
+from ..problem_assets import load_material_rows_for_asset
+from ..assets import load_problem_asset
 
 
 TomlValue = str | int | float | bool | list[Any] | dict[str, Any]
-
-
-@dataclass(frozen=True)
-class MaterialConfig:
-    name: str
-    c0: float
-    phi: float
-    psi: float
-    young: float
-    poisson: float
-    gamma_sat: float
-    gamma_unsat: float
-    hydraulic_conductivity: float | None = None
-
-    def as_row(self) -> list[float]:
-        return [
-            float(self.c0),
-            float(self.phi),
-            float(self.psi),
-            float(self.young),
-            float(self.poisson),
-            float(self.gamma_sat),
-            float(self.gamma_unsat),
-        ]
 
 
 @dataclass(frozen=True)
@@ -44,15 +21,11 @@ class ProblemConfig:
     case: str = ""
     analysis: str = "ssr"
     dimension: int = 3
-    variant: str = "hetero"
     elem_type: str = "P2"
     davis_type: str = "B"
-    seepage: bool = False
-    asset: str | None = None
+    asset: str = ""
     mesh_variant: str | None = None
     profile: str | None = None
-    mesh_path: Path | None = None
-    mesh_boundary_type: int | None = None
 
 
 @dataclass(frozen=True)
@@ -173,8 +146,6 @@ class SeepageConfig:
     linear_tolerance: float = 1e-10
     linear_max_iter: int = 500
     nonlinear_max_iter: int = 50
-    water_unit_weight: float = 9.81
-    conductivity: tuple[float, ...] = ()
     extra: dict[str, TomlValue] = field(default_factory=dict)
 
 
@@ -197,9 +168,7 @@ class RunCaseConfig:
     linear_solver: LinearSolverConfig = LinearSolverConfig()
     seepage: SeepageConfig = SeepageConfig()
     export: ExportConfig = ExportConfig()
-    materials: tuple[MaterialConfig, ...] = ()
     geometry: dict[str, TomlValue] = field(default_factory=dict)
-    case_data: dict[str, TomlValue] = field(default_factory=dict)
 
     def validate(self) -> "RunCaseConfig":
         valid_stopping_criteria = {
@@ -218,8 +187,7 @@ class RunCaseConfig:
             "alg5",
             "armijo_residual",
         }
-        mesh_dir = self.case_data.get("mesh_dir")
-        if not self.problem.asset and self.problem.mesh_path is None and mesh_dir is None:
+        if not self.problem.asset:
             raise ValueError("[problem].asset must be set.")
         if self.problem.analysis.lower() not in {"ssr", "ll", "seepage"}:
             raise ValueError(f"Unsupported analysis {self.problem.analysis!r}.")
@@ -237,22 +205,11 @@ class RunCaseConfig:
                 )
         validate_supported_elem_type(self.problem.dimension, self.problem.elem_type)
         if self.problem.analysis.lower() != "seepage" and not self.material_rows():
-            raise ValueError("At least one [[materials]] entry is required for non-seepage cases.")
+            raise ValueError("At least one asset material row is required for non-seepage cases.")
         return self
 
     def material_rows(self) -> list[list[float]]:
-        if self.materials:
-            return [m.as_row() for m in self.materials]
-        if self.problem.asset:
-            rows = load_material_rows_for_asset(self.problem.asset)
-            return [] if rows is None else rows
-        mesh_dir = self.case_data.get("mesh_dir")
-        if mesh_dir is not None:
-            rows = load_material_rows_for_path(Path(mesh_dir))
-            return [] if rows is None else rows
-        if self.problem.mesh_path is None:
-            return []
-        rows = load_material_rows_for_path(self.problem.mesh_path)
+        rows = load_material_rows_for_asset(self.problem.asset)
         return [] if rows is None else rows
 
 
@@ -277,28 +234,6 @@ def _resolve_section_paths(config_path: Path, data: dict[str, Any]) -> dict[str,
     return resolved
 
 
-def _load_materials(data: dict[str, Any]) -> tuple[MaterialConfig, ...]:
-    raw = data.get("materials", [])
-    materials = []
-    for item in raw:
-        materials.append(
-            MaterialConfig(
-                name=str(item["name"]),
-                c0=float(item["c0"]),
-                phi=float(item["phi"]),
-                psi=float(item["psi"]),
-                young=float(item["young"]),
-                poisson=float(item["poisson"]),
-                gamma_sat=float(item["gamma_sat"]),
-                gamma_unsat=float(item["gamma_unsat"]),
-                hydraulic_conductivity=(
-                    None if item.get("hydraulic_conductivity") is None else float(item["hydraulic_conductivity"])
-                ),
-            )
-        )
-    return tuple(materials)
-
-
 def load_run_case_config(path: str | Path) -> RunCaseConfig:
     config_path = Path(path).resolve()
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -311,25 +246,33 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
     seepage_data = dict(data.get("seepage", {}))
     export_data = dict(data.get("export", {}))
     geometry_data = _resolve_section_paths(config_path, dict(data.get("geometry", {})))
-    case_data = _resolve_section_paths(config_path, dict(data.get("case_data", {})))
+    if data.get("materials") is not None:
+        raise ValueError("Committed case configs must not define [[materials]]; use meshes/<asset>/definition.py.")
+    if data.get("case_data") is not None:
+        raise ValueError("Committed case configs must not define [case_data]; use [problem].asset and mesh_variant.")
+    forbidden_problem_fields = {"dimension", "mesh_path", "mesh_boundary_type", "seepage", "variant"}
+    forbidden_present = sorted(forbidden_problem_fields & set(problem_data))
+    if forbidden_present:
+        raise ValueError(f"[problem] fields {forbidden_present} are not supported; use asset mesh variants.")
+    forbidden_seepage_fields = {"water_unit_weight", "conductivity"}
+    forbidden_seepage = sorted(forbidden_seepage_fields & set(seepage_data))
+    if forbidden_seepage:
+        raise ValueError(f"[seepage] fields {forbidden_seepage} are asset-owned; use meshes/<asset>/definition.py.")
 
-    mesh_path = problem_data.get("mesh_path")
+    asset_name = str(problem_data.get("asset", "")).strip()
+    if not asset_name:
+        raise ValueError("[problem].asset must be set.")
+    asset = load_problem_asset(asset_name)
     problem = ProblemConfig(
         name=str(problem_data.get("name", "case")),
         case=str(problem_data.get("case", "")),
         analysis=str(problem_data.get("analysis", "ssr")),
-        dimension=int(problem_data.get("dimension", 3)),
-        variant=str(problem_data.get("variant", "hetero")),
+        dimension=int(asset.dimension),
         elem_type=str(problem_data.get("elem_type", "P2")),
         davis_type=str(problem_data.get("davis_type", "B")),
-        seepage=bool(problem_data.get("seepage", False)),
-        asset=None if problem_data.get("asset") is None else str(problem_data.get("asset")),
+        asset=asset_name,
         mesh_variant=None if problem_data.get("mesh_variant") is None else str(problem_data.get("mesh_variant")),
         profile=None if problem_data.get("profile") is None else str(problem_data.get("profile")),
-        mesh_path=None if mesh_path is None else _resolve_path(config_path, str(mesh_path)),
-        mesh_boundary_type=(
-            None if problem_data.get("mesh_boundary_type") is None else int(problem_data.get("mesh_boundary_type"))
-        ),
     )
     execution = ExecutionConfig(
         node_ordering=str(execution_data.get("node_ordering", "block_metis")),
@@ -598,27 +541,16 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         compiled_outer=bool(linear_data.get("compiled_outer", False)),
         recycle_preconditioner=bool(linear_data.get("recycle_preconditioner", True)),
     )
-    conductivity = seepage_data.get("conductivity", ())
-    if isinstance(conductivity, (int, float)):
-        conductivity = (float(conductivity),)
-    elif isinstance(conductivity, list):
-        conductivity = tuple(float(v) for v in conductivity)
-    elif isinstance(conductivity, tuple):
-        conductivity = tuple(float(v) for v in conductivity)
-    else:
-        conductivity = ()
     seepage = SeepageConfig(
         linear_tolerance=float(seepage_data.get("linear_tolerance", 1e-10)),
         linear_max_iter=int(seepage_data.get("linear_max_iter", 500)),
         nonlinear_max_iter=int(seepage_data.get("nonlinear_max_iter", 50)),
-        water_unit_weight=float(seepage_data.get("water_unit_weight", 9.81)),
-        conductivity=tuple(conductivity),
         extra=_resolve_section_paths(
             config_path,
             {
                 k: v
                 for k, v in seepage_data.items()
-                if k not in {"linear_tolerance", "linear_max_iter", "nonlinear_max_iter", "water_unit_weight", "conductivity"}
+                if k not in {"linear_tolerance", "linear_max_iter", "nonlinear_max_iter"}
             },
         ),
     )
@@ -639,7 +571,5 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         linear_solver=linear_solver,
         seepage=seepage,
         export=export,
-        materials=_load_materials(data),
         geometry=geometry_data,
-        case_data=case_data,
     ).validate()

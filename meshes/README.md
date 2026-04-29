@@ -12,7 +12,7 @@ Runtime rules:
 
 - runtime problem definitions are loaded only from `definition.py`
 - runtime geometry/topology comes only from canonical `.msh` variants
-- `definition.py` may declare only variants, materials, region-to-material assignment, mechanics BCs, seepage BCs, and named profiles
+- `definition.py` owns variants, materials, hydraulic conductivity, water unit weight, hydraulic state, region-to-material assignment, mechanics BCs, seepage BCs, and named profiles
 - runtime code outside `meshes/` is asset-agnostic; it does not contain case-specific geometry or BC logic
 
 Canonical mesh naming:
@@ -34,3 +34,14 @@ Migration notes:
 - old text bundles, generated geometry inputs, and pre-canonical `.msh` files are kept under each asset’s `legacy/source/`
 - rerun scripts live under each asset’s `legacy/`
 - the converter index is tracked in [CONVERTERS.md](CONVERTERS.md)
+
+Adding a benchmark:
+
+- add or update `meshes/<asset>/definition.py`
+- add the canonical mesh variant at `meshes/<asset>/<variant>.msh`
+- add `benchmarks/<benchmark>/case.toml` with `asset`, `mesh_variant`, optional `profile`, analysis, element type, solver, export, and notebook metadata
+- update `tests/test_executable_asset_definitions.py` if the asset becomes part of the canonical required set
+- do not edit `src/` for new benchmark data; only add to `src/slope_stability/assets/evaluators.py` when the mesh needs a genuinely new generic BC or value model
+
+For the complete field-by-field guide, see
+[docs/new_benchmark_new_geometry_guide.md](../docs/new_benchmark_new_geometry_guide.md).

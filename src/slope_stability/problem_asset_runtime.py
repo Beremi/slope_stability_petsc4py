@@ -80,37 +80,15 @@ def resolve_problem_asset_from_config(cfg) -> ResolvedAsset:
     problem = cfg.problem
     asset_name = getattr(problem, "asset", None)
     mesh_variant = getattr(problem, "mesh_variant", None)
-    mesh_path = getattr(problem, "mesh_path", None)
     profile = getattr(problem, "profile", None)
 
     if asset_name:
         return resolve_problem_asset(
             asset_name=str(asset_name),
             mesh_variant=None if mesh_variant is None else str(mesh_variant),
-            mesh_path=mesh_path,
             profile=None if profile is None else str(profile),
         )
 
-    if mesh_path is not None:
-        asset = load_problem_asset_for_path(mesh_path)
-        if asset is not None:
-            return resolve_problem_asset(
-                asset_name=str(asset.asset_id),
-                mesh_variant=Path(mesh_path).name,
-                mesh_path=mesh_path,
-                profile=None if profile is None else str(profile),
-            )
-
-    mesh_dir = getattr(cfg, "case_data", {}).get("mesh_dir")
-    if mesh_dir is not None:
-        asset = load_problem_asset_for_path(mesh_dir)
-        if asset is not None:
-            return resolve_problem_asset(
-                asset_name=str(asset.asset_id),
-                mesh_variant=None if mesh_variant is None else str(mesh_variant),
-                mesh_path=mesh_path,
-                profile=None if profile is None else str(profile),
-            )
     raise KeyError("Could not resolve a problem asset from config; set [problem].asset.")
 
 
@@ -128,18 +106,7 @@ def build_mesh_for_path(
     path = Path(path).resolve()
     asset = load_problem_asset_for_path(path)
     if asset is None:
-        from .mesh.loader import load_mesh_from_file
-
-        mesh = load_mesh_from_file(path, boundary_type=boundary_type, elem_type=elem_type)
-        return MeshBuildResult(
-            coord=np.asarray(mesh.coord, dtype=np.float64),
-            elem=np.asarray(mesh.elem, dtype=np.int64),
-            surf=np.asarray(mesh.surf, dtype=np.int64),
-            q_mask=np.asarray(mesh.q_mask, dtype=bool),
-            material_id=np.asarray(mesh.material, dtype=np.int64),
-            boundary_labels=np.asarray(mesh.boundary, dtype=np.int64),
-            elem_type=mesh.elem_type,
-        )
+        raise ValueError(f"No registered problem asset owns mesh path {path}.")
     resolved = resolve_problem_asset(
         asset_name=str(asset.asset_id),
         mesh_variant=path.name,

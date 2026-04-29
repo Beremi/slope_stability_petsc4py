@@ -8,7 +8,7 @@ The repository now has one active problem-definition contract:
 - one or more canonical Gmsh `MSH 4.1` files in `meshes/<asset>/`
 - optional legacy inputs and deterministic converter scripts in `meshes/<asset>/legacy/`
 
-The active runtime no longer depends on generated geometry assets, textmesh bundles, COMSOL loaders, water-level loaders, coordinate selectors, duplicated LL/SSR asset wrappers, or integer `boundary_type` switches. Those inputs still exist only as migration references under `legacy/` or as compatibility code for archived configs and studies.
+The active runtime no longer depends on generated geometry assets, textmesh bundles, COMSOL loaders, water-level loaders, coordinate selectors, duplicated LL/SSR asset wrappers, or integer `boundary_type` switches. Those inputs still exist only as migration references under `legacy/` or in historical archive material.
 
 ## Scope And Validation
 
@@ -86,12 +86,21 @@ Active benchmark configs now use:
 - `problem.asset`
 - `problem.mesh_variant`
 - optional `problem.profile`
+- `problem.analysis`
+- `problem.elem_type`
 
 Active benchmark configs no longer rely on:
 
+- `problem.dimension`
+- `problem.variant`
+- `problem.seepage`
 - `problem.case`
 - `problem.mesh_path`
 - `problem.mesh_boundary_type`
+- `[[materials]]`
+- `[case_data]`
+- `[seepage].water_unit_weight`
+- `[seepage].conductivity`
 
 `src/slope_stability/cli/run_case_from_config.py` now dispatches by generic problem class: dimension, analysis, and seepage capability. It does not branch on old asset/source-kind families.
 
@@ -130,12 +139,12 @@ Active benchmark configs no longer rely on:
 - curved geometry support is validated in `tests/test_canonical_curved_boundary_geometry.py`
 - no production asset currently needs curved Neumann patches, but the API is already wired for them
 
-### 6. Compatibility Residue Still Exists, But Not In The Active Contract
+### 6. Compatibility Residue Is Limited To Explicit Generic Aliases
 
 - `src/slope_stability/assets/factories.py` still exports `build_asset(...)` as a compatibility alias
-- `src/slope_stability/core/run_config.py` and `src/slope_stability/problem_asset_runtime.py` still accept legacy `problem.case` / `mesh_path` fallbacks for archived generated configs
-- some archived studies, stored artifact snapshots, and historical docs still mention old asset names or raw `mesh_path` values
-- none of those paths are required for the active benchmark suite
+- `problem.case` remains a harmless optional reporting label
+- archived studies, stored artifact snapshots, and historical docs may mention old asset names or raw mesh paths
+- the active config loader rejects raw mesh paths, committed materials, and problem-owned hydraulic values
 
 ## Quick Matrix
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run a PETSc-side 3D heterogeneous SSR indirect-continuation case and export artifacts."""
+"""Run an asset-backed 3D mechanics continuation case and export artifacts."""
 
 from __future__ import annotations
 
@@ -43,8 +43,11 @@ from slope_stability.linear.pmg import (
 from slope_stability.constitutive import ConstitutiveOperator
 from slope_stability.continuation import indirect as indirect_module
 from slope_stability.continuation import LL_indirect_continuation, SSR_indirect_continuation
-from slope_stability.problem_asset_runtime import build_mesh_for_path
-from slope_stability.problem_assets import load_material_rows_for_path
+from slope_stability.problem_asset_runtime import (
+    build_mesh_for_resolved_asset,
+    load_mechanical_problem_spec,
+    resolve_problem_asset,
+)
 from slope_stability.utils import (
     flatten_field,
     local_csr_to_petsc_aij_matrix,
@@ -513,14 +516,13 @@ def _release_rank_local_resources(*, solvers: tuple[object, ...], const_builder,
 def run_capture(
     output_dir: Path,
     *,
-    analysis: str = "ssr",
-    mesh_path: Path | None = None,
+    asset_name: str,
+    mesh_variant: str | None = None,
     profile: str | None = None,
-    mesh_boundary_type: int = 0,
+    analysis: str = "ssr",
     elem_type: str = "P2",
     quadrature_rule: int | None = None,
     davis_type: str = "B",
-    material_rows: list[list[float]] | np.ndarray | None = None,
     node_ordering: str = "block_metis",
     lambda_init: float = 1.0,
     d_lambda_init: float = 0.1,
@@ -646,10 +648,14 @@ def run_capture(
         progress_callback = _make_progress_logger(data_dir)
 
     elem_type = validate_supported_elem_type(3, elem_type)
-
-    if mesh_path is None:
-        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh"
-    mesh_path = Path(mesh_path)
+    resolved_asset = resolve_problem_asset(asset_name=str(asset_name), mesh_variant=mesh_variant, profile=profile)
+    mechanical_spec = load_mechanical_problem_spec(resolved_asset)
+    if resolved_asset.mesh_path is None:
+        raise ValueError(f"Asset {resolved_asset.asset_name!r} variant {resolved_asset.variant_name!r} has no mesh file.")
+    mesh_path = resolved_asset.mesh_path
+    profile = resolved_asset.resolved_variant.profile
+    mesh_boundary_type = int(resolved_asset.boundary_type)
+    material_rows = mechanical_spec.material_rows
 
     solver_type_upper = str(solver_type).upper()
     effective_pc_backend = None
@@ -682,15 +688,6 @@ def run_capture(
                 f"{effective_pc_backend} backend is currently supported only with PETSC_MATLAB_DFGMRES* or KSPFGMRES* solver types."
             )
 
-    if material_rows is None:
-        material_rows = load_material_rows_for_path(mesh_path)
-    if material_rows is None:
-        material_rows = [
-            [15.0, 30.0, 0.0, 10000.0, 0.33, 19.0, 19.0],
-            [15.0, 38.0, 0.0, 50000.0, 0.30, 22.0, 22.0],
-            [10.0, 35.0, 0.0, 50000.0, 0.30, 21.0, 21.0],
-            [18.0, 32.0, 0.0, 20000.0, 0.33, 20.0, 20.0],
-        ]
     mat_props = np.asarray(material_rows, dtype=np.float64)
     materials = [
         MaterialSpec(
@@ -763,7 +760,7 @@ def run_capture(
         q_mask = pmg_hierarchy.fine_level.q_mask.astype(bool)
         material_identifier = pmg_hierarchy.fine_level.material_identifier.astype(np.int64).ravel()
     else:
-        mesh = build_mesh_for_path(mesh_path, elem_type=elem_type, profile=profile, boundary_type=int(mesh_boundary_type))
+        mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
         reordered = reorder_mesh_nodes(
             mesh.coord,
             mesh.elem,
@@ -1573,9 +1570,10 @@ def run_capture(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run PETSc 3D mechanics continuation case.")
     parser.add_argument("--out_dir", type=Path, default=None, help="Output directory for artifacts.")
+    parser.add_argument("--asset", type=str, required=True)
+    parser.add_argument("--mesh_variant", type=str, default=None)
+    parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--analysis", type=str, default="ssr", choices=["ssr", "ll"])
-    parser.add_argument("--mesh_path", type=Path, default=None, help="Optional mesh override.")
-    parser.add_argument("--mesh_boundary_type", type=int, default=0)
     parser.add_argument("--elem_type", type=str, default="P2", choices=["P1", "P2", "P4"])
     parser.add_argument("--quadrature_rule", type=int, default=None, choices=available_tetra_quadrature_rules())
     parser.add_argument("--davis_type", type=str, default="B")
@@ -1813,13 +1811,14 @@ def main() -> None:
 
     if args.out_dir is None:
         ts = np.datetime64("now").astype(str).replace(":", "-")
-        args.out_dir = Path(__file__).resolve().parent.parent / "artifacts" / "3D_hetero_SSR_capture" / ts
+        args.out_dir = Path(__file__).resolve().parent.parent / "artifacts" / "3d_mechanics_capture" / ts
     args.out_dir = Path(args.out_dir)
     result = run_capture(
         args.out_dir,
+        asset_name=args.asset,
+        mesh_variant=args.mesh_variant,
+        profile=args.profile,
         analysis=args.analysis,
-        mesh_path=args.mesh_path,
-        mesh_boundary_type=args.mesh_boundary_type,
         elem_type=args.elem_type,
         quadrature_rule=args.quadrature_rule,
         davis_type=args.davis_type,

@@ -18,3 +18,14 @@ considered. It is possible to change geometrical parameters and mesh density.
 
 - MATLAB driver: `run_3D_hetero_seepage_SSR_comsol_capture`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `3d_hetero_seepage_transition`
+- Mesh variant: `transition_default.msh`
+- Profile: `fixed_base`
+- Analysis: `ssr`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/3d_hetero_seepage_transition/definition.py`](../../meshes/3d_hetero_seepage_transition/definition.py).

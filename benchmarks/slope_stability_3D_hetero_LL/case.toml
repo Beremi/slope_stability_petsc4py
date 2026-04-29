@@ -10,11 +10,8 @@ name = "slope_stability_3D_hetero_LL"
 asset = "3d_hetero_slope"
 mesh_variant = "adaptive_family_b_l1.msh"
 analysis = "ll"
-dimension = 3
-variant = "hetero"
 elem_type = "P2"
 davis_type = "B"
-seepage = false
 
 [execution]
 node_ordering = "block_metis"

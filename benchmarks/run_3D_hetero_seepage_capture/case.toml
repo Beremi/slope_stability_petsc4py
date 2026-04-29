@@ -14,10 +14,7 @@ name = "run_3D_hetero_seepage_capture"
 asset = "3d_hetero_seepage"
 mesh_variant = "concave_family_b.msh"
 analysis = "seepage"
-dimension = 3
-variant = "hetero"
 elem_type = "P2"
-seepage = true
 
 [linear_solver]
 solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"

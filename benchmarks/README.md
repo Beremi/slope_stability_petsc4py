@@ -3,9 +3,19 @@
 Unified case registry.
 
 Each case folder contains at least:
+
 - `case.toml`
 - `run.sh`
 - `README.md`
+
+Benchmark configs are asset-first. `case.toml` selects `problem.asset`,
+`problem.mesh_variant`, optional `problem.profile`, analysis, element order, and numerical
+settings. Mesh geometry, materials, hydraulic conductivity, water unit weight, mechanics
+BCs, seepage BCs, hydraulic state, and profiles are defined in
+`meshes/<asset>/definition.py`.
+
+For a complete guide to adding a benchmark on a new geometry, see
+[docs/new_benchmark_new_geometry_guide.md](../docs/new_benchmark_new_geometry_guide.md).
 
 Per-case `README.md` files are descriptive only. Generated MATLAB-vs-PETSc comparison output for parity cases
 is kept in `archive/report.md`.

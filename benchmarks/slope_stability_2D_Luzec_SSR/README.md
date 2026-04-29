@@ -19,3 +19,14 @@ unconfined seepage from the locality Luzec (Czechia) is considered, see (Sysala 
 
 - MATLAB driver: `slope_stability_2D_Luzec_SSR.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `2d_luzec`
+- Mesh variant: `default.msh`
+- Profile: default
+- Analysis: `ssr`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/2d_luzec/definition.py`](../../meshes/2d_luzec/definition.py).

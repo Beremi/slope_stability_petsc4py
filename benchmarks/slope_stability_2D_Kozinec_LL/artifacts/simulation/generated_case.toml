@@ -3,12 +3,8 @@ name = "slope_stability_2D_Kozinec_LL"
 asset = "2d_kozinec"
 mesh_variant = "default.msh"
 analysis = "ll"
-dimension = 2
-variant = "hetero"
 elem_type = "P1"
 davis_type = "B"
-seepage = false
-mesh_path = "/home/beremi/repos/slope_stability-1/meshes/2d_kozinec/default.msh"
 
 [execution]
 node_ordering = "none"

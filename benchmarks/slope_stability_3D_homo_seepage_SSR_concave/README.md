@@ -19,3 +19,14 @@ PETSc benchmark uses the concave seepage geometry carried by this repository con
 
 - MATLAB driver: `slope_stability_3D_homo_seepage_SSR.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `3d_hetero_seepage_transition`
+- Mesh variant: `transition_default.msh`
+- Profile: `fixed_base`
+- Analysis: `ssr`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/3d_hetero_seepage_transition/definition.py`](../../meshes/3d_hetero_seepage_transition/definition.py).

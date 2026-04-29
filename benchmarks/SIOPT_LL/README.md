@@ -17,3 +17,14 @@ described in the paper (Sysala et al., SIOPT 2025) is considered.
 
 - MATLAB driver: `SIOPT_LL.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `3d_siopt`
+- Mesh variant: `reference_l0.msh`
+- Profile: `fixed_base`
+- Analysis: `ll`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/3d_siopt/definition.py`](../../meshes/3d_siopt/definition.py).

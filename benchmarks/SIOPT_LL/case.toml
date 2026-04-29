@@ -11,11 +11,8 @@ asset = "3d_siopt"
 mesh_variant = "reference_l0.msh"
 profile = "fixed_base"
 analysis = "ll"
-dimension = 3
-variant = "homo"
 elem_type = "P2"
 davis_type = "B"
-seepage = false
 
 [execution]
 node_ordering = "block_metis"

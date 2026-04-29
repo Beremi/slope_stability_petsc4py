@@ -18,3 +18,14 @@ is possible to change geometrical parameters and mesh density.
 
 - MATLAB driver: `run_2D_homo_SSR_capture`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `2d_homo_slope`
+- Mesh variant: `h1.0.msh`
+- Profile: default
+- Analysis: `ssr`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/2d_homo_slope/definition.py`](../../meshes/2d_homo_slope/definition.py).

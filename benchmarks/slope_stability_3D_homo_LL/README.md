@@ -17,3 +17,14 @@ homogeneous slope with the inclination 45 Deg is considered, see (Sysala et al.,
 
 - MATLAB driver: `slope_stability_3D_homo_LL.m`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `3d_homo_slope`
+- Mesh variant: `adaptive_family_b_l1.msh`
+- Profile: default
+- Analysis: `ll`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/3d_homo_slope/definition.py`](../../meshes/3d_homo_slope/definition.py).

@@ -18,3 +18,14 @@ al., CAS 2025) is considered.
 
 - MATLAB driver: `run_3D_hetero_SSR_capture`
 - PETSc config: [`case.toml`](case.toml)
+
+## Asset Definition
+
+- Asset: `3d_hetero_slope`
+- Mesh variant: `adaptive_family_a_l1.msh`
+- Profile: default
+- Analysis: `ssr`
+- Element: `P2`
+
+Geometry, materials, hydraulics, and boundary conditions are defined in
+[`../../meshes/3d_hetero_slope/definition.py`](../../meshes/3d_hetero_slope/definition.py).

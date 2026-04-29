@@ -3,14 +3,10 @@
 from .version import __version__
 
 _LAZY_EXPORTS = {
-    "NewtonConfig": "slope_stability.core.config",
-    "ContinuationConfig": "slope_stability.core.config",
-    "LinearSolverConfig": "slope_stability.core.config",
-    "MaterialConfig": "slope_stability.core.config",
-    "Problem3DConfig": "slope_stability.core.config",
-    "ExecutionConfig": "slope_stability.core.config",
-    "Run3DSSRConfig": "slope_stability.core.config",
-    "load_run_3d_ssr_config": "slope_stability.core.config",
+    "NewtonConfig": "slope_stability.core.run_config",
+    "ContinuationConfig": "slope_stability.core.run_config",
+    "LinearSolverConfig": "slope_stability.core.run_config",
+    "ExecutionConfig": "slope_stability.core.run_config",
     "ProblemConfig": "slope_stability.core.run_config",
     "SeepageConfig": "slope_stability.core.run_config",
     "ExportConfig": "slope_stability.core.run_config",

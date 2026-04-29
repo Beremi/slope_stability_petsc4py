@@ -18,7 +18,7 @@ try:
 except Exception:  # pragma: no cover - optional when PETSc is unavailable
     PETSc = None
 
-from ..core.config import LinearSolverConfig
+from ..core.run_config import LinearSolverConfig
 from ..fem.distributed_elastic import assemble_owned_elastic_rows_for_comm
 from ..utils import (
     bddc_pc_coordinates_from_metadata,

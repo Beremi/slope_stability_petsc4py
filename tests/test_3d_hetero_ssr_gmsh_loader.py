@@ -10,8 +10,6 @@ from slope_stability.fem.basis import local_basis_volume_3d
 from slope_stability.fem.quadrature import quadrature_volume_3d
 from slope_stability.core.run_config import load_run_case_config
 from slope_stability.io import load_mesh_file
-from slope_stability.mesh.comsol_p2 import load_mesh_p2_comsol
-from slope_stability.mesh.gmsh_waterlevels import load_mesh_gmsh_waterlevels
 from slope_stability.problem_asset_runtime import build_mesh_for_path, resolve_problem_asset
 from slope_stability.problem_assets import load_material_rows_for_path
 
@@ -69,18 +67,18 @@ def test_canonical_loader_builds_p1_p2_and_p4_meshes() -> None:
     assert int((~mesh_p4.q_mask[2]).sum()) == 5070
 
 
-def test_legacy_direct_loaders_accept_canonical_asset_paths() -> None:
+def test_generic_loaders_accept_canonical_asset_paths() -> None:
     direct = load_mesh_file(MESH_PATH, elem_type="P2")
     assert direct.coord.shape == (3, 27605)
     assert direct.elem.shape == (10, 18419)
     assert direct.q_mask.shape == (3, 27605)
 
-    waterlevels = load_mesh_gmsh_waterlevels(WATERLEVELS_MESH_PATH, elem_type="P2")
+    waterlevels = build_mesh_for_path(WATERLEVELS_MESH_PATH, elem_type="P2")
     assert waterlevels.coord.shape[0] == 3
     assert waterlevels.elem.shape[0] == 10
     assert waterlevels.q_mask.shape == (3, waterlevels.coord.shape[1])
 
-    comsol = load_mesh_p2_comsol(COMSOL_MESH_PATH)
+    comsol = build_mesh_for_path(COMSOL_MESH_PATH, elem_type="P2")
     assert comsol.coord.shape[0] == 3
     assert comsol.elem.shape[0] == 10
     assert comsol.q_mask.shape == (3, comsol.coord.shape[1])

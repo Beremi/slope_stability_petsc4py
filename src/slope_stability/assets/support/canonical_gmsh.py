@@ -14,12 +14,40 @@ from ...io import (
     _elevate_tet4_mesh_to_tet20,
     _elevate_tet4_mesh_to_tet35,
 )
-from ...mesh.textmesh_2d import _edge_node_triplet
 from ..api import BoundaryGeometryPatch, CanonicalMesh, SolverMesh
 
 
 def gmsh_variants_from_dir(asset_dir: Path, pattern: str = "*.msh") -> dict[str, dict]:
     return {path.name: {"source": {"path": path.name}} for path in sorted(asset_dir.glob(pattern))}
+
+
+def _edge_node_triplet(
+    *,
+    coord: np.ndarray,
+    key: tuple[int, int],
+    edge_cache: dict[tuple[int, int], tuple[int, int, int]],
+    next_node: int,
+) -> tuple[tuple[int, int, int], int, np.ndarray]:
+    existing = edge_cache.get(key)
+    if existing is not None:
+        return existing, next_node, coord
+
+    a, b = key
+    midpoint = next_node
+    quarter_a = next_node + 1
+    quarter_b = next_node + 2
+    next_node += 3
+    new_points = np.column_stack(
+        (
+            (coord[:, a] + coord[:, b]) / 2.0,
+            0.75 * coord[:, a] + 0.25 * coord[:, b],
+            0.25 * coord[:, a] + 0.75 * coord[:, b],
+        )
+    )
+    coord = np.hstack((coord, new_points))
+    nodes = (midpoint, quarter_a, quarter_b)
+    edge_cache[key] = nodes
+    return nodes, next_node, coord
 
 
 @dataclass(frozen=True)

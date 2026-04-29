@@ -31,12 +31,16 @@ from slope_stability.linear.pmg import (
     validate_pmg_fine_level_alignment,
 )
 from slope_stability.mesh import MaterialSpec, heterogenous_materials, reorder_mesh_nodes
-from slope_stability.problem_asset_runtime import build_mesh_for_path
+from slope_stability.problem_asset_runtime import (
+    build_mesh_for_path,
+    build_mesh_for_resolved_asset,
+    build_seepage_boundary_for_resolved_asset,
+    load_mechanical_problem_spec,
+    load_seepage_problem_spec,
+    resolve_problem_asset,
+)
 from slope_stability.problem_assets import (
     build_seepage_boundary_for_path,
-    load_hydraulic_conductivity_for_path,
-    load_material_rows_for_path,
-    load_water_unit_weight_for_path,
 )
 from slope_stability.seepage import heter_conduct, seepage_problem_3d
 from slope_stability.utils import local_csr_to_petsc_aij_matrix, owned_block_range, release_petsc_aij_matrix
@@ -139,22 +143,14 @@ def _release_rank_local_resources(*, solvers: tuple[object, ...], const_builder,
                 pass
 
 
-def _resolve_boundary_mode(mesh_path: Path, boundary_mode: str) -> str:
-    raw = str(boundary_mode).strip().lower()
-    if raw and raw != "auto":
-        return raw
-    return "canonical"
-
-
 def _load_labeled_mesh(
-    mesh_path: Path,
+    resolved_asset,
     *,
     elem_type: str,
-    profile: str | None,
     node_ordering: str,
     partition_count: int | None,
 ):
-    mesh = build_mesh_for_path(mesh_path, elem_type=elem_type, profile=profile)
+    mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,
@@ -177,9 +173,9 @@ def _load_labeled_mesh(
 def run_capture(
     output_dir: Path,
     *,
-    mesh_path: Path | None = None,
+    asset_name: str,
+    mesh_variant: str | None = None,
     profile: str | None = None,
-    boundary_mode: str = "auto",
     elem_type: str = "P2",
     node_ordering: str = "block_metis",
     lambda_init: float = 1.0,
@@ -220,8 +216,6 @@ def run_capture(
     seepage_pc_backend: str = "hypre",
     seepage_max_deflation_basis_vectors: int = 48,
     max_deflation_basis_vectors: int = 48,
-    water_unit_weight: float | None = None,
-    conductivity: list[float] | np.ndarray | None = None,
 ) -> dict:
     rank = int(PETSc.COMM_WORLD.getRank())
     out_dir = _ensure_dir(output_dir) if rank == 0 else output_dir
@@ -231,14 +225,18 @@ def run_capture(
         _ensure_dir(data_dir)
         progress_callback = _make_progress_logger(data_dir)
 
-    if mesh_path is None:
-        mesh_path = Path(__file__).resolve().parents[3] / "meshes" / "3d_hetero_seepage" / "concave_family_b.msh"
-    mesh_path = Path(mesh_path)
     run_t0 = perf_counter()
     _stage_log(rank, "start", run_t0)
     elem_type = validate_supported_elem_type(3, elem_type)
     if elem_type not in {"P2", "P4"}:
         raise NotImplementedError(f"3D seepage+SSR study runner currently supports only 'P2' and 'P4', got {elem_type!r}.")
+    resolved_asset = resolve_problem_asset(asset_name=str(asset_name), mesh_variant=mesh_variant, profile=profile)
+    if resolved_asset.mesh_path is None:
+        raise ValueError(f"Asset {resolved_asset.asset_name!r} variant {resolved_asset.variant_name!r} has no mesh file.")
+    mesh_path = resolved_asset.mesh_path
+    profile = resolved_asset.resolved_variant.profile
+    mechanical_spec = load_mechanical_problem_spec(resolved_asset)
+    seepage_spec = load_seepage_problem_spec(resolved_asset)
 
     solver_type_upper = str(solver_type).upper()
     effective_pc_backend = None if pc_backend is None else str(pc_backend).strip().lower()
@@ -256,11 +254,7 @@ def run_capture(
                 f"{effective_pc_backend} backend is currently supported only with PETSC_MATLAB_DFGMRES* or KSPFGMRES* solver types."
             )
 
-    boundary_mode_name = _resolve_boundary_mode(mesh_path, boundary_mode)
-    _stage_log(rank, "resolved_boundary_mode", run_t0)
-    material_rows = load_material_rows_for_path(mesh_path)
-    if material_rows is None:
-        raise ValueError(f"No material rows found in mesh-family definition for {mesh_path}.")
+    material_rows = mechanical_spec.material_rows
     mat_props = np.asarray(material_rows, dtype=np.float64)
     materials = [
         MaterialSpec(
@@ -277,9 +271,8 @@ def run_capture(
 
     partition_count = int(PETSc.COMM_WORLD.getSize()) if str(node_ordering).lower() == "block_metis" else None
     labeled = _load_labeled_mesh(
-        mesh_path,
+        resolved_asset,
         elem_type=elem_type,
-        profile=profile,
         node_ordering=node_ordering,
         partition_count=partition_count,
     )
@@ -336,12 +329,8 @@ def run_capture(
         _stage_log(rank, "built_pmg_hierarchy", run_t0)
 
     n_q = int(quadrature_volume_3d(elem_type)[0].shape[1])
-    resolved_grho = load_water_unit_weight_for_path(mesh_path, required=True)
-    grho = float(resolved_grho if water_unit_weight is None else water_unit_weight)
-    conductivity_values = np.asarray(
-        load_hydraulic_conductivity_for_path(mesh_path, required=True) if conductivity is None else conductivity,
-        dtype=np.float64,
-    ).ravel()
+    grho = float(seepage_spec.seepage.water_unit_weight)
+    conductivity_values = np.asarray(seepage_spec.conductivity, dtype=np.float64).ravel()
     required_conductivity_count = int(material_identifier.max()) + 1 if material_identifier.size else 1
     if conductivity_values.size == 1 and required_conductivity_count > 1:
         conductivity_values = np.repeat(conductivity_values, required_conductivity_count)
@@ -351,7 +340,7 @@ def run_capture(
             f"but seepage material ids require {required_conductivity_count}."
         )
     conduct0 = heter_conduct(material_identifier, n_q, conductivity_values)
-    q_w, pw_d = build_seepage_boundary_for_path(mesh_path, coord, surf, triangle_labels, grho=grho)
+    q_w, pw_d = build_seepage_boundary_for_resolved_asset(resolved_asset, coord, surf, triangle_labels, grho=grho)
 
     seepage_solver = None
     if rank == 0:
@@ -470,22 +459,13 @@ def run_capture(
     )
 
     mech_assembly = assemble_strain_operator(coord, elem, elem_type, dim=3)
-    if boundary_mode_name == "comsol":
-        f_v_int = np.vstack(
-            (
-                np.zeros(mech_assembly.n_int, dtype=np.float64),
-                -gamma.astype(np.float64),
-                np.zeros(mech_assembly.n_int, dtype=np.float64),
-            )
+    f_v_int = np.vstack(
+        (
+            -np.asarray(grad_p[0, :], dtype=np.float64),
+            -np.asarray(grad_p[1, :], dtype=np.float64) - gamma.astype(np.float64),
+            -np.asarray(grad_p[2, :], dtype=np.float64),
         )
-    else:
-        f_v_int = np.vstack(
-            (
-                -np.asarray(grad_p[0, :], dtype=np.float64),
-                -np.asarray(grad_p[1, :], dtype=np.float64) - gamma.astype(np.float64),
-                -np.asarray(grad_p[2, :], dtype=np.float64),
-            )
-        )
+    )
     f_V = vector_volume(mech_assembly, f_v_int)
 
     const_builder = ConstitutiveOperator(
@@ -608,6 +588,9 @@ def run_capture(
         "elem_type": elem_type,
         "davis_type": "B",
         "material_rows": mat_props.tolist(),
+        "asset_name": resolved_asset.asset_name,
+        "mesh_variant": resolved_asset.variant_name,
+        "profile": profile,
         "node_ordering": node_ordering,
         "mesh_boundary_type": mesh_boundary_type,
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
@@ -625,7 +608,6 @@ def run_capture(
         "constitutive_mode": str(constitutive_mode),
         "tangent_kernel": str(tangent_kernel),
         "mesh_file": str(mesh_path),
-        "boundary_mode": boundary_mode_name,
         "seepage_linear_tolerance": float(seepage_linear_tolerance),
         "seepage_linear_max_iter": int(seepage_linear_max_iter),
         "seepage_pc_backend": str(seepage_pc_backend),
@@ -708,7 +690,6 @@ def run_capture(
             "criterion": [float(x) for x in seep_history.get("criterion", [])],
             "iterations": int(seep_history.get("iterations", 0)),
             "converged": bool(seep_history.get("converged", False)),
-            "boundary_mode": boundary_mode_name,
         },
     }
 
@@ -750,8 +731,9 @@ def run_capture(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a 3D seepage SSR capture.")
     parser.add_argument("--out_dir", type=Path, required=True)
-    parser.add_argument("--mesh_path", type=Path, default=None)
-    parser.add_argument("--boundary_mode", type=str, default="auto", choices=["auto", "waterlevels", "comsol"])
+    parser.add_argument("--asset", type=str, required=True)
+    parser.add_argument("--mesh_variant", type=str, default=None)
+    parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--elem_type", type=str, default="P2", choices=["P1", "P2", "P4"])
     parser.add_argument(
         "--node_ordering",
@@ -807,14 +789,13 @@ def main() -> None:
     parser.add_argument("--seepage_pc_backend", type=str, default="hypre")
     parser.add_argument("--seepage_max_deflation_basis_vectors", type=int, default=48)
     parser.add_argument("--max_deflation_basis_vectors", type=int, default=48)
-    parser.add_argument("--water_unit_weight", type=float, default=None)
-    parser.add_argument("--conductivity", type=float, action="append", default=None)
     args = parser.parse_args()
 
     result = run_capture(
         args.out_dir,
-        mesh_path=args.mesh_path,
-        boundary_mode=args.boundary_mode,
+        asset_name=args.asset,
+        mesh_variant=args.mesh_variant,
+        profile=args.profile,
         elem_type=args.elem_type,
         node_ordering=args.node_ordering,
         lambda_init=args.lambda_init,
@@ -855,8 +836,6 @@ def main() -> None:
         seepage_pc_backend=args.seepage_pc_backend,
         seepage_max_deflation_basis_vectors=args.seepage_max_deflation_basis_vectors,
         max_deflation_basis_vectors=args.max_deflation_basis_vectors,
-        water_unit_weight=args.water_unit_weight,
-        conductivity=args.conductivity,
     )
     if PETSc.COMM_WORLD.getRank() == 0:
         print(json.dumps(result, indent=2))

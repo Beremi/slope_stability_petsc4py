@@ -15,11 +15,8 @@ name = "run_2D_sloan2013_seepage_capture"
 asset = "2d_sloan2013"
 mesh_variant = "default.msh"
 analysis = "seepage"
-dimension = 2
-variant = "hetero"
 elem_type = "P1"
 davis_type = "B"
-seepage = true
 
 [linear_solver]
 solver_type = "PETSC_MATLAB_DFGMRES_HYPRE"

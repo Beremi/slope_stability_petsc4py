@@ -10,11 +10,8 @@ name = "slope_stability_2D_Franz_dam_SSR"
 asset = "2d_franz_dam"
 mesh_variant = "default.msh"
 analysis = "ssr"
-dimension = 2
-variant = "hetero"
 elem_type = "P2"
 davis_type = "B"
-seepage = true
 
 [execution]
 node_ordering = "none"

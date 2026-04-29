@@ -1,144 +1,60 @@
 # 3D Configuration Scheme
 
-This note defines the first PETSc-side configuration scheme for the 3D drivers.
+This page is retained as a short compatibility note. The original 3D-only schema has been
+superseded by the asset-first `RunCaseConfig` loader and the canonical mesh asset runtime.
 
-The design goal is the same split the MATLAB repository already uses:
+For new work, use:
 
-- problem specification
-- continuation / Newton controls
-- linear-solver controls
-- output / runner controls
+- [new_benchmark_new_geometry_guide.md](new_benchmark_new_geometry_guide.md)
+- [config_case_matrix.md](config_case_matrix.md)
 
-The first implemented scope was intentionally narrow:
+## Current Contract
 
-- 3D SSR
-- non-seepage only
-- indirect continuation only
-- a unified `elem_type` interface, with current production support still concentrated on `P2`
+Config-driven runs use:
 
-That is deliberate. The MATLAB drivers show that seepage adds a second physics block and different preprocessing, so it should be an explicit extension of the schema instead of being mixed into the basic 3D SSR case.
+```bash
+python -m slope_stability.cli.run_case_from_config <benchmarks/.../case.toml> --out_dir <dir>
+```
 
-## MATLAB Boundary
+`case.toml` may select:
 
-The standard 3D script [slope_stability_3D_hetero_SSR.m](/home/beremi/repos/slope_stability-1/slope_stability/slope_stability_3D_hetero_SSR.m) is structured as:
+- `[problem].asset`
+- `[problem].mesh_variant`
+- optional `[problem].profile`
+- `[problem].analysis`
+- `[problem].elem_type`
+- solver, continuation, Newton, seepage numerical, export, and notebook settings
 
-1. case definition
-   - `elem_type`
-   - `Davis_type`
-   - material table
-   - mesh path
-2. FE preprocessing
-   - quadrature
-   - mesh load
-   - integration-point material expansion
-   - `K_elast`, `B`, `f_V`
-3. continuation / Newton settings
-4. linear solver factory
-5. constitutive builder
-6. continuation call
-7. postprocessing
+`case.toml` must not define raw mesh paths, boundary types, material rows, water unit
+weight, or hydraulic conductivity. Those values are owned by
+`meshes/<asset>/definition.py`.
 
-The seepage 3D script [slope_stability_3D_hetero_seepage_SSR.m](/home/beremi/repos/slope_stability-1/slope_stability/slope_stability_3D_hetero_seepage_SSR.m) adds one extra block between mesh load and mechanics:
+## Runtime Split
 
-1. seepage conductivity + seepage boundary conditions
-2. seepage solve
-3. `pw`, `grad_p`, `mater_sat`
-4. mechanical `gamma` / `f_V` derived from seepage state
+- `meshes/<asset>/definition.py`: mesh variants, materials, hydraulic conductivity, water
+  unit weight, mechanics BCs, seepage BCs, hydraulic state, and profiles
+- `benchmarks/<case>/case.toml`: benchmark metadata and numerical controls
+- `src/slope_stability`: generic asset loading, mesh elevation, assembly, solvers,
+  postprocessing, and CLI dispatch
 
-So the clean PETSc split is:
+## Element Orders
 
-- `problem`
-  - mesh
-  - material set
-  - constitutive choice
-  - optional seepage block later
-- `execution`
-  - reordering / distributed assembly mode
-- `continuation`
-- `newton`
-- `linear_solver`
+- 2D configs accept `P1`, `P2`, and `P4`
+- 3D configs accept `P1`, `P2`, and `P4`
 
-## TOML Sections
+Numerical availability still depends on the selected runner and solver path, but mesh
+loading and asset resolution are unified across dimensions.
 
-The implemented config file sections are:
+## Removed Legacy Fields
 
-- `[problem]`
-  - case identity and mechanical model
-- `[execution]`
-  - PETSc-side mesh ordering / distributed assembly mode
-- `[continuation]`
-  - SSR continuation settings
-- `[newton]`
-  - Newton and damping settings
-- `[linear_solver]`
-  - Krylov / preconditioner settings
+The config loader rejects these fields in committed configs:
+
+- `[problem].dimension`
+- `[problem].variant`
+- `[problem].seepage`
+- `[problem].mesh_path`
+- `[problem].mesh_boundary_type`
+- `[case_data]`
 - `[[materials]]`
-  - material rows in the same logical order as the MATLAB material table
-
-The example file is:
-
-- [slope_stability_3D_hetero_SSR_default/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/slope_stability_3D_hetero_SSR_default/case.toml)
-- [slope_stability_3D_homo_SSR_default/case.toml](/home/beremi/repos/slope_stability-1/benchmarks/slope_stability_3D_homo_SSR_default/case.toml)
-
-## Implemented Interface
-
-The config objects live in:
-
-- [config.py](/home/beremi/repos/slope_stability-1/src/slope_stability/core/config.py)
-
-The generic config-driven runner is:
-
-- [run_case_from_config.py](/home/beremi/repos/slope_stability-1/src/slope_stability/cli/run_case_from_config.py)
-
-It feeds the existing capture backend:
-
-- [run_3D_hetero_SSR_capture.py](/home/beremi/repos/slope_stability-1/src/slope_stability/cli/run_3D_hetero_SSR_capture.py)
-
-The capture backend now accepts:
-
-- `elem_type`
-- `davis_type`
-- `material_rows`
-
-so the problem specification is no longer hardcoded into the runner.
-
-The config layer now accepts:
-
-- `2D`: `P1`, `P2`, `P4`
-- `3D`: `P1`, `P2`, `P4`
-
-That is an interface guarantee, not a blanket promise that every case family is already numerically implemented for every order. Current production status is:
-
-- `3D P2`: production path
-- `3D P1`: FE path and generic HDF5 loader are wired; actual benchmark availability depends on having matching `P1` meshes
-- `3D P4`: config and mesh-order plumbing are wired, but the mechanics/seepage benchmark paths still raise an explicit `NotImplementedError`
-
-## Current Best Default
-
-The checked-in default config mirrors the current best working PETSc setting:
-
-- `PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE`
-- `block_metis`
-- `mpi_distribute_by_nodes = true`
-- `constitutive_mode = overlap`
-- HYPRE `HMIS + ext+i`
-- recycle enabled
-
-This is also the current CLI default in:
-
-- [run_3D_hetero_SSR_capture.py](/home/beremi/repos/slope_stability-1/src/slope_stability/cli/run_3D_hetero_SSR_capture.py)
-
-## Not Yet Implemented
-
-The following still remain outside the currently implemented 3D config path:
-
-- generic 3D `P4` benchmark execution
-
-For seepage specifically, the future extension should be an explicit `[seepage]` section with:
-
-- conductivity by material
-- seepage mesh loader variant
-- seepage boundary model
-- seepage preprocessing options
-
-That keeps the non-seepage 3D SSR path simple and avoids mixing hydraulic parameters into standard cases.
+- `[seepage].water_unit_weight`
+- `[seepage].conductivity`
