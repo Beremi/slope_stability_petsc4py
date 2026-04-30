@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run the PETSc SSR capture under MPI with RSS monitoring and guardrails."""
+"""Run a config-driven PETSc case under MPI with RSS monitoring and guardrails."""
 
 from __future__ import annotations
 
@@ -125,14 +125,14 @@ def _read_mem_total_kb() -> int | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the PETSc capture under MPI with RSS monitoring.")
+    parser = argparse.ArgumentParser(description="Run a config-driven PETSc case under MPI with RSS monitoring.")
     parser.add_argument("--nproc", type=int, required=True)
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--capture_out_dir", type=Path, required=True)
     parser.add_argument("--monitor_out_dir", type=Path, required=True)
     parser.add_argument("--rss_limit_gb", type=float, default=6.0, help="Kill the run if any monitored rank exceeds this RSS.")
     parser.add_argument("--sample_sec", type=float, default=1.0)
     parser.add_argument("--python", type=Path, default=Path(".venv/bin/python"))
-    parser.add_argument("--capture_script", type=Path, default=Path("src/slope_stability/cli/run_3d_mechanics_capture.py"))
     parser.add_argument("--use_hwthread_cpus", action="store_true", help="Pass --use-hwthread-cpus to mpiexec.")
     parser.add_argument("--oversubscribe", action="store_true", help="Pass --map-by :OVERSUBSCRIBE to mpiexec.")
     args, capture_args = parser.parse_known_args()
@@ -158,7 +158,9 @@ def main() -> None:
         "-n",
         str(args.nproc),
         str(args.python),
-        str(args.capture_script),
+        "-m",
+        "slope_stability.cli.run_case_from_config",
+        str(args.config),
         "--out_dir",
         str(capture_out_dir),
         *capture_args,

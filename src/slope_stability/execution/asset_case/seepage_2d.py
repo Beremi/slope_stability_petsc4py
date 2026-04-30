@@ -13,8 +13,6 @@ import matplotlib.tri as mtri
 import numpy as np
 from petsc4py import PETSc
 
-ROOT = Path(__file__).resolve().parents[3]
-
 from slope_stability.linear.solver import SolverFactory
 from slope_stability.mesh import reorder_mesh_nodes
 from slope_stability.problem_asset_runtime import (

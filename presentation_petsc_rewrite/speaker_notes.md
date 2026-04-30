@@ -161,8 +161,8 @@
 ## Slide 27. MATLAB Script Versus PETSc Benchmark Folder
 - Target: 2 minutes.
 - Key message: benchmark authoring moved from editing one top-level script to declaring a benchmark folder with one public config surface.
-- Point at visually: runner family, physics path, mesh input, heterogeneity, then run/inspect outputs.
-- Fallback detail: the practical translation is script selection becomes `problem.case`, script-local branch choice becomes `problem.analysis`, and case-local material or conductivity arrays split into `[[materials]]` and `[seepage]`.
+- Point at visually: asset selection, mesh variant/profile, analysis, numerical settings, then run/inspect outputs.
+- Fallback detail: the practical translation is script-local problem data moves into `meshes/<asset>/definition.py`; `case.toml` selects `problem.asset`, `problem.mesh_variant`, optional `problem.profile`, and `problem.analysis`.
 
 ## Slide 28. Benchmark Folder Contract And First Run
 - Target: 1.5 minutes.
@@ -172,15 +172,15 @@
 
 ## Slide 29. Choose The Runner Family First
 - Target: 1.5 minutes.
-- Key message: `problem.case` is the decisive first choice because it selects the concrete runner family and conventions around mesh loading and boundary handling.
-- Point at visually: `problem.case`, `problem.analysis`, `continuation.method`, then the split between `problem.mesh_path` and `[case_data].mesh_dir`.
-- Fallback detail: dispatch happens in `src/slope_stability/cli/run_case_from_config.py`. `problem.analysis` accepts `ssr`, `ll`, and `seepage`, but the runner family still decides which continuation and hydro controls actually matter.
+- Key message: `problem.asset` plus `problem.analysis` select the generic execution route; the asset definition owns mesh loading, materials, hydraulics, and boundary handling.
+- Point at visually: `problem.asset`, `problem.mesh_variant`, optional `problem.profile`, `problem.analysis`, then the split between asset data and numerical settings.
+- Fallback detail: dispatch happens in `src/slope_stability/execution/asset_case/runner.py` by resolved dimension, analysis, and seepage capability. The runner receives arrays and masks resolved from the asset, not raw mesh paths or local physics.
 
 ## Slide 30. What The Current Public Surface Actually Supports
 - Target: 2 minutes.
-- Key message: the public config surface is intentionally asymmetric; the current 3D mainline is not just the 2D text-mesh interface scaled up.
-- Point at visually: the four family rows, especially the difference between 2D text meshes and 3D dry / seepage families.
-- Fallback detail: `continuation.method = "direct"` is currently meaningful in the text-mesh runner. The config-driven 3D dry mainline and the 3D seepage-SSR families discussed in this deck are indirect in practice.
+- Key message: the public config surface is intentionally thin and asset-first; all supported cases share the same selector pattern even when their solver routes differ.
+- Point at visually: the mechanics, seepage-only, and seepage-coupled rows, especially which fields stay in `case.toml` and which live in asset definitions.
+- Fallback detail: `problem.analysis` accepts `ssr`, `ll`, and `seepage`. Seepage-coupled 3D SSR requires a seepage-capable asset and `analysis = "ssr"`; unsupported combinations are rejected instead of falling through to hidden runner conventions.
 
 ## Slide 31. Dry Mechanical Example: 3D Heterogeneous SSR
 - Target: 2 minutes.
@@ -190,21 +190,21 @@
 
 ## Slide 32. Hydro Paths: Seepage Only Versus Seepage-Coupled SSR
 - Target: 2 minutes.
-- Key message: hydro currently means two different workflows, not one generic toggle.
+- Key message: hydro is selected by the asset capability plus analysis route; hydraulic values and head/flux conditions live with the mesh definition.
 - Point at visually: seepage-only on the left, seepage-coupled SSR on the right, then the callout about boundary handling.
-- Fallback detail: `problem.seepage = true` is only a case flag. The actual hydro path comes from the chosen seepage runner family. Waterlevels versus COMSOL is still runner-local logic, not a generic TOML section.
+- Fallback detail: `case.toml` selects `problem.asset`, `problem.mesh_variant`, optional `problem.profile`, and `problem.analysis`. The generic runner receives already-resolved seepage arrays; it does not own water levels or conductivity defaults.
 
 ## Slide 33. Boundary Labels, Materials, And 2D Text Meshes
 - Target: 2 minutes.
-- Key message: mechanical BC labels and default constitutive rows come from mesh-family metadata when it exists; 2D text-mesh cases are the main exception path.
-- Point at visually: `DEFINITION`, then `[[materials]]`, then `[case_data].mesh_dir`, then the five bullets.
-- Fallback detail: family lookup happens through `src/slope_stability/problem_assets.py`, and mechanical Dirichlet masks are built in `src/slope_stability/io.py`. If no family metadata is found, the runtime falls back to default axis-label sets. `mesh_boundary_type = 1` is the 3D glued-bottom special case.
+- Key message: mechanical BC labels, materials, hydraulics, and profiles come from `meshes/<asset>/definition.py`.
+- Point at visually: the asset `definition.py`, then the canonical Gmsh physical names, then the `[problem]` selector in `case.toml`.
+- Fallback detail: runtime loads a registered asset, promotes the canonical linear Gmsh mesh to the requested element order, and applies declared mechanics/seepage masks from the asset. Generic mesh IO only reads geometry and labels.
 
 ## Slide 34. Benchmark Authoring Checklist
 - Target: 2 minutes.
 - Key message: benchmark authoring is now a short, inspectable sequence, but the order matters.
 - Point at visually: the checklist from `[benchmark]` and `[problem]` through the run and export verification.
-- Fallback detail: the main practical trap is choosing fields that the selected runner does not actually consume. That is why the sequence starts with `problem.case` and `problem.analysis`, not with tolerances or solver tuning.
+- Fallback detail: start with `problem.asset`, `problem.mesh_variant`, optional `problem.profile`, and `problem.analysis`; numerical tolerances and solver settings come after the physical problem is resolved.
 
 ## Slide 35. Section Divider: Unified Visualisation
 - Target: 20 seconds.

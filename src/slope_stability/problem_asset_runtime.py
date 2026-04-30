@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .assets import MeshBuildResult, ProblemAssetAPI, ResolvedVariant, load_problem_asset, load_problem_asset_for_path
+from .assets import MeshBuildResult, ProblemAssetAPI, ResolvedVariant, load_problem_asset
 from .problem_assets import (
     load_hydraulic_conductivity_for_asset_definition,
     load_material_rows_for_asset,
@@ -24,7 +24,6 @@ class ResolvedAsset:
     variant: dict[str, Any]
     resolved_variant: ResolvedVariant
     mesh_path: Path | None
-    boundary_type: int
 
     @property
     def asset_name(self) -> str:
@@ -43,7 +42,6 @@ class ResolvedAsset:
 class MechanicalProblemSpec:
     material_rows: list[list[float]]
     dirichlet_rules: tuple[Any, ...]
-    boundary_type: int
 
 
 @dataclass(frozen=True)
@@ -56,14 +54,11 @@ def resolve_problem_asset(
     *,
     asset_name: str,
     mesh_variant: str | None = None,
-    mesh_path: str | Path | None = None,
     profile: str | None = None,
-    boundary_type: int | None = None,
 ) -> ResolvedAsset:
     asset = load_problem_asset(asset_name)
     resolved_variant = asset.resolve_variant(
         mesh_variant=None if mesh_variant is None else str(mesh_variant),
-        mesh_path=None if mesh_path is None else Path(mesh_path).resolve(),
         profile=profile,
     )
     return ResolvedAsset(
@@ -72,7 +67,6 @@ def resolve_problem_asset(
         variant=resolved_variant.as_dict(),
         resolved_variant=resolved_variant,
         mesh_path=resolved_variant.mesh_path,
-        boundary_type=int(resolved_variant.boundary_type),
     )
 
 
@@ -96,27 +90,6 @@ def build_mesh_for_resolved_asset(resolved: ResolvedAsset, *, elem_type: str) ->
     return resolved.definition.build_mesh(resolved.resolved_variant, elem_type=str(elem_type))
 
 
-def build_mesh_for_path(
-    path: str | Path,
-    *,
-    elem_type: str,
-    profile: str | None = None,
-    boundary_type: int = 0,
-) -> MeshBuildResult:
-    path = Path(path).resolve()
-    asset = load_problem_asset_for_path(path)
-    if asset is None:
-        raise ValueError(f"No registered problem asset owns mesh path {path}.")
-    resolved = resolve_problem_asset(
-        asset_name=str(asset.asset_id),
-        mesh_variant=path.name,
-        mesh_path=path,
-        profile=profile,
-        boundary_type=boundary_type,
-    )
-    return build_mesh_for_resolved_asset(resolved, elem_type=elem_type)
-
-
 def load_mechanical_problem_spec(resolved: ResolvedAsset) -> MechanicalProblemSpec:
     rows = load_material_rows_for_asset(resolved.asset_name)
     if rows is None:
@@ -126,9 +99,8 @@ def load_mechanical_problem_spec(resolved: ResolvedAsset) -> MechanicalProblemSp
         dirichlet_rules=load_mechanical_dirichlet_rules_for_asset_definition(
             resolved.definition,
             dim=resolved.dimension,
-            boundary_type=resolved.boundary_type,
+            profile=resolved.resolved_variant.profile,
         ),
-        boundary_type=resolved.boundary_type,
     )
 
 

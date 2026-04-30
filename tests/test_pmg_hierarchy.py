@@ -7,9 +7,9 @@ import pytest
 from petsc4py import PETSc
 from scipy.sparse import identity
 
-from slope_stability.cli.run_3d_mechanics_capture import run_capture
-import slope_stability.cli.run_3d_mechanics_capture as run_capture_mod
 from slope_stability.core.run_config import ContinuationConfig, LinearSolverConfig, ProblemConfig, RunCaseConfig
+from slope_stability.execution.asset_case.mechanics_3d import run_capture
+import slope_stability.execution.asset_case.mechanics_3d as run_capture_mod
 from slope_stability.core.simplex_lagrange import tetra_lagrange_node_tuples, tetra_reference_nodes
 from slope_stability.fem.basis import local_basis_volume_3d
 from slope_stability.linear.pmg import (
@@ -22,8 +22,10 @@ from slope_stability.linear.pmg import (
     build_3d_mixed_pmg_hierarchy,
     build_3d_mixed_pmg_hierarchy_with_intermediate_p2,
     build_3d_same_mesh_pmg_hierarchy,
+    build_3d_same_mesh_scalar_pmg_hierarchy,
 )
 from slope_stability.linear.solver import PetscMatlabExactDFGMRESSolver, _ManualPMGShellPC
+from slope_stability.problem_asset_runtime import resolve_problem_asset
 from slope_stability.utils import q_to_free_indices, to_petsc_aij_matrix
 
 
@@ -31,6 +33,14 @@ ROOT = Path(__file__).resolve().parents[1]
 MESH_PATH = ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh"
 MESH_PATH_L2 = ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l2.msh"
 MESH_PATH_L3 = ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l3.msh"
+ASSET_NAME = "3d_hetero_slope"
+VARIANT_L1 = "adaptive_family_a_l1.msh"
+VARIANT_L2 = "adaptive_family_a_l2.msh"
+VARIANT_L3 = "adaptive_family_a_l3.msh"
+
+
+def _resolved_variant(mesh_variant: str):
+    return resolve_problem_asset(asset_name=ASSET_NAME, mesh_variant=mesh_variant)
 
 
 def _single_tetra_mesh(order: int) -> tuple[np.ndarray, np.ndarray]:
@@ -299,8 +309,8 @@ def test_cross_mesh_p11_prolongation_matches_p1_basis_at_offgrid_nodes() -> None
 
 def test_build_3d_mixed_pmg_hierarchy_smoke_on_real_l1_l2_meshes() -> None:
     hierarchy = build_3d_mixed_pmg_hierarchy(
-        MESH_PATH_L2,
-        MESH_PATH,
+        _resolved_variant(VARIANT_L2),
+        coarse_mesh_variant=VARIANT_L1,
         fine_elem_type="P2",
         node_ordering="original",
         comm=PETSc.COMM_SELF,
@@ -320,8 +330,8 @@ def test_build_3d_mixed_pmg_hierarchy_smoke_on_real_l1_l2_meshes() -> None:
 
 def test_build_3d_mixed_pmg_hierarchy_with_intermediate_p2_smoke_on_real_l1_l2_meshes() -> None:
     hierarchy = build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
-        MESH_PATH_L2,
-        MESH_PATH,
+        _resolved_variant(VARIANT_L2),
+        coarse_mesh_variant=VARIANT_L1,
         node_ordering="block_metis",
         comm=PETSc.COMM_SELF,
     )
@@ -342,8 +352,8 @@ def test_build_3d_mixed_pmg_hierarchy_with_intermediate_p2_smoke_on_real_l1_l2_m
 
 def test_mixed_pmg_shell_vector_hypre_uses_direct_elastic_coarse_operator_on_real_meshes() -> None:
     hierarchy = build_3d_mixed_pmg_hierarchy(
-        MESH_PATH_L2,
-        MESH_PATH,
+        _resolved_variant(VARIANT_L2),
+        coarse_mesh_variant=VARIANT_L1,
         fine_elem_type="P2",
         node_ordering="original",
         comm=PETSc.COMM_SELF,
@@ -384,8 +394,8 @@ def test_mixed_pmg_shell_vector_hypre_uses_direct_elastic_coarse_operator_on_rea
 
 def test_mixed_parallel_pmg_shell_defaults_to_chebyshev_jacobi_smoothers() -> None:
     hierarchy = build_3d_mixed_pmg_hierarchy(
-        MESH_PATH_L2,
-        MESH_PATH,
+        _resolved_variant(VARIANT_L2),
+        coarse_mesh_variant=VARIANT_L1,
         fine_elem_type="P2",
         node_ordering="original",
         comm=PETSc.COMM_SELF,
@@ -622,10 +632,9 @@ def test_pmg_backends_accept_mixed_p1_p1_p2_hierarchy() -> None:
 
 def test_build_3d_mixed_pmg_chain_hierarchy_smoke_on_real_meshes() -> None:
     hierarchy = build_3d_mixed_pmg_chain_hierarchy(
-        MESH_PATH_L3,
-        [MESH_PATH_L2, MESH_PATH],
+        _resolved_variant(VARIANT_L3),
+        coarse_mesh_variants=[VARIANT_L2, VARIANT_L1],
         fine_elem_type="P2",
-        boundary_type=0,
         node_ordering="original",
         material_rows=None,
         comm=PETSc.COMM_WORLD,
@@ -918,7 +927,7 @@ def test_run_capture_rejects_non_tangent_pmg_source(tmp_path: Path) -> None:
         )
 
 
-def test_run_capture_accepts_mixed_p2_pmg_shell_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_run_capture_accepts_mixed_p2_pmg_shell_variant(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def _sentinel_builder(*args, **kwargs):
         raise RuntimeError("mixed-pmg-sentinel")
 
@@ -931,14 +940,14 @@ def test_run_capture_accepts_mixed_p2_pmg_shell_path(monkeypatch: pytest.MonkeyP
             mesh_variant="adaptive_family_a_l2.msh",
             elem_type="P2",
             pc_backend="pmg_shell",
-            pmg_coarse_mesh_path=MESH_PATH,
+            pmg_coarse_mesh_variant=VARIANT_L1,
             preconditioner_matrix_source="tangent",
             node_ordering="original",
             step_max=1,
         )
 
 
-def test_run_capture_accepts_mixed_p4_with_intermediate_p2_path(
+def test_run_capture_accepts_mixed_p4_with_intermediate_p2_variant(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -954,7 +963,7 @@ def test_run_capture_accepts_mixed_p4_with_intermediate_p2_path(
             mesh_variant="adaptive_family_a_l2.msh",
             elem_type="P4",
             pc_backend="pmg_shell",
-            pmg_coarse_mesh_path=MESH_PATH,
+            pmg_coarse_mesh_variant=VARIANT_L1,
             pmg_fine_hierarchy_mode="p4_p2_intermediate",
             preconditioner_matrix_source="tangent",
             node_ordering="block_metis",
@@ -964,9 +973,8 @@ def test_run_capture_accepts_mixed_p4_with_intermediate_p2_path(
 
 def test_build_3d_same_mesh_p2_pmg_hierarchy_smoke_on_real_mesh() -> None:
     hierarchy = build_3d_same_mesh_pmg_hierarchy(
-        MESH_PATH,
+        _resolved_variant(VARIANT_L1),
         fine_elem_type="P2",
-        boundary_type=0,
         node_ordering="original",
         reorder_parts=1,
         comm=PETSc.COMM_SELF,
@@ -977,7 +985,21 @@ def test_build_3d_same_mesh_p2_pmg_hierarchy_smoke_on_real_mesh() -> None:
     assert hierarchy.fine_level.free_size > hierarchy.coarse_level.free_size > 0
 
 
-def test_run_capture_accepts_same_mesh_p2_pmg_shell_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_build_3d_same_mesh_scalar_pmg_hierarchy_is_material_free() -> None:
+    hierarchy = build_3d_same_mesh_scalar_pmg_hierarchy(
+        resolve_problem_asset(asset_name="3d_hetero_seepage", mesh_variant="concave_family_b.msh"),
+        fine_elem_type="P2",
+        node_ordering="original",
+        reorder_parts=1,
+        q_mask_builder=lambda coord, surf, labels: np.ones((1, coord.shape[1]), dtype=bool),
+        comm=PETSc.COMM_SELF,
+    )
+    assert isinstance(hierarchy, GeneralPMGHierarchy)
+    assert hierarchy.materials == ()
+    assert tuple(level.dof_per_node for level in hierarchy.levels) == (1, 1)
+
+
+def test_run_capture_accepts_same_mesh_p2_pmg_shell_variant(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def _sentinel_builder(*args, **kwargs):
         raise RuntimeError("same-mesh-pmg-sentinel")
 

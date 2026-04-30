@@ -34,6 +34,7 @@ class ExecutionConfig:
     mpi_distribute_by_nodes: bool = True
     constitutive_mode: str = "overlap"
     tangent_kernel: str = "rows"
+    store_step_u: bool = True
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,9 @@ class LinearSolverConfig:
     use_as_preconditioner: bool = True
     factor_solver_type: str | None = None
     pc_backend: str | None = "hypre"
+    pmg_coarse_mesh_variant: str | None = None
+    pmg_fine_hierarchy_mode: str = "default"
+    max_deflation_basis_vectors: int = 48
     preconditioner_matrix_source: str = "tangent"
     preconditioner_matrix_policy: str = "current"
     preconditioner_rebuild_policy: str = "every_newton"
@@ -139,6 +143,7 @@ class LinearSolverConfig:
     pc_bddc_check_level: int | None = None
     compiled_outer: bool = False
     recycle_preconditioner: bool = True
+    petsc_opt: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -234,9 +239,36 @@ def _resolve_section_paths(config_path: Path, data: dict[str, Any]) -> dict[str,
     return resolved
 
 
+def _reject_unknown_fields(section_name: str, data: dict[str, Any], allowed: set[str], message: str) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(f"{section_name} fields {unknown} are not supported; {message}")
+
+
 def load_run_case_config(path: str | Path) -> RunCaseConfig:
     config_path = Path(path).resolve()
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+
+    allowed_top_level = {
+        "benchmark",
+        "notebook",
+        "problem",
+        "execution",
+        "continuation",
+        "newton",
+        "linear_solver",
+        "seepage",
+        "export",
+        "geometry",
+        "materials",
+        "case_data",
+    }
+    _reject_unknown_fields(
+        "Top-level",
+        data,
+        allowed_top_level,
+        "committed case configs must use the documented benchmark, problem, numerical, export, and geometry sections.",
+    )
 
     problem_data = dict(data.get("problem", {}))
     execution_data = dict(data.get("execution", {}))
@@ -245,12 +277,19 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
     linear_data = dict(data.get("linear_solver", {}))
     seepage_data = dict(data.get("seepage", {}))
     export_data = dict(data.get("export", {}))
-    geometry_data = _resolve_section_paths(config_path, dict(data.get("geometry", {})))
+    geometry_raw = dict(data.get("geometry", {}))
+    _reject_unknown_fields(
+        "[geometry]",
+        geometry_raw,
+        {"quadrature_rule"},
+        "only generic numerical geometry controls are allowed here; problem geometry belongs in meshes/<asset>/definition.py.",
+    )
+    geometry_data = _resolve_section_paths(config_path, geometry_raw)
     if data.get("materials") is not None:
         raise ValueError("Committed case configs must not define [[materials]]; use meshes/<asset>/definition.py.")
     if data.get("case_data") is not None:
         raise ValueError("Committed case configs must not define [case_data]; use [problem].asset and mesh_variant.")
-    forbidden_problem_fields = {"dimension", "mesh_path", "mesh_boundary_type", "seepage", "variant"}
+    forbidden_problem_fields = {"dimension", "mesh_path", "mesh_" + "boundary_type", "seepage", "variant"}
     forbidden_present = sorted(forbidden_problem_fields & set(problem_data))
     if forbidden_present:
         raise ValueError(f"[problem] fields {forbidden_present} are not supported; use asset mesh variants.")
@@ -258,6 +297,12 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
     forbidden_seepage = sorted(forbidden_seepage_fields & set(seepage_data))
     if forbidden_seepage:
         raise ValueError(f"[seepage] fields {forbidden_seepage} are asset-owned; use meshes/<asset>/definition.py.")
+    _reject_unknown_fields(
+        "[seepage]",
+        seepage_data,
+        {"linear_tolerance", "linear_max_iter", "nonlinear_max_iter"},
+        "only numerical seepage controls are allowed here; seepage physics belongs in meshes/<asset>/definition.py.",
+    )
 
     asset_name = str(problem_data.get("asset", "")).strip()
     if not asset_name:
@@ -279,6 +324,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         mpi_distribute_by_nodes=bool(execution_data.get("mpi_distribute_by_nodes", True)),
         constitutive_mode=str(execution_data.get("constitutive_mode", "overlap")),
         tangent_kernel=str(execution_data.get("tangent_kernel", "rows")),
+        store_step_u=bool(execution_data.get("store_step_u", True)),
     )
     continuation = ContinuationConfig(
         method=str(continuation_data.get("method", "indirect")),
@@ -397,6 +443,11 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
             None if linear_data.get("factor_solver_type") is None else str(linear_data.get("factor_solver_type"))
         ),
         pc_backend=str(linear_data.get("pc_backend", "hypre")),
+        pmg_coarse_mesh_variant=(
+            None if linear_data.get("pmg_coarse_mesh_variant") is None else str(linear_data.get("pmg_coarse_mesh_variant"))
+        ),
+        pmg_fine_hierarchy_mode=str(linear_data.get("pmg_fine_hierarchy_mode", "default")),
+        max_deflation_basis_vectors=int(linear_data.get("max_deflation_basis_vectors", 48)),
         preconditioner_matrix_source=str(linear_data.get("preconditioner_matrix_source", "tangent")),
         preconditioner_matrix_policy=str(linear_data.get("preconditioner_matrix_policy", "current")),
         preconditioner_rebuild_policy=str(linear_data.get("preconditioner_rebuild_policy", "every_newton")),
@@ -540,6 +591,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         ),
         compiled_outer=bool(linear_data.get("compiled_outer", False)),
         recycle_preconditioner=bool(linear_data.get("recycle_preconditioner", True)),
+        petsc_opt=[str(value) for value in list(linear_data.get("petsc_opt", []))],
     )
     seepage = SeepageConfig(
         linear_tolerance=float(seepage_data.get("linear_tolerance", 1e-10)),

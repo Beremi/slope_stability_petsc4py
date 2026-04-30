@@ -12,8 +12,8 @@ import nbformat
 import numpy as np
 import pytest
 
-from slope_stability.cli.run_case_from_config import _case_runner_kwargs
 from slope_stability.core.run_config import load_run_case_config
+from slope_stability.execution.asset_case import case_runner_kwargs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -451,7 +451,7 @@ def test_sloan_seepage_summary_omits_continuation_nan_metrics() -> None:
 def test_sloan_seepage_case_raises_nonlinear_iteration_cap() -> None:
     cfg = load_run_case_config(BENCHMARKS_DIR / "run_2D_sloan2013_seepage_capture" / "case.toml")
 
-    _runner, kwargs = _case_runner_kwargs(cfg)  # noqa: SLF001
+    _runner, kwargs = case_runner_kwargs(cfg)
 
     assert cfg.seepage.nonlinear_max_iter == 100
     assert kwargs["nonlinear_max_iter"] == 100

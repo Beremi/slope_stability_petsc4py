@@ -132,3 +132,4 @@ The intent is straightforward postprocessing with PyVista, meshio, or ParaView.
 - `docs/new_benchmark_new_geometry_guide.md`
 - `docs/config_case_matrix.md`
 - `docs/config_scheme_3d.md`
+- `docs/computational_path.md`

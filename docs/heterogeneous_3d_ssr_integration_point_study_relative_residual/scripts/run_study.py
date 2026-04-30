@@ -90,7 +90,8 @@ def _load_study(study_path: Path) -> dict:
 
     return {
         "study_dir": study_path.parent.resolve(),
-        "mesh_path": (REPO_ROOT / study["mesh_path"]).resolve(),
+        "asset": str(study["asset"]),
+        "mesh_variant": str(study["mesh_variant"]),
         "artifact_dir": (REPO_ROOT / study["artifact_dir"]).resolve(),
         "report_basename": str(study["report_basename"]),
         "name": str(study["name"]),
@@ -170,7 +171,8 @@ def _record_matches_config(record: dict, config: dict, *, elem_type: str, quadra
     required_pairs: list[tuple[str, object]] = [
         ("elem_type", str(elem_type)),
         ("quadrature_rule", int(quadrature_rule)),
-        ("mesh_path", str(config["mesh_path"])),
+        ("asset", str(config["asset"])),
+        ("mesh_variant", str(config["mesh_variant"])),
         ("solver_type", str(config["linear_solver"]["solver_type"])),
         ("pc_backend", str(config["linear_solver"]["pc_backend"])),
         ("newton_stopping_criterion", str(config["newton"]["stopping_criterion"])),
@@ -446,86 +448,81 @@ def _normalize_completed_raw_artifacts(config: dict, *, run_dir: Path, elem_type
     return record, curve_rows
 
 
+def _toml_bool(value: bool) -> str:
+    return "true" if bool(value) else "false"
+
+
+def _quote_toml(value: object) -> str:
+    return json.dumps(str(value))
+
+
+def _write_capture_case_toml(config: dict, *, out_dir: Path, elem_type: str, quadrature_rule: int) -> Path:
+    case_path = out_dir / "study_case.toml"
+    text = f"""
+[problem]
+name = {_quote_toml(_run_id(elem_type, quadrature_rule))}
+asset = {_quote_toml(config["asset"])}
+mesh_variant = {_quote_toml(config["mesh_variant"])}
+analysis = "ssr"
+elem_type = {_quote_toml(elem_type)}
+davis_type = "B"
+
+[geometry]
+quadrature_rule = {int(quadrature_rule)}
+
+[execution]
+node_ordering = {_quote_toml(config["execution"]["node_ordering"])}
+mpi_distribute_by_nodes = {_toml_bool(config["execution"]["mpi_distribute_by_nodes"])}
+constitutive_mode = {_quote_toml(config["execution"]["constitutive_mode"])}
+store_step_u = {_toml_bool(config["execution"]["store_step_u"])}
+
+[continuation]
+lambda_init = {float(config["continuation"]["lambda_init"]):.16g}
+d_lambda_init = {float(config["continuation"]["d_lambda_init"]):.16g}
+d_lambda_min = {float(config["continuation"]["d_lambda_min"]):.16g}
+d_lambda_diff_scaled_min = {float(config["continuation"]["d_lambda_diff_scaled_min"]):.16g}
+omega_max = {float(config["omega_final"]):.16g}
+predictor = {_quote_toml(config["continuation"]["predictor"])}
+omega_step_controller = {_quote_toml(config["continuation"]["omega_step_controller"])}
+step_max = {int(config["continuation"]["step_max"])}
+init_newton_stopping_criterion = {_quote_toml(config["newton"]["init_stopping_criterion"])}
+init_newton_stopping_tol = {float(config["newton"]["init_stopping_tol"]):.16g}
+
+[newton]
+it_max = {int(config["newton"]["it_max"])}
+it_damp_max = {int(config["newton"]["it_damp_max"])}
+tol = {float(config["newton"]["tol"]):.16g}
+r_min = {float(config["newton"]["r_min"]):.16g}
+stopping_criterion = {_quote_toml(config["newton"]["stopping_criterion"])}
+stopping_tol = {float(config["newton"]["stopping_tol"]):.16g}
+
+[linear_solver]
+solver_type = {_quote_toml(config["linear_solver"]["solver_type"])}
+tolerance = {float(config["linear_solver"]["tolerance"]):.16g}
+max_iterations = {int(config["linear_solver"]["max_iterations"])}
+pc_backend = {_quote_toml(config["linear_solver"]["pc_backend"])}
+threads = {int(config["linear_solver"]["preconditioner_threads"])}
+recycle_preconditioner = {_toml_bool(config["execution"]["recycle_preconditioner"])}
+""".lstrip()
+    case_path.write_text(text, encoding="utf-8")
+    return case_path
+
+
 def _capture_command(config: dict, *, out_dir: Path, elem_type: str, quadrature_rule: int) -> list[str]:
     python_exec = str(REPO_ROOT / ".venv" / "bin" / "python")
-    cli_path = REPO_ROOT / "src" / "slope_stability" / "cli" / "run_3D_hetero_SSR_capture.py"
+    case_path = _write_capture_case_toml(config, out_dir=out_dir, elem_type=elem_type, quadrature_rule=quadrature_rule)
 
-    command = [
+    return [
         "mpirun",
         "-n",
         str(config["mpi_ranks"]),
         python_exec,
-        str(cli_path),
-        "--analysis",
-        "ssr",
+        "-m",
+        "slope_stability.cli.run_case_from_config",
+        str(case_path),
         "--out_dir",
         str(out_dir),
-        "--mesh_path",
-        str(config["mesh_path"]),
-        "--elem_type",
-        str(elem_type),
-        "--quadrature_rule",
-        str(int(quadrature_rule)),
-        "--omega_max_stop",
-        f"{config['omega_final']:.16g}",
-        "--step_max",
-        str(config["continuation"]["step_max"]),
-        "--lambda_init",
-        f"{config['continuation']['lambda_init']:.16g}",
-        "--d_lambda_init",
-        f"{config['continuation']['d_lambda_init']:.16g}",
-        "--d_lambda_min",
-        f"{config['continuation']['d_lambda_min']:.16g}",
-        "--d_lambda_diff_scaled_min",
-        f"{config['continuation']['d_lambda_diff_scaled_min']:.16g}",
-        "--continuation_predictor",
-        str(config["continuation"]["predictor"]),
-        "--omega_step_controller",
-        str(config["continuation"]["omega_step_controller"]),
-        "--it_newt_max",
-        str(config["newton"]["it_max"]),
-        "--it_damp_max",
-        str(config["newton"]["it_damp_max"]),
-        "--tol",
-        f"{config['newton']['tol']:.16g}",
-        "--r_min",
-        f"{config['newton']['r_min']:.16g}",
-        "--newton_stopping_criterion",
-        str(config["newton"]["stopping_criterion"]),
-        "--newton_stopping_tol",
-        f"{config['newton']['stopping_tol']:.16g}",
-        "--init_newton_stopping_criterion",
-        str(config["newton"]["init_stopping_criterion"]),
-        "--init_newton_stopping_tol",
-        f"{config['newton']['init_stopping_tol']:.16g}",
-        "--solver_type",
-        str(config["linear_solver"]["solver_type"]),
-        "--linear_tolerance",
-        f"{config['linear_solver']['tolerance']:.16g}",
-        "--linear_max_iter",
-        str(config["linear_solver"]["max_iterations"]),
-        "--pc_backend",
-        str(config["linear_solver"]["pc_backend"]),
-        "--preconditioner_threads",
-        str(config["linear_solver"]["preconditioner_threads"]),
-        "--node_ordering",
-        str(config["execution"]["node_ordering"]),
-        "--constitutive_mode",
-        str(config["execution"]["constitutive_mode"]),
     ]
-    if config["execution"]["mpi_distribute_by_nodes"]:
-        command.append("--mpi_distribute_by_nodes")
-    else:
-        command.append("--no-mpi_distribute_by_nodes")
-    if config["execution"]["recycle_preconditioner"]:
-        command.append("--recycle_preconditioner")
-    else:
-        command.append("--no-recycle_preconditioner")
-    if config["execution"]["store_step_u"]:
-        command.append("--store_step_u")
-    else:
-        command.append("--no-store_step_u")
-    return command
 
 
 def _curve_rows_from_npz(npz, *, run_id: str, elem_type: str, quadrature_rule: int) -> list[dict]:
@@ -714,7 +711,8 @@ def _status_from_artifacts(
         "runtime_seconds_wall": float(wall_runtime),
         "runtime_seconds_capture": runtime_capture,
         "mpi_ranks": int(mpi_size),
-        "mesh_path": str(config["mesh_path"]),
+        "asset": str(config["asset"]),
+        "mesh_variant": str(config["mesh_variant"]),
         "mesh_nodes": int(mesh_nodes),
         "mesh_elements": int(mesh_elements),
         "unknowns": int(unknowns),
@@ -1034,7 +1032,8 @@ def _write_frames(config: dict, *, records: list[dict], curve_rows: list[dict]) 
             {
                 "study_name": config["name"],
                 "report_basename": config["report_basename"],
-                "mesh_path": str(config["mesh_path"]),
+                "asset": str(config["asset"]),
+                "mesh_variant": str(config["mesh_variant"]),
                 "artifact_dir": str(config["artifact_dir"]),
                 "omega_final": float(config["omega_final"]),
                 "element_types": list(config["element_types"]),

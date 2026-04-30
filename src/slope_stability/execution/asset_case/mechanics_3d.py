@@ -593,7 +593,7 @@ def run_capture(
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     factor_solver_type: str | None = None,
     pc_backend: str | None = "hypre",
-    pmg_coarse_mesh_path: Path | None = None,
+    pmg_coarse_mesh_variant: str | None = None,
     pmg_fine_hierarchy_mode: str = "default",
     preconditioner_matrix_source: str = "tangent",
     preconditioner_matrix_policy: str = "current",
@@ -654,7 +654,6 @@ def run_capture(
         raise ValueError(f"Asset {resolved_asset.asset_name!r} variant {resolved_asset.variant_name!r} has no mesh file.")
     mesh_path = resolved_asset.mesh_path
     profile = resolved_asset.resolved_variant.profile
-    mesh_boundary_type = int(resolved_asset.boundary_type)
     material_rows = mechanical_spec.material_rows
 
     solver_type_upper = str(solver_type).upper()
@@ -668,11 +667,11 @@ def run_capture(
             effective_pc_backend = "gamg"
 
     if effective_pc_backend in {"pmg", "pmg_shell"}:
-        mixed_pmg_requested = pmg_coarse_mesh_path is not None
+        mixed_pmg_requested = pmg_coarse_mesh_variant is not None
         if mixed_pmg_requested:
             if str(elem_type).upper() not in {"P2", "P4"}:
                 raise ValueError(
-                    f"{effective_pc_backend} backend with pmg_coarse_mesh_path currently supports only 3D P2 or P4 fine spaces."
+                    f"{effective_pc_backend} backend with pmg_coarse_mesh_variant currently supports only 3D P2 or P4 fine spaces."
                 )
         elif effective_pc_backend == "pmg":
             if str(elem_type).upper() != "P4":
@@ -706,13 +705,11 @@ def run_capture(
     pmg_hierarchy = None
     if effective_pc_backend in {"pmg", "pmg_shell"}:
         fine_hierarchy_mode = str(pmg_fine_hierarchy_mode).strip().lower()
-        if pmg_coarse_mesh_path is None:
+        if pmg_coarse_mesh_variant is None:
             if effective_pc_backend == "pmg_shell" and str(elem_type).upper() == "P2":
                 pmg_hierarchy = build_3d_same_mesh_pmg_hierarchy(
-                    mesh_path,
+                    resolved_asset,
                     fine_elem_type=elem_type,
-                    profile=profile,
-                    boundary_type=int(mesh_boundary_type),
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
@@ -720,9 +717,7 @@ def run_capture(
                 )
             else:
                 pmg_hierarchy = build_3d_pmg_hierarchy(
-                    mesh_path,
-                    profile=profile,
-                    boundary_type=int(mesh_boundary_type),
+                    resolved_asset,
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
@@ -733,10 +728,8 @@ def run_capture(
                 if str(elem_type).upper() != "P4":
                     raise ValueError("pmg_fine_hierarchy_mode='p4_p2_intermediate' requires elem_type='P4'.")
                 pmg_hierarchy = build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
-                    mesh_path,
-                    pmg_coarse_mesh_path,
-                    profile=profile,
-                    boundary_type=int(mesh_boundary_type),
+                    resolved_asset,
+                    coarse_mesh_variant=str(pmg_coarse_mesh_variant),
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
@@ -744,11 +737,9 @@ def run_capture(
                 )
             else:
                 pmg_hierarchy = build_3d_mixed_pmg_hierarchy(
-                    mesh_path,
-                    pmg_coarse_mesh_path,
+                    resolved_asset,
+                    coarse_mesh_variant=str(pmg_coarse_mesh_variant),
                     fine_elem_type=elem_type,
-                    profile=profile,
-                    boundary_type=int(mesh_boundary_type),
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
@@ -893,7 +884,7 @@ def run_capture(
         "use_as_preconditioner": True,
         "factor_solver_type": factor_solver_type,
         "pc_backend": effective_pc_backend,
-        "pmg_coarse_mesh_path": None if pmg_coarse_mesh_path is None else str(pmg_coarse_mesh_path),
+        "pmg_coarse_mesh_variant": None if pmg_coarse_mesh_variant is None else str(pmg_coarse_mesh_variant),
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "preconditioner_matrix_source": str(preconditioner_matrix_source),
         "preconditioner_matrix_policy": preconditioner_matrix_policy,
@@ -1156,7 +1147,6 @@ def run_capture(
         "quadrature_rule": None if quadrature_rule is None else int(quadrature_rule),
         "davis_type": str(davis_type),
         "material_rows": np.asarray(mat_props, dtype=np.float64).tolist(),
-        "mesh_boundary_type": int(mesh_boundary_type),
         "node_ordering": node_ordering,
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
         "pc_gamg_process_eq_limit": pc_gamg_process_eq_limit,
@@ -1742,7 +1732,7 @@ def main() -> None:
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")
     parser.add_argument("--factor_solver_type", type=str, default=None)
     parser.add_argument("--pc_backend", type=str, default="hypre", choices=["hypre", "gamg", "bddc", "pmg", "pmg_shell"])
-    parser.add_argument("--pmg_coarse_mesh_path", type=Path, default=None)
+    parser.add_argument("--pmg_coarse_mesh_variant", type=str, default=None)
     parser.add_argument(
         "--pmg_fine_hierarchy_mode",
         type=str,
@@ -1892,7 +1882,7 @@ def main() -> None:
         solver_type=args.solver_type,
         factor_solver_type=args.factor_solver_type,
         pc_backend=args.pc_backend,
-        pmg_coarse_mesh_path=args.pmg_coarse_mesh_path,
+        pmg_coarse_mesh_variant=args.pmg_coarse_mesh_variant,
         pmg_fine_hierarchy_mode=args.pmg_fine_hierarchy_mode,
         preconditioner_matrix_source=args.preconditioner_matrix_source,
         preconditioner_matrix_policy=args.preconditioner_matrix_policy,

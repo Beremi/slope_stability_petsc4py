@@ -13,8 +13,7 @@ from ..core.simplex_lagrange import tetra_reference_nodes
 from ..fem.basis import local_basis_volume_3d
 from ..fem.distributed_elastic import find_overlap_partition
 from ..mesh import MaterialSpec, reorder_mesh_nodes
-from ..problem_asset_runtime import build_mesh_for_path
-from ..problem_assets import load_material_rows_for_path
+from ..problem_asset_runtime import ResolvedAsset, build_mesh_for_resolved_asset, resolve_problem_asset
 from ..utils import owned_block_range, q_to_free_indices
 
 
@@ -161,12 +160,12 @@ class GeneralPMGHierarchy:
         return self.levels_tuple[-1]
 
 
-def _materials_from_rows(material_rows: list[list[float]] | None, *, mesh_path: Path) -> tuple[MaterialSpec, ...]:
+def _materials_from_rows(material_rows: list[list[float]] | None, *, resolved_asset: ResolvedAsset) -> tuple[MaterialSpec, ...]:
     rows = material_rows
     if rows is None:
-        rows = load_material_rows_for_path(mesh_path)
+        rows = resolved_asset.definition.material_rows()
     if rows is None:
-        raise ValueError(f"No material rows found for {mesh_path}")
+        raise ValueError(f"No material rows found for asset {resolved_asset.asset_name!r}.")
     return tuple(
         MaterialSpec(
             c0=float(row[0]),
@@ -304,17 +303,15 @@ def _prune_transfer_rows(
 
 def _build_level(
     *,
-    mesh_path: Path,
+    resolved_asset: ResolvedAsset,
     elem_type: str,
-    profile: str | None,
     node_ordering: str,
     reorder_parts: int | None,
-    boundary_type: int,
     comm,
     scalar_dofs: bool = False,
     q_mask_override=None,
 ) -> PMGLevel:
-    mesh = build_mesh_for_path(mesh_path, elem_type=elem_type, profile=profile, boundary_type=boundary_type)
+    mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,
@@ -653,11 +650,23 @@ def _cross_mesh_p1_to_p1_prolongation(
     )
 
 
+def _asset_mesh_path(resolved_asset: ResolvedAsset) -> Path:
+    if resolved_asset.mesh_path is None:
+        raise ValueError(f"Asset {resolved_asset.asset_name!r} variant {resolved_asset.variant_name!r} has no mesh file.")
+    return Path(resolved_asset.mesh_path)
+
+
+def _resolve_related_variant(resolved_asset: ResolvedAsset, mesh_variant: str) -> ResolvedAsset:
+    return resolve_problem_asset(
+        asset_name=resolved_asset.asset_name,
+        mesh_variant=str(mesh_variant),
+        profile=str(resolved_asset.resolved_variant.profile),
+    )
+
+
 def build_3d_pmg_hierarchy(
-    mesh_path: str | Path,
+    resolved_asset: ResolvedAsset,
     *,
-    profile: str | None = None,
-    boundary_type: int = 0,
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
@@ -665,33 +674,27 @@ def build_3d_pmg_hierarchy(
 ) -> ElasticPMGHierarchy:
     """Build the static same-mesh `P1 -> P2 -> P4` PMG hierarchy."""
 
-    mesh_path = Path(mesh_path).resolve()
-    materials = _materials_from_rows(material_rows, mesh_path=mesh_path)
+    mesh_path = _asset_mesh_path(resolved_asset)
+    materials = _materials_from_rows(material_rows, resolved_asset=resolved_asset)
     level_p1 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P1",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     level_p2 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P2",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     level_p4 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P4",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     prolongation_p21 = _adjacent_level_prolongation(
@@ -719,11 +722,9 @@ def build_3d_pmg_hierarchy(
 
 
 def build_3d_same_mesh_pmg_hierarchy(
-    mesh_path: str | Path,
+    resolved_asset: ResolvedAsset,
     *,
     fine_elem_type: str = "P4",
-    profile: str | None = None,
-    boundary_type: int = 0,
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
@@ -735,24 +736,20 @@ def build_3d_same_mesh_pmg_hierarchy(
     if fine_elem_type_norm not in {"P2", "P4"}:
         raise ValueError(f"Same-mesh PMG hierarchy currently supports fine_elem_type P2 or P4, got {fine_elem_type!r}.")
 
-    mesh_path = Path(mesh_path).resolve()
-    materials = _materials_from_rows(material_rows, mesh_path=mesh_path)
+    mesh_path = _asset_mesh_path(resolved_asset)
+    materials = _materials_from_rows(material_rows, resolved_asset=resolved_asset)
     level_p1 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P1",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     level_p2 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P2",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     prolongation_p21 = _adjacent_level_prolongation(
@@ -771,12 +768,10 @@ def build_3d_same_mesh_pmg_hierarchy(
         )
 
     level_p4 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P4",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     prolongation_p42 = _adjacent_level_prolongation(
@@ -795,11 +790,9 @@ def build_3d_same_mesh_pmg_hierarchy(
 
 
 def build_3d_same_mesh_scalar_pmg_hierarchy(
-    mesh_path: str | Path,
+    resolved_asset: ResolvedAsset,
     *,
     fine_elem_type: str = "P4",
-    profile: str | None = None,
-    boundary_type: int = 0,
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
@@ -812,26 +805,22 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
     if fine_elem_type_norm not in {"P2", "P4"}:
         raise ValueError(f"Same-mesh PMG hierarchy currently supports fine_elem_type P2 or P4, got {fine_elem_type!r}.")
 
-    mesh_path = Path(mesh_path).resolve()
-    materials = _materials_from_rows(material_rows, mesh_path=mesh_path)
+    mesh_path = _asset_mesh_path(resolved_asset)
+    materials: tuple[MaterialSpec, ...] = ()
     level_p1 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P1",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
         scalar_dofs=True,
         q_mask_override=q_mask_builder,
     )
     level_p2 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P2",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
         scalar_dofs=True,
         q_mask_override=q_mask_builder,
@@ -854,12 +843,10 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
         )
 
     level_p4 = _build_level(
-        mesh_path=mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P4",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
         scalar_dofs=True,
         q_mask_override=q_mask_builder,
@@ -887,12 +874,10 @@ def build_3d_elastic_pmg_hierarchy(*args, **kwargs) -> ElasticPMGHierarchy:
 
 
 def build_3d_mixed_pmg_hierarchy(
-    fine_mesh_path: str | Path,
-    coarse_mesh_path: str | Path,
+    resolved_asset: ResolvedAsset,
     *,
+    coarse_mesh_variant: str,
     fine_elem_type: str = "P2",
-    profile: str | None = None,
-    boundary_type: int = 0,
     node_ordering: str = "original",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
@@ -900,34 +885,28 @@ def build_3d_mixed_pmg_hierarchy(
 ) -> ElasticPMGHierarchy:
     """Build a mixed three-level hierarchy such as `P1(L1) -> P1(L2) -> P2(L2)`."""
 
-    fine_mesh_path = Path(fine_mesh_path).resolve()
-    coarse_mesh_path = Path(coarse_mesh_path).resolve()
-    materials = _materials_from_rows(material_rows, mesh_path=fine_mesh_path)
+    fine_mesh_path = _asset_mesh_path(resolved_asset)
+    coarse_asset = _resolve_related_variant(resolved_asset, coarse_mesh_variant)
+    materials = _materials_from_rows(material_rows, resolved_asset=resolved_asset)
     level_coarse = _build_level(
-        mesh_path=coarse_mesh_path,
+        resolved_asset=coarse_asset,
         elem_type="P1",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     level_mid = _build_level(
-        mesh_path=fine_mesh_path,
+        resolved_asset=resolved_asset,
         elem_type="P1",
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     level_fine = _build_level(
-        mesh_path=fine_mesh_path,
+        resolved_asset=resolved_asset,
         elem_type=str(fine_elem_type),
-        profile=profile,
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
-        boundary_type=boundary_type,
         comm=comm,
     )
     prolongation_h = _cross_mesh_p1_to_p1_prolongation(level_coarse, level_mid)
@@ -1011,11 +990,9 @@ def _prune_general_hierarchy(
 
 
 def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
-    fine_mesh_path: str | Path,
-    coarse_mesh_path: str | Path,
+    resolved_asset: ResolvedAsset,
     *,
-    profile: str | None = None,
-    boundary_type: int = 0,
+    coarse_mesh_variant: str,
     node_ordering: str = "original",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
@@ -1023,45 +1000,37 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
 ) -> GeneralPMGHierarchy:
     """Build `P1(L1) -> P1(L2) -> P2(L2) -> P4(L2)` for mixed-shell PMG."""
 
-    fine_mesh_path = Path(fine_mesh_path).resolve()
-    coarse_mesh_path = Path(coarse_mesh_path).resolve()
-    materials = _materials_from_rows(material_rows, mesh_path=fine_mesh_path)
+    fine_mesh_path = _asset_mesh_path(resolved_asset)
+    coarse_asset = _resolve_related_variant(resolved_asset, coarse_mesh_variant)
+    materials = _materials_from_rows(material_rows, resolved_asset=resolved_asset)
 
     levels = [
         _build_level(
-            mesh_path=coarse_mesh_path,
+            resolved_asset=coarse_asset,
             elem_type="P1",
-            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
-            boundary_type=boundary_type,
             comm=comm,
         ),
         _build_level(
-            mesh_path=fine_mesh_path,
+            resolved_asset=resolved_asset,
             elem_type="P1",
-            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
-            boundary_type=boundary_type,
             comm=comm,
         ),
         _build_level(
-            mesh_path=fine_mesh_path,
+            resolved_asset=resolved_asset,
             elem_type="P2",
-            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
-            boundary_type=boundary_type,
             comm=comm,
         ),
         _build_level(
-            mesh_path=fine_mesh_path,
+            resolved_asset=resolved_asset,
             elem_type="P4",
-            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
-            boundary_type=boundary_type,
             comm=comm,
         ),
     ]
@@ -1082,12 +1051,10 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
 
 
 def build_3d_mixed_pmg_chain_hierarchy(
-    fine_mesh_path: str | Path,
-    coarse_mesh_paths: list[str | Path] | tuple[str | Path, ...],
+    resolved_asset: ResolvedAsset,
     *,
+    coarse_mesh_variants: list[str] | tuple[str, ...],
     fine_elem_type: str = "P2",
-    profile: str | None = None,
-    boundary_type: int = 0,
     node_ordering: str = "original",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
@@ -1095,34 +1062,30 @@ def build_3d_mixed_pmg_chain_hierarchy(
 ) -> GeneralPMGHierarchy:
     """Build a mixed multi-level hierarchy such as `P1(L1)->...->P1(L5)->P2(L5)`."""
 
-    fine_mesh_path = Path(fine_mesh_path).resolve()
-    coarse_mesh_paths = tuple(Path(path).resolve() for path in coarse_mesh_paths)
-    if not coarse_mesh_paths:
-        raise ValueError("Mixed PMG chain hierarchy requires at least one coarse mesh path.")
+    fine_mesh_path = _asset_mesh_path(resolved_asset)
+    coarse_mesh_variants = tuple(str(variant) for variant in coarse_mesh_variants)
+    if not coarse_mesh_variants:
+        raise ValueError("Mixed PMG chain hierarchy requires at least one coarse mesh variant.")
 
-    materials = _materials_from_rows(material_rows, mesh_path=fine_mesh_path)
-    p1_tail_paths = tuple(reversed(coarse_mesh_paths)) + (fine_mesh_path,)
+    materials = _materials_from_rows(material_rows, resolved_asset=resolved_asset)
+    p1_tail_assets = tuple(_resolve_related_variant(resolved_asset, variant) for variant in reversed(coarse_mesh_variants)) + (resolved_asset,)
     levels: list[PMGLevel] = []
-    for mesh_path in p1_tail_paths:
+    for level_asset in p1_tail_assets:
         levels.append(
             _build_level(
-                mesh_path=mesh_path,
+                resolved_asset=level_asset,
                 elem_type="P1",
-                profile=profile,
                 node_ordering=node_ordering,
                 reorder_parts=reorder_parts,
-                boundary_type=boundary_type,
                 comm=comm,
             )
         )
     levels.append(
         _build_level(
-            mesh_path=fine_mesh_path,
+            resolved_asset=resolved_asset,
             elem_type=str(fine_elem_type),
-            profile=profile,
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
-            boundary_type=boundary_type,
             comm=comm,
         )
     )

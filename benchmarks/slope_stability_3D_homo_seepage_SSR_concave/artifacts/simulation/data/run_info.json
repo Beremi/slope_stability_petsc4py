@@ -66,10 +66,9 @@
       ]
     ],
     "node_ordering": "block_metis",
-    "mesh_boundary_type": 0,
     "mpi_distribute_by_nodes": true,
     "pc_backend": "hypre",
-    "pmg_coarse_mesh_path": null,
+    "pmg_coarse_mesh_variant": null,
     "pmg_fine_hierarchy_mode": "default",
     "pc_hypre_coarsen_type": "HMIS",
     "pc_hypre_interp_type": "ext+i",

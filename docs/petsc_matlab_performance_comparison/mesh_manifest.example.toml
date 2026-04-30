@@ -13,11 +13,3 @@ seepage_concave_l2 = "/absolute/path/to/slope_with_waterlevels_concave_L2.h5"
 seepage_concave = "/absolute/path/to/slope_with_waterlevels_concave.h5"
 seepage_concave_l3 = "/absolute/path/to/slope_with_waterlevels_concave_L3.h5"
 seepage_concave_l4 = "/absolute/path/to/slope_with_waterlevels_concave_L4.h5"
-
-# Optional: override the PETSc-side mesh path for selected logical levels.
-# This is useful when the external H5 ladder must be used on both engines.
-[petsc_mesh_override]
-# seepage_concave_l2 = "/absolute/path/to/slope_with_waterlevels_concave_L2.h5"
-# seepage_concave = "/absolute/path/to/slope_with_waterlevels_concave.h5"
-# seepage_concave_l3 = "/absolute/path/to/slope_with_waterlevels_concave_L3.h5"
-# seepage_concave_l4 = "/absolute/path/to/slope_with_waterlevels_concave_L4.h5"

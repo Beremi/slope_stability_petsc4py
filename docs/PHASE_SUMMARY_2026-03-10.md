@@ -22,8 +22,8 @@ Date: 2026-03-10
 - Maintained a structured PETSc reimplementation under:
   - [slope_stability](/home/beremi/repos/slope_stability-1/slope_stability)
 - Capture driver implemented and tuned for parity workflow:
-  - [slope_stability/src/slope_stability/cli/run_3D_hetero_SSR_capture.py](/home/beremi/repos/slope_stability-1/slope_stability/src/slope_stability/cli/run_3D_hetero_SSR_capture.py)
-- Run driver now supports MATLAB-like parameterization and CLI options (e.g. `--lambda_init`, `--d_lambda_init`, `--it_newt_max`, `--it_damp_max`, `--tol`, `--r_min`, `--linear_tolerance`, `--linear_max_iter`, `--solver_type`).
+  - [src/slope_stability/execution/asset_case/mechanics_3d.py](../src/slope_stability/execution/asset_case/mechanics_3d.py)
+- Run driver now supports MATLAB-like parameterization through asset-first `case.toml` sections for continuation, Newton, and linear-solver controls.
 - Environment bootstrap exists:
   - [slope_stability/build_scripts/bootstrap_petsc4py_venv.sh](/home/beremi/repos/slope_stability-1/slope_stability/build_scripts/bootstrap_petsc4py_venv.sh)
 - Result artifacts and docs already collected for MATLAB, plus this handoff summary:

@@ -11,7 +11,6 @@ import numpy as np
 
 from .core.elements import infer_simplex_elem_type, SIMPLEX_NODES_PER_SURFACE
 from .core.simplex_lagrange import triangle_lagrange_interior_tuples
-from .problem_assets import build_dirichlet_mask_for_path
 
 
 @dataclass
@@ -25,25 +24,8 @@ class MeshData:
     elem_type: str | None = None
 
 
-def _build_dirichlet_mask(
-    dim: int,
-    n_nodes: int,
-    surf: np.ndarray,
-    boundary: np.ndarray,
-    *,
-    path: Path,
-    coord: np.ndarray | None = None,
-    boundary_type: int = 0,
-) -> np.ndarray:
-    return build_dirichlet_mask_for_path(
-        path,
-        dim=dim,
-        n_nodes=n_nodes,
-        surf=surf,
-        boundary=boundary,
-        coord=coord,
-        boundary_type=boundary_type,
-    )
+def _free_dirichlet_mask(dim: int, n_nodes: int) -> np.ndarray:
+    return np.ones((int(dim), int(n_nodes)), dtype=bool)
 
 
 def _to_zero_based(indices: np.ndarray) -> np.ndarray:
@@ -70,7 +52,7 @@ def _orient_connectivity(connectivity: np.ndarray, valid_nodes_per_entity: tuple
     )
 
 
-def _load_lagrange_tet_mesh(path: Path, *, boundary_type: int = 0) -> MeshData:
+def _load_lagrange_tet_mesh(path: Path) -> MeshData:
     """Load a MATLAB-exported HDF5 tetrahedral mesh for P1/P2/P3/P4 families."""
 
     with h5py.File(str(path), "r") as h5:
@@ -93,7 +75,7 @@ def _load_lagrange_tet_mesh(path: Path, *, boundary_type: int = 0) -> MeshData:
 
     # MATLAB exports stored as (x, z, y) in this helper.
     coord = np.asarray(node[[0, 2, 1], :], dtype=np.float64)
-    q = _build_dirichlet_mask(3, coord.shape[1], face, boundary, path=path, coord=coord, boundary_type=boundary_type)
+    q = _free_dirichlet_mask(3, coord.shape[1])
 
     return MeshData(
         coord=coord,
@@ -106,13 +88,13 @@ def _load_lagrange_tet_mesh(path: Path, *, boundary_type: int = 0) -> MeshData:
     )
 
 
-def load_mesh_p2(file_path: str | Path, boundary_type: int = 0) -> MeshData:
+def load_mesh_p2(file_path: str | Path) -> MeshData:
     """Backwards-compatible name for MATLAB HDF5 tetrahedral meshes."""
 
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(path)
-    return _load_lagrange_tet_mesh(path, boundary_type=boundary_type)
+    return _load_lagrange_tet_mesh(path)
 
 
 def _physical_group_name_map(field_data: dict[str, np.ndarray], dim: int, prefix: str) -> dict[int, int]:
@@ -409,7 +391,7 @@ def _elevate_tet4_mesh_to_tet35(
     return coord_new, tet35, tri15
 
 
-def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundary_type: int = 0) -> MeshData:
+def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None) -> MeshData:
     try:
         import meshio
     except ImportError as exc:  # pragma: no cover - runtime dependency in normal use
@@ -433,7 +415,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
 
     target = None if elem_type is None else str(elem_type).strip().upper()
     if target in {None, "", "P1"}:
-        q_mask = _build_dirichlet_mask(3, coord.shape[1], surf, boundary, path=path, coord=coord, boundary_type=boundary_type)
+        q_mask = _free_dirichlet_mask(3, coord.shape[1])
         return MeshData(
             coord=coord,
             elem=elem,
@@ -445,7 +427,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
         )
     if target == "P2":
         coord_p2, elem_p2, surf_p2 = _elevate_tet4_mesh_to_tet10(coord, elem, surf)
-        q_mask = _build_dirichlet_mask(3, coord_p2.shape[1], surf_p2, boundary, path=path, coord=coord_p2, boundary_type=boundary_type)
+        q_mask = _free_dirichlet_mask(3, coord_p2.shape[1])
         return MeshData(
             coord=coord_p2,
             elem=elem_p2,
@@ -457,7 +439,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
         )
     if target == "P3":
         coord_p3, elem_p3, surf_p3 = _elevate_tet4_mesh_to_tet20(coord, elem, surf)
-        q_mask = _build_dirichlet_mask(3, coord_p3.shape[1], surf_p3, boundary, path=path, coord=coord_p3, boundary_type=boundary_type)
+        q_mask = _free_dirichlet_mask(3, coord_p3.shape[1])
         return MeshData(
             coord=coord_p3,
             elem=elem_p3,
@@ -469,7 +451,7 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
         )
     if target == "P4":
         coord_p4, elem_p4, surf_p4 = _elevate_tet4_mesh_to_tet35(coord, elem, surf)
-        q_mask = _build_dirichlet_mask(3, coord_p4.shape[1], surf_p4, boundary, path=path, coord=coord_p4, boundary_type=boundary_type)
+        q_mask = _free_dirichlet_mask(3, coord_p4.shape[1])
         return MeshData(
             coord=coord_p4,
             elem=elem_p4,
@@ -484,16 +466,16 @@ def _load_gmsh_simplex_mesh(path: Path, *, elem_type: str | None = None, boundar
     )
 
 
-def load_mesh_file(mesh_file: str | Path, *, elem_type: str | None = None, boundary_type: int = 0) -> MeshData:
+def load_mesh_file(mesh_file: str | Path, *, elem_type: str | None = None) -> MeshData:
     path = Path(mesh_file)
     lower = path.name.lower()
     if path.suffix.lower() == ".h5":
         with h5py.File(str(path), "r") as h5:
             keys = set(h5.keys())
         if {"boundary", "elem", "face", "material", "node"} <= keys:
-            return _load_lagrange_tet_mesh(path, boundary_type=boundary_type)
+            return _load_lagrange_tet_mesh(path)
     if path.suffix.lower() == ".msh":
-        return _load_gmsh_simplex_mesh(path, elem_type=elem_type, boundary_type=boundary_type)
+        return _load_gmsh_simplex_mesh(path, elem_type=elem_type)
     if "p2" in lower:
-        return load_mesh_p2(path, boundary_type=boundary_type)
+        return load_mesh_p2(path)
     raise ValueError(f"Unsupported mesh format for {path}")

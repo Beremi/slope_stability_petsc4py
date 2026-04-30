@@ -6,9 +6,14 @@ import sys
 from pathlib import Path
 
 THIS_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[3]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
+from slope_stability.assets import load_problem_asset
 from study_common import DEFAULT_MANIFEST_PATH, load_study
 
 
@@ -53,13 +58,17 @@ def main() -> None:
                 issues.append(f"Duplicate level id in {case['id']}: {level['id']}")
             level_ids.add(level["id"])
 
-            petsc_mesh = level["petsc_mesh"]
-            if petsc_mesh is None or not petsc_mesh.exists():
-                issues.append(f"Missing PETSc mesh for {case['id']}:{level['id']} -> {petsc_mesh}")
+            try:
+                variants = load_problem_asset(level["asset"]).list_variants()
+            except Exception as exc:
+                issues.append(f"Missing PETSc asset for {case['id']}:{level['id']} -> {level['asset']} ({exc})")
+                variants = {}
+            if level["mesh_variant"] not in variants:
+                issues.append(f"Missing PETSc mesh variant for {case['id']}:{level['id']} -> {level['asset']}:{level['mesh_variant']}")
 
-            coarse_mesh = level["pmg_coarse_mesh"]
-            if coarse_mesh is not None and not coarse_mesh.exists():
-                issues.append(f"Missing PMG coarse mesh for {case['id']}:{level['id']} -> {coarse_mesh}")
+            coarse_variant = level["pmg_coarse_mesh_variant"]
+            if coarse_variant is not None and coarse_variant not in variants:
+                issues.append(f"Missing PMG coarse mesh variant for {case['id']}:{level['id']} -> {level['asset']}:{coarse_variant}")
 
             matlab_mesh = level["matlab_mesh"]
             if matlab_mesh is None:

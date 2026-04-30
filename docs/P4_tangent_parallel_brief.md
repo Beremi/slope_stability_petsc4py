@@ -28,7 +28,7 @@ This note summarizes how `P4` elements, `B` construction, tangent matrix/value a
 - 3D compiled constitutive batch kernel: [`src/slope_stability/cython/constitutive_3d_batch.c`](../src/slope_stability/cython/constitutive_3d_batch.c)
 - PETSc ownership helpers: [`src/slope_stability/utils.py`](../src/slope_stability/utils.py)
 - Mesh reordering / partition-aware ordering: [`src/slope_stability/mesh/reorder.py`](../src/slope_stability/mesh/reorder.py)
-- Example 3D mechanics runner wiring the distributed tangent path: [`src/slope_stability/cli/run_3d_mechanics_capture.py`](../src/slope_stability/cli/run_3d_mechanics_capture.py)
+- Example 3D mechanics runner wiring the distributed tangent path: [`src/slope_stability/execution/asset_case/mechanics_3d.py`](../src/slope_stability/execution/asset_case/mechanics_3d.py)
 
 ## 1. P4 element support
 
@@ -273,7 +273,7 @@ The optimized path is not matrix-free. It is a fixed-pattern owned-row assembly 
 
 Main wiring example:
 
-- [`src/slope_stability/cli/run_3d_mechanics_capture.py`](../src/slope_stability/cli/run_3d_mechanics_capture.py)
+- [`src/slope_stability/execution/asset_case/mechanics_3d.py`](../src/slope_stability/execution/asset_case/mechanics_3d.py)
 
 ## 5.2 Reordering and ownership
 
@@ -620,7 +620,7 @@ Relevant code:
 
 - [`src/slope_stability/utils.py#L64-L71`](../src/slope_stability/utils.py#L64-L71)
 - [`src/slope_stability/fem/distributed_elastic.py#L184-L206`](../src/slope_stability/fem/distributed_elastic.py#L184-L206)
-- [`src/slope_stability/cli/run_3d_mechanics_capture.py`](../src/slope_stability/cli/run_3d_mechanics_capture.py)
+- [`src/slope_stability/execution/asset_case/mechanics_3d.py`](../src/slope_stability/execution/asset_case/mechanics_3d.py)
 
 ### Shared-memory parallelism
 
@@ -667,7 +667,7 @@ If someone wants the shortest reading path, these are the most relevant files:
 - [`src/slope_stability/constitutive/problem.py`](../src/slope_stability/constitutive/problem.py)
 - [`src/slope_stability/cython/assemble_tangent_values_3d.c`](../src/slope_stability/cython/assemble_tangent_values_3d.c)
 - [`src/slope_stability/cython/constitutive_3D_kernel.h`](../src/slope_stability/cython/constitutive_3D_kernel.h)
-- [`src/slope_stability/cli/run_3d_mechanics_capture.py`](../src/slope_stability/cli/run_3d_mechanics_capture.py)
+- [`src/slope_stability/execution/asset_case/mechanics_3d.py`](../src/slope_stability/execution/asset_case/mechanics_3d.py)
 
 ## 13. Minimal current pipeline summary
 

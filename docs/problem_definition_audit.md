@@ -102,7 +102,7 @@ Active benchmark configs no longer rely on:
 - `[seepage].water_unit_weight`
 - `[seepage].conductivity`
 
-`src/slope_stability/cli/run_case_from_config.py` now dispatches by generic problem class: dimension, analysis, and seepage capability. It does not branch on old asset/source-kind families.
+`src/slope_stability/cli/run_case_from_config.py` is now the supported case CLI. It delegates to the internal asset-case execution layer, which dispatches by generic problem class: dimension, analysis, and seepage capability.
 
 ## Cross-Cutting Findings
 

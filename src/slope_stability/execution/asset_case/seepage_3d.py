@@ -19,13 +19,11 @@ from slope_stability.core.elements import validate_supported_elem_type
 from slope_stability.fem.quadrature import quadrature_volume_3d
 from slope_stability.mesh import reorder_mesh_nodes
 from slope_stability.problem_asset_runtime import (
-    build_mesh_for_path,
     build_mesh_for_resolved_asset,
     build_seepage_boundary_for_resolved_asset,
     load_seepage_problem_spec,
     resolve_problem_asset,
 )
-from slope_stability.problem_assets import build_seepage_boundary_for_path
 from slope_stability.seepage import heter_conduct, seepage_problem_3d
 
 
@@ -242,14 +240,11 @@ def run_capture(
                 key, value = text, "1"
             preconditioner_options[key.strip()] = value.strip()
     if pc_backend_norm in {"pmg", "pmg_shell"}:
-        n_materials = int(np.max(material_identifier)) + 1 if np.size(material_identifier) else 1
-        material_rows = [[0.0, 0.0, 0.0, 1.0, 0.3, 0.0, 0.0] for _ in range(n_materials)]
-
         def _q_mask_builder(level_coord, level_surf, level_triangle_labels):
             if level_triangle_labels is None:
                 raise ValueError("PMG seepage hierarchy requires triangle labels for boundary detection.")
-            level_q_w, _ = build_seepage_boundary_for_path(
-                mesh_path,
+            level_q_w, _ = build_seepage_boundary_for_resolved_asset(
+                resolved_asset,
                 level_coord,
                 level_surf,
                 level_triangle_labels,
@@ -258,13 +253,10 @@ def run_capture(
             return np.asarray(level_q_w, dtype=bool).reshape(1, -1)
 
         pmg_hierarchy = build_3d_same_mesh_scalar_pmg_hierarchy(
-            mesh_path,
+            resolved_asset,
             fine_elem_type=elem_type,
-            profile=profile,
-            boundary_type=0,
             node_ordering=node_ordering,
             reorder_parts=partition_count,
-            material_rows=material_rows,
             q_mask_builder=_q_mask_builder,
             comm=PETSc.COMM_SELF,
         )

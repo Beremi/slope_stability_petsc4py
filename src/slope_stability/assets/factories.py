@@ -367,19 +367,13 @@ class CanonicalProblemAsset(ProblemAssetAPI):
     def resolve_variant(
         self,
         mesh_variant: str | None,
-        mesh_path: Path | None = None,
         *,
         profile: str | None = None,
     ) -> ResolvedVariant:
-        if mesh_variant is None and mesh_path is not None:
-            candidate = Path(mesh_path).name
-            if candidate in self._variants:
-                mesh_variant = candidate
         name = str(mesh_variant or self.default_variant or next(iter(self._variants)))
         if name not in self._variants:
             raise KeyError(f"Unknown mesh variant {name!r} for asset {self.asset_id!r}.")
         variant = self._variants[name]
-        resolved_path = variant.mesh_path if mesh_path is None else Path(mesh_path).resolve()
         resolved_profile = str(profile or self.default_profile)
         if self._mechanics is not None and resolved_profile not in self._mechanics.profiles:
             raise KeyError(f"Unknown mechanics profile {resolved_profile!r} for asset {self.asset_id!r}.")
@@ -387,10 +381,9 @@ class CanonicalProblemAsset(ProblemAssetAPI):
             asset_id=self.asset_id,
             name=variant.name,
             source=dict(variant.source),
-            mesh_path=resolved_path,
+            mesh_path=variant.mesh_path,
             metadata=dict(variant.metadata),
             profile=resolved_profile,
-            boundary_type=0,
         )
 
     def build_mesh(self, variant: ResolvedVariant, *, elem_type: str) -> SolverMesh:

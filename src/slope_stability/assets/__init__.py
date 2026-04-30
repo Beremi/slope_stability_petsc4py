@@ -46,26 +46,6 @@ def load_problem_asset(name: str) -> ProblemAssetAPI:
     return _load_asset_from_definition_path(definition_path, name)
 
 
-def load_problem_asset_for_path(path: str | Path) -> ProblemAssetAPI | None:
-    mesh_path = Path(path).resolve()
-    root = meshes_root().resolve()
-    try:
-        mesh_path.relative_to(root)
-    except ValueError:
-        return None
-
-    search_roots = (mesh_path, *mesh_path.parents) if mesh_path.is_dir() else (mesh_path.parent, *mesh_path.parents)
-    for parent in search_roots:
-        if parent == parent.parent:
-            break
-        definition_path = parent / "definition.py"
-        if definition_path.exists():
-            return _load_asset_from_definition_path(definition_path, parent.name)
-        if parent == root:
-            break
-    return None
-
-
 __all__ = [
     "MeshBuildResult",
     "MechanicalProblemSpec",
@@ -75,7 +55,6 @@ __all__ = [
     "VariantSpec",
     "available_problem_assets",
     "load_problem_asset",
-    "load_problem_asset_for_path",
     "meshes_root",
     "repository_root",
 ]

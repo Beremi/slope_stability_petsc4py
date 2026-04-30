@@ -10,20 +10,22 @@ from slope_stability.fem.basis import local_basis_volume_3d
 from slope_stability.fem.quadrature import quadrature_volume_3d
 from slope_stability.core.run_config import load_run_case_config
 from slope_stability.io import load_mesh_file
-from slope_stability.problem_asset_runtime import build_mesh_for_path, resolve_problem_asset
-from slope_stability.problem_assets import load_material_rows_for_path
+from slope_stability.problem_asset_runtime import build_mesh_for_resolved_asset, resolve_problem_asset
+from slope_stability.problem_assets import load_material_rows_for_asset
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MESH_PATH = ROOT / "meshes" / "3d_hetero_slope" / "adaptive_family_a_l1.msh"
-SIOPT_MESH_PATH = ROOT / "meshes" / "3d_siopt" / "reference_l0.msh"
-WATERLEVELS_MESH_PATH = ROOT / "meshes" / "3d_hetero_seepage" / "concave_family_b.msh"
-COMSOL_MESH_PATH = ROOT / "meshes" / "3d_hetero_seepage_transition" / "transition_default.msh"
 CASE_PATH = ROOT / "benchmarks" / "slope_stability_3D_hetero_SSR_default" / "case.toml"
 
 
+def _build_asset_mesh(asset_name: str, mesh_variant: str, elem_type: str, *, profile: str | None = None):
+    resolved = resolve_problem_asset(asset_name=asset_name, mesh_variant=mesh_variant, profile=profile)
+    return build_mesh_for_resolved_asset(resolved, elem_type=elem_type)
+
+
 def test_family_materials_resolve_from_mesh_folder() -> None:
-    rows = load_material_rows_for_path(MESH_PATH)
+    rows = load_material_rows_for_asset("3d_hetero_slope")
     assert rows is not None
     assert len(rows) == 4
     assert rows[0] == [15.0, 30.0, 0.0, 10000.0, 0.33, 19.0, 19.0]
@@ -41,14 +43,14 @@ def test_config_falls_back_to_family_materials() -> None:
 
 
 def test_canonical_loader_builds_p1_p2_and_p4_meshes() -> None:
-    mesh_p1 = build_mesh_for_path(MESH_PATH, elem_type="P1")
+    mesh_p1 = _build_asset_mesh("3d_hetero_slope", "adaptive_family_a_l1.msh", "P1")
     assert mesh_p1.coord.shape == (3, 3845)
     assert mesh_p1.elem.shape == (4, 18419)
     assert mesh_p1.surf.shape == (3, 6325)
     assert mesh_p1.elem_type == "P1"
     assert np.array_equal(np.unique(mesh_p1.material_id), np.array([0, 1, 2, 3], dtype=np.int64))
 
-    mesh_p2 = build_mesh_for_path(MESH_PATH, elem_type="P2")
+    mesh_p2 = _build_asset_mesh("3d_hetero_slope", "adaptive_family_a_l1.msh", "P2")
     assert mesh_p2.coord.shape == (3, 27605)
     assert mesh_p2.elem.shape == (10, 18419)
     assert mesh_p2.surf.shape == (6, 6325)
@@ -57,7 +59,7 @@ def test_canonical_loader_builds_p1_p2_and_p4_meshes() -> None:
     assert int((~mesh_p2.q_mask[1]).sum()) == 722
     assert int((~mesh_p2.q_mask[2]).sum()) == 1336
 
-    mesh_p4 = build_mesh_for_path(MESH_PATH, elem_type="P4")
+    mesh_p4 = _build_asset_mesh("3d_hetero_slope", "adaptive_family_a_l1.msh", "P4")
     assert mesh_p4.coord.shape == (3, 208549)
     assert mesh_p4.elem.shape == (35, 18419)
     assert mesh_p4.surf.shape == (15, 6325)
@@ -73,12 +75,12 @@ def test_generic_loaders_accept_canonical_asset_paths() -> None:
     assert direct.elem.shape == (10, 18419)
     assert direct.q_mask.shape == (3, 27605)
 
-    waterlevels = build_mesh_for_path(WATERLEVELS_MESH_PATH, elem_type="P2")
+    waterlevels = _build_asset_mesh("3d_hetero_seepage", "concave_family_b.msh", "P2")
     assert waterlevels.coord.shape[0] == 3
     assert waterlevels.elem.shape[0] == 10
     assert waterlevels.q_mask.shape == (3, waterlevels.coord.shape[1])
 
-    comsol = build_mesh_for_path(COMSOL_MESH_PATH, elem_type="P2")
+    comsol = _build_asset_mesh("3d_hetero_seepage_transition", "transition_default.msh", "P2")
     assert comsol.coord.shape[0] == 3
     assert comsol.elem.shape[0] == 10
     assert comsol.q_mask.shape == (3, comsol.coord.shape[1])
@@ -108,7 +110,7 @@ def test_p4_tetra_quadrature_is_degree_six_exact() -> None:
                 assert abs(approx - exact_monomial(a, b, c)) < 1.0e-12
 
 
-def test_siopt_profiles_replace_boundary_type() -> None:
+def test_siopt_profiles_replace_integer_boundary_switch() -> None:
     asset = resolve_problem_asset(asset_name="3d_siopt", mesh_variant="reference_l0.msh", profile="roller_base")
     mesh_sliding = asset.definition.build_mesh(asset.resolved_variant, elem_type="P2")
 

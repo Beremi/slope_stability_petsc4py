@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import inspect
 from pathlib import Path
 import sys
 import tomllib
@@ -10,8 +9,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from slope_stability.cli.run_case_from_config import _case_runner_kwargs, _export_outputs
 from slope_stability.core.run_config import load_run_case_config
+from slope_stability.execution.asset_case import run_case_config
+from slope_stability.execution.asset_case.runner import _export_outputs
 from slope_stability.postprocess import rebuild_case_mesh, validate_case_mesh_alignment
 
 
@@ -91,17 +91,8 @@ def _assert_field_sizes(vtu) -> None:
 
 def _run_case_to_output(case_toml: Path, out_dir: Path) -> Path:
     cfg = load_run_case_config(case_toml)
-    runner, kwargs = _case_runner_kwargs(cfg)
-    sig = inspect.signature(runner)
-    accepted = set(sig.parameters)
-    filtered_kwargs = {key: value for key, value in kwargs.items() if key in accepted}
     output_path = Path(out_dir)
-    if "output_dir" in sig.parameters:
-        runner(output_path, **filtered_kwargs)
-    elif "out_dir" in sig.parameters:
-        runner(out_dir=output_path, **filtered_kwargs)
-    else:
-        raise TypeError(f"Unsupported runner signature for {runner.__module__}.{runner.__name__}")
+    run_case_config(cfg, output_path)
     _export_outputs(cfg, case_toml.resolve(), output_path)
     return output_path
 

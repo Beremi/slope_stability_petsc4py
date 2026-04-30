@@ -15,7 +15,6 @@ if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
 from study_common import (
-    bool_cli_flag,
     canonical_matlab_env,
     canonical_petsc_env,
     load_horizons,
@@ -132,53 +131,97 @@ def run_matlab_capture(
         time.sleep(1.0)
 
 
-def build_common_petsc_args(study: dict, case: dict, level: dict, *, omega_max_stop: float, d_lambda_diff_scaled_min: float, newton_stopping_criterion: str, newton_stopping_tol: float | None) -> list[str]:
+def _toml_bool(value: bool) -> str:
+    return "true" if bool(value) else "false"
+
+
+def _quote_toml(value: object) -> str:
+    return json.dumps(str(value))
+
+
+def _toml_string_list(values: list[object]) -> str:
+    return "[" + ", ".join(_quote_toml(value) for value in values) + "]"
+
+
+def write_petsc_case_config(
+    path: Path,
+    study: dict,
+    case: dict,
+    level: dict,
+    *,
+    phase: str,
+    variant: str,
+    omega_max_stop: float,
+    d_lambda_diff_scaled_min: float,
+    newton_stopping_criterion: str,
+    newton_stopping_tol: float | None,
+) -> Path:
     defaults = study["defaults"]
-    args = [
-        "--out_dir", "{OUT_DIR}",
-        "--mesh_path", str(level["petsc_mesh"]),
-        "--elem_type", str(defaults["elem_type"]),
-        "--node_ordering", str(defaults["node_ordering"]),
-        "--lambda_init", str(case["lambda_init"]),
-        "--d_lambda_init", str(case["d_lambda_init"]),
-        "--d_lambda_min", str(case["d_lambda_min"]),
-        "--d_lambda_diff_scaled_min", str(d_lambda_diff_scaled_min),
-        "--omega_max_stop", str(omega_max_stop),
-        "--continuation_predictor", str(defaults["continuation_predictor"]),
-        "--omega_step_controller", str(defaults["omega_step_controller"]),
-        "--step_max", str(defaults["step_max"]),
-        "--it_newt_max", str(case["it_newt_max"]),
-        "--it_damp_max", str(case["it_damp_max"]),
-        "--tol", str(case["tol"]),
-        "--r_min", str(defaults["r_min"]),
-        "--newton_stopping_criterion", str(newton_stopping_criterion),
-        "--linear_tolerance", str(defaults["petsc_linear_tolerance"]),
-        "--linear_max_iter", str(defaults["petsc_linear_max_iter"]),
-        "--preconditioner_threads", str(defaults["petsc_preconditioner_threads"]),
-        "--solver_type", str(defaults["petsc_solver_type"]),
-        "--pc_backend", str(defaults["petsc_pc_backend"]),
-        "--pmg_fine_hierarchy_mode", str(defaults["pmg"]["fine_hierarchy_mode"]),
-        bool_cli_flag("mpi_distribute_by_nodes", bool(defaults["mpi_distribute_by_nodes"])),
-        "--pc_hypre_coarsen_type", "HMIS",
-        "--pc_hypre_interp_type", "ext+i",
-        bool_cli_flag("recycle_preconditioner", True),
-        "--constitutive_mode", str(defaults["constitutive_mode"]),
-        "--tangent_kernel", str(defaults["tangent_kernel"]),
+    run_name = f"{case['id']}_{level['id']}_{phase}_{variant}"
+    newton_lines = [
+        "[newton]",
+        f"it_max = {int(case['it_newt_max'])}",
+        f"it_damp_max = {int(case['it_damp_max'])}",
+        f"tol = {float(case['tol']):.16g}",
+        f"r_min = {float(defaults['r_min']):.16g}",
+        f"stopping_criterion = {_quote_toml(newton_stopping_criterion)}",
     ]
-    if level["pmg_coarse_mesh"] is not None:
-        args.extend(["--pmg_coarse_mesh_path", str(level["pmg_coarse_mesh"])])
     if newton_stopping_tol is not None:
-        args.extend(["--newton_stopping_tol", str(newton_stopping_tol)])
-    for opt in defaults["pmg"]["petsc_opt"]:
-        args.extend(["--petsc-opt", str(opt)])
-    if case["boundary_mode"] != "none":
-        args.extend(["--boundary_mode", str(case["boundary_mode"])])
-        args.extend(["--seepage_linear_tolerance", str(defaults["petsc_seepage_linear_tolerance"])])
-        args.extend(["--seepage_linear_max_iter", str(defaults["petsc_seepage_linear_max_iter"])])
-        args.extend(["--water_unit_weight", str(case["water_unit_weight"])])
-        for value in case["conductivity"]:
-            args.extend(["--conductivity", str(value)])
-    return args
+        newton_lines.append(f"stopping_tol = {float(newton_stopping_tol):.16g}")
+    linear_lines = [
+        "[linear_solver]",
+        f"solver_type = {_quote_toml(defaults['petsc_solver_type'])}",
+        f"tolerance = {float(defaults['petsc_linear_tolerance']):.16g}",
+        f"max_iterations = {int(defaults['petsc_linear_max_iter'])}",
+        f"threads = {int(defaults['petsc_preconditioner_threads'])}",
+        f"pc_backend = {_quote_toml(defaults['petsc_pc_backend'])}",
+        f"pmg_fine_hierarchy_mode = {_quote_toml(defaults['pmg']['fine_hierarchy_mode'])}",
+    ]
+    if level["pmg_coarse_mesh_variant"] is not None:
+        linear_lines.append(f"pmg_coarse_mesh_variant = {_quote_toml(level['pmg_coarse_mesh_variant'])}")
+    linear_lines.extend(
+        [
+            'pc_hypre_coarsen_type = "HMIS"',
+            'pc_hypre_interp_type = "ext+i"',
+            "recycle_preconditioner = true",
+            f"petsc_opt = {_toml_string_list(list(defaults['pmg']['petsc_opt']))}",
+        ]
+    )
+    lines = [
+        "[problem]",
+        f"name = {_quote_toml(run_name)}",
+        f"asset = {_quote_toml(level['asset'])}",
+        f"mesh_variant = {_quote_toml(level['mesh_variant'])}",
+        'analysis = "ssr"',
+        f"elem_type = {_quote_toml(defaults['elem_type'])}",
+        "",
+        "[execution]",
+        f"node_ordering = {_quote_toml(defaults['node_ordering'])}",
+        f"mpi_distribute_by_nodes = {_toml_bool(defaults['mpi_distribute_by_nodes'])}",
+        f"constitutive_mode = {_quote_toml(defaults['constitutive_mode'])}",
+        f"tangent_kernel = {_quote_toml(defaults['tangent_kernel'])}",
+        "",
+        "[continuation]",
+        f"method = {_quote_toml(defaults['continuation_method'])}",
+        f"predictor = {_quote_toml(defaults['continuation_predictor'])}",
+        f"omega_step_controller = {_quote_toml(defaults['omega_step_controller'])}",
+        f"lambda_init = {float(case['lambda_init']):.16g}",
+        f"d_lambda_init = {float(case['d_lambda_init']):.16g}",
+        f"d_lambda_min = {float(case['d_lambda_min']):.16g}",
+        f"d_lambda_diff_scaled_min = {float(d_lambda_diff_scaled_min):.16g}",
+        f"omega_max = {float(omega_max_stop):.16g}",
+        f"step_max = {int(defaults['step_max'])}",
+        "",
+        *newton_lines,
+        "",
+        *linear_lines,
+        "",
+        "[seepage]",
+        f"linear_tolerance = {float(defaults['petsc_seepage_linear_tolerance']):.16g}",
+        f"linear_max_iter = {int(defaults['petsc_seepage_linear_max_iter'])}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 def build_matlab_config(study: dict, case: dict, level: dict, *, omega_max_stop: float, d_lambda_diff_scaled_min: float) -> dict:
@@ -220,8 +263,9 @@ def run_one_petsc(study: dict, case: dict, level: dict, *, phase: str, variant: 
         "engine": "petsc",
         "phase": phase,
         "variant": variant,
-        "petsc_module": case["petsc_module"],
-        "mesh_path": str(level["petsc_mesh"]),
+        "petsc_entrypoint": "slope_stability.cli.run_case_from_config",
+        "asset": str(level["asset"]),
+        "mesh_variant": str(level["mesh_variant"]),
         "shared_omega_max_stop": float(omega_max_stop),
         "d_lambda_diff_scaled_min": float(d_lambda_diff_scaled_min),
         "newton_residual_tol": float(case["tol"]),
@@ -236,17 +280,29 @@ def run_one_petsc(study: dict, case: dict, level: dict, *, phase: str, variant: 
         append_ledger(artifact_root, {"event": "skipped_complete", **meta, "output_dir": str(output_dir)})
         return {"output_dir": output_dir, **read_petsc_metrics(output_dir)}
 
-    args = build_common_petsc_args(
+    case_config = write_petsc_case_config(
+        output_dir / "case.toml",
         study,
         case,
         level,
+        phase=phase,
+        variant=variant,
         omega_max_stop=omega_max_stop,
         d_lambda_diff_scaled_min=d_lambda_diff_scaled_min,
         newton_stopping_criterion=newton_stopping_criterion,
         newton_stopping_tol=newton_stopping_tol,
     )
-    args[1] = str(output_dir)
-    cmd = ["mpirun", "-n", str(study["mpi_ranks"]), str(study["petsc_python"]), "-m", case["petsc_module"], *args]
+    cmd = [
+        "mpirun",
+        "-n",
+        str(study["mpi_ranks"]),
+        str(study["petsc_python"]),
+        "-m",
+        "slope_stability.cli.run_case_from_config",
+        str(case_config),
+        "--out_dir",
+        str(output_dir),
+    ]
     append_ledger(artifact_root, {"event": "started", **meta, "output_dir": str(output_dir)})
     run_petsc_command(
         cmd,

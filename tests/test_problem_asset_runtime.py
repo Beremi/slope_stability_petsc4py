@@ -3,14 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from slope_stability.assets import available_problem_assets, load_problem_asset
-from slope_stability.cli.run_case_from_config import _case_runner_kwargs
-from slope_stability.core.run_config import load_run_case_config
+from slope_stability.core.run_config import ProblemConfig, RunCaseConfig, load_run_case_config
+from slope_stability.execution.asset_case import RouteKind, case_runner_kwargs, select_case_route
 from slope_stability.postprocess.case_mesh import rebuild_case_mesh
 from slope_stability.problem_asset_runtime import (
     build_mesh_for_resolved_asset,
     build_seepage_boundary_for_resolved_asset,
+    load_mechanical_problem_spec,
     resolve_problem_asset,
     resolve_problem_asset_from_config,
 )
@@ -42,29 +44,119 @@ def test_configs_resolve_assets_across_current_benchmarks() -> None:
 
 def test_config_runner_routes_are_asset_first() -> None:
     expected = {
-        "benchmarks/run_2D_homo_SSR_capture/case.toml": "slope_stability.cli.run_2d_mechanics_capture",
-        "benchmarks/run_2D_sloan2013_seepage_capture/case.toml": "slope_stability.cli.run_2d_seepage_capture",
-        "benchmarks/run_3D_hetero_SSR_capture/case.toml": "slope_stability.cli.run_3d_mechanics_capture",
-        "benchmarks/run_3D_hetero_seepage_capture/case.toml": "slope_stability.cli.run_3d_seepage_capture",
-        "benchmarks/run_3D_hetero_seepage_SSR_comsol_capture/case.toml": "slope_stability.cli.run_3d_seepage_ssr_capture",
+        "benchmarks/run_2D_homo_SSR_capture/case.toml": RouteKind.MECHANICS_2D,
+        "benchmarks/run_2D_sloan2013_seepage_capture/case.toml": RouteKind.SEEPAGE_2D,
+        "benchmarks/run_3D_hetero_SSR_capture/case.toml": RouteKind.MECHANICS_3D,
+        "benchmarks/run_3D_hetero_seepage_capture/case.toml": RouteKind.SEEPAGE_3D,
+        "benchmarks/run_3D_hetero_seepage_SSR_comsol_capture/case.toml": RouteKind.SEEPAGE_SSR_3D,
     }
     forbidden_kwargs = {
         "conductivity",
         "hydraulic_conductivity",
         "material_rows",
-        "mesh_boundary_type",
+        "mesh_" + "boundary_type",
         "mesh_path",
         "seepage_water_unit_weight",
         "water_unit_weight",
     }
 
-    for rel_path, module_name in expected.items():
+    for rel_path, route_kind in expected.items():
         cfg = load_run_case_config(ROOT / rel_path)
-        runner, kwargs = _case_runner_kwargs(cfg)
-        assert runner.__module__ == module_name
+        assert select_case_route(cfg) == route_kind
+        _runner, kwargs = case_runner_kwargs(cfg)
         assert kwargs["asset_name"] == cfg.problem.asset
         assert "mesh_variant" in kwargs
         assert forbidden_kwargs.isdisjoint(kwargs)
+
+
+def test_seepage_capable_3d_ll_route_is_rejected() -> None:
+    cfg = RunCaseConfig(
+        problem=ProblemConfig(
+            name="unsupported_ll_on_seepage_asset",
+            asset="3d_hetero_seepage_transition",
+            mesh_variant="transition_default.msh",
+            profile="fixed_base",
+            analysis="ll",
+            elem_type="P2",
+        )
+    )
+
+    with pytest.raises(ValueError, match="not supported for seepage-capable 3D asset"):
+        select_case_route(cfg)
+    with pytest.raises(ValueError, match="not supported for seepage-capable 3D asset"):
+        case_runner_kwargs(cfg)
+
+
+def test_mechanical_problem_spec_uses_selected_profile() -> None:
+    fixed = load_mechanical_problem_spec(
+        resolve_problem_asset(asset_name="3d_siopt", mesh_variant="reference_l0.msh", profile="fixed_base")
+    )
+    roller = load_mechanical_problem_spec(
+        resolve_problem_asset(asset_name="3d_siopt", mesh_variant="reference_l0.msh", profile="roller_base")
+    )
+
+    fixed_base = next(rule for rule in fixed.dirichlet_rules if rule.target == "base")
+    roller_base = next(rule for rule in roller.dirichlet_rules if rule.target == "base")
+    assert tuple(fixed_base.components) == ("x", "y", "z")
+    assert tuple(roller_base.components) == ("y",)
+
+
+def test_run_config_rejects_unsupported_geometry_and_seepage_fields(tmp_path: Path) -> None:
+    seepage_config = tmp_path / "bad_seepage.toml"
+    seepage_config.write_text(
+        """
+[problem]
+name = "bad_seepage"
+asset = "2d_sloan2013"
+analysis = "seepage"
+elem_type = "P1"
+
+[seepage]
+head_bcs = []
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"\[seepage\] fields \['head_bcs'\]"):
+        load_run_case_config(seepage_config)
+
+    geometry_config = tmp_path / "bad_geometry.toml"
+    geometry_config.write_text(
+        """
+[problem]
+name = "bad_geometry"
+asset = "3d_homo_slope"
+analysis = "ssr"
+elem_type = "P1"
+
+[geometry]
+mesh_path = "legacy.msh"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"\[geometry\] fields \['mesh_path'\]"):
+        load_run_case_config(geometry_config)
+
+
+def test_run_config_rejects_unknown_top_level_path_sections(tmp_path: Path) -> None:
+    config = tmp_path / "bad_top_level.toml"
+    config.write_text(
+        """
+[problem]
+name = "bad_top_level"
+asset = "2d_sloan2013"
+analysis = "seepage"
+elem_type = "P1"
+
+[legacy]
+mesh_path = "legacy.msh"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"Top-level fields \['legacy'\]"):
+        load_run_case_config(config)
 
 
 def test_assets_build_solver_meshes_from_definitions() -> None:

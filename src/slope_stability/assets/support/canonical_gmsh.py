@@ -124,7 +124,7 @@ def load_canonical_gmsh_mesh(path: str | Path, *, dimension: int) -> CanonicalMe
         raise ValueError(f"Expected at least {dimension}D point coordinates in {path}, got shape {points.shape}.")
 
     volume_type = "triangle" if int(dimension) == 2 else "tetra"
-    boundary_type = "line" if int(dimension) == 2 else "triangle"
+    boundary_cell_type = "line" if int(dimension) == 2 else "triangle"
     geom_type = "line3" if int(dimension) == 2 else "triangle6"
     region_map = _field_name_map(msh.field_data, prefix="region", dim=int(dimension))
     if int(dimension) == 3 and not region_map:
@@ -134,7 +134,7 @@ def load_canonical_gmsh_mesh(path: str | Path, *, dimension: int) -> CanonicalMe
     geom_map = _field_name_map(msh.field_data, prefix="boundary_geom", dim=int(dimension) - 1)
 
     volume = _named_blocks(msh, volume_type, tag_map=region_map)
-    boundary = _named_blocks(msh, boundary_type, tag_map=boundary_map)
+    boundary = _named_blocks(msh, boundary_cell_type, tag_map=boundary_map)
     nodesets = _named_blocks(msh, "vertex", tag_map=nodeset_map) if nodeset_map else _NamedEntities(
         np.empty((0, 1), dtype=np.int64), ()
     )

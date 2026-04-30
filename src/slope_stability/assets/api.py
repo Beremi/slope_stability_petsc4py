@@ -45,7 +45,6 @@ class ResolvedVariant:
     mesh_path: Path | None
     metadata: dict[str, Any] = field(default_factory=dict)
     profile: str = "default"
-    boundary_type: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         payload = dict(self.metadata)
@@ -188,7 +187,6 @@ class MechanicalProblemSpec:
     materials: list[list[float]]
     q_mask: np.ndarray
     profile: str = "default"
-    boundary_type: int = 0
 
 
 @dataclass(frozen=True)
@@ -216,7 +214,6 @@ class ProblemAssetAPI(ABC):
     def resolve_variant(
         self,
         mesh_variant: str | None,
-        mesh_path: Path | None = None,
         *,
         profile: str | None = None,
     ) -> ResolvedVariant:

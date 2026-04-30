@@ -117,10 +117,7 @@ def load_mesh_manifest(
     mapping = {}
     for key, value in raw.get("matlab_h5", {}).items():
         mapping[str(key)] = resolve_path(path.parent, value)
-    petsc_mapping = {}
-    for key, value in raw.get("petsc_mesh_override", {}).items():
-        petsc_mapping[str(key)] = resolve_path(path.parent, value)
-    return {"path": path, "exists": True, "mapping": mapping, "petsc_mapping": petsc_mapping}
+    return {"path": path, "exists": True, "mapping": mapping}
 
 
 def load_study(
@@ -138,28 +135,6 @@ def load_study(
     defaults.setdefault("newton", {})
     defaults.setdefault("pmg", {})
 
-    raw_levels: list[dict] = []
-    for case_order, case in enumerate(raw.get("cases", [])):
-        case_item = dict(case)
-        for level_order, level in enumerate(case_item.get("levels", [])):
-            level_item = dict(level)
-            default_petsc_mesh = resolve_path(path.parent, level_item["petsc_mesh"])
-            raw_levels.append(
-                {
-                    "case_order": int(case_order),
-                    "level_order": int(level_order),
-                    "matlab_mesh_key": str(level_item["matlab_mesh_key"]),
-                    "default_petsc_mesh": default_petsc_mesh,
-                }
-            )
-
-    petsc_key_by_default_mesh: dict[str, str] = {}
-    for item in raw_levels:
-        default_petsc_mesh = item["default_petsc_mesh"]
-        if default_petsc_mesh is None:
-            continue
-        petsc_key_by_default_mesh[str(default_petsc_mesh.resolve())] = str(item["matlab_mesh_key"])
-
     cases = []
     for case_order, case in enumerate(raw.get("cases", [])):
         case_item = dict(case)
@@ -167,23 +142,20 @@ def load_study(
         for level_order, level in enumerate(case_item.get("levels", [])):
             level_item = dict(level)
             matlab_key = str(level_item["matlab_mesh_key"])
-            default_petsc_mesh = resolve_path(path.parent, level_item["petsc_mesh"])
-            petsc_mesh = manifest.get("petsc_mapping", {}).get(matlab_key, default_petsc_mesh)
-
-            default_pmg_coarse_mesh = resolve_path(path.parent, level_item.get("pmg_coarse_mesh"))
-            pmg_coarse_mesh = default_pmg_coarse_mesh
-            if default_pmg_coarse_mesh is not None:
-                coarse_key = petsc_key_by_default_mesh.get(str(default_pmg_coarse_mesh.resolve()))
-                if coarse_key is not None:
-                    pmg_coarse_mesh = manifest.get("petsc_mapping", {}).get(coarse_key, default_pmg_coarse_mesh)
+            asset = str(level_item.get("asset", case_item.get("asset", "")))
+            mesh_variant = str(level_item["mesh_variant"])
+            pmg_coarse_mesh_variant = level_item.get("pmg_coarse_mesh_variant")
+            if pmg_coarse_mesh_variant is not None:
+                pmg_coarse_mesh_variant = str(pmg_coarse_mesh_variant)
 
             levels.append(
                 {
                     "id": str(level_item["id"]),
                     "label": str(level_item["label"]),
                     "order": int(level_order),
-                    "petsc_mesh": petsc_mesh,
-                    "pmg_coarse_mesh": pmg_coarse_mesh,
+                    "asset": asset,
+                    "mesh_variant": mesh_variant,
+                    "pmg_coarse_mesh_variant": pmg_coarse_mesh_variant,
                     "matlab_mesh_key": matlab_key,
                     "matlab_mesh": manifest["mapping"].get(matlab_key),
                 }
@@ -194,7 +166,6 @@ def load_study(
                 "label": str(case_item["label"]),
                 "report_slug": str(case_item.get("report_slug", case_item["id"])),
                 "order": int(case_order),
-                "petsc_module": str(case_item["petsc_module"]),
                 "matlab_script": str(case_item["matlab_script"]),
                 "boundary_mode": str(case_item.get("boundary_mode", "none")),
                 "lambda_init": float(case_item["lambda_init"]),

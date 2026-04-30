@@ -300,7 +300,7 @@ Linear solver factory & \code{set\_linear\_solver.m} & \code{solver.py:SolverFac
 \vspace{0.16cm}
 \begin{pseudobox}
 start\\
-$\rightarrow$ load config $\rightarrow$ choose 3D SSR runner $\rightarrow$ load and reorder mesh\\
+$\rightarrow$ load config $\rightarrow$ resolve asset and route $\rightarrow$ build and reorder mesh\\
 $\rightarrow$ build owned elastic rows $\rightarrow$ prepare owned tangent pattern\\
 $\rightarrow$ create constitutive operator $\rightarrow$ build PETSc solver\\
 $\rightarrow$ launch indirect SSR continuation
@@ -314,19 +314,18 @@ $\rightarrow$ launch indirect SSR continuation
 \begin{softbox}
 \miniheading{Config side}
 \begin{itemize}
-  \item \code{core/run\_config.py} loads TOML, resolves relative paths, validates \code{elem\_type}, analysis kind, materials, and public section shapes.
+  \item \code{core/run\_config.py} loads TOML, validates \code{elem\_type}, analysis kind, and the asset-first public section shapes.
   \item The config object preserves the same high-level blocks MATLAB already used: problem, continuation, Newton, linear solver, and outputs.
-  \item Material rows can be provided explicitly or inherited from the mesh-family definition.
+  \item Materials, hydraulics, and boundary conditions are resolved from \code{meshes/<asset>/definition.py}, not local config rows.
 \end{itemize}
 \end{softbox}
 \end{column}
 \begin{column}{0.42\textwidth}
 \begin{pseudobox}
 cfg = load\_run\_case\_config(...)\\
-case = cfg.problem.case\\
-runner, kwargs =\\
-\ \ \_case\_runner\_kwargs(cfg)\\
-result = runner(**kwargs)\\
+asset = resolve\_problem\_asset(cfg)\\
+route = select\_case\_route(cfg)\\
+result = run\_case\_config(cfg)\\
 write debug bundle\\
 write history\\
 write VTU
@@ -592,10 +591,10 @@ $\rightarrow$ reuse them in generated notebooks and external tools
 \toprule
 \textbf{Task} & \textbf{MATLAB habit} & \textbf{PETSc rewrite habit} \\
 \midrule
-Select the runner family & pick a top-level script & copy a benchmark folder and set \code{problem.case} \\
+Select the runner family & pick a top-level script & copy a benchmark folder and set \code{problem.asset} plus \code{problem.analysis} \\
 Select the physics path & change SSR / LL / seepage calls in the script & set \code{problem.analysis}; use \code{continuation.method} only where the runner exposes it \\
-Point at the mesh input & edit the loader call inside the script & use \code{problem.mesh\_path} for mesh families or \code{[case\_data].mesh\_dir} in 2D text-mesh cases \\
-Define heterogeneity & edit material and conductivity arrays in the script & inherit from \code{meshes/*/definition.py}, override with \code{[[materials]]}, keep hydraulic data in \code{[seepage]} \\
+Point at the mesh input & edit the loader call inside the script & select \code{problem.mesh\_variant} and optional \code{problem.profile} \\
+Define heterogeneity & edit material and conductivity arrays in the script & define materials, mechanics BCs, hydraulics, and seepage BCs in \code{meshes/<asset>/definition.py} \\
 Run and inspect outputs & execute the script and keep workspace state alive & run \code{case.toml}, then reuse \code{artifacts/simulation/exports/*} \\
 \bottomrule
 \end{tabularx}
@@ -643,12 +642,11 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \toprule
 \textbf{Decision} & \textbf{Typical values} & \textbf{What it actually selects} \\
 \midrule
-\code{problem.case} & \code{3d\_hetero\_ssr}, \code{3d\_hetero\_seepage}, \code{2d\_franz\_dam\_ssr} & the concrete capture runner family and its mesh convention \\
-\code{problem.analysis} & \code{ssr}, \code{ll}, \code{seepage} & the dry SSR path, limit-load path, or seepage-only path inside that family \\
-\code{continuation.method} & \code{indirect}, sometimes \code{direct} & only meaningful where the chosen runner exposes both modes; the current 3D mainline families discussed here are indirect \\
-\code{problem.mesh\_path} & family-local \code{.msh} file & the concrete mesh file for 3D and other Gmsh-based families \\
-\code{[case\_data].mesh\_dir} & \code{meshes/2d\_franz\_dam} & the mesh source for the 2D text-mesh families \\
-\code{problem.seepage} & \code{true}, \code{false} & a case flag; it does not by itself select a seepage runner \\
+\code{problem.asset} & \code{3d\_hetero\_slope}, \code{3d\_hetero\_seepage} & the registered problem asset and its definition file \\
+\code{problem.mesh\_variant} & asset-local \code{.msh} variant & the concrete canonical Gmsh mesh for that asset \\
+\code{problem.profile} & \code{fixed\_base}, \code{roller\_base}, or omitted & named mechanics BC overrides from the asset definition \\
+\code{problem.analysis} & \code{ssr}, \code{ll}, \code{seepage} & the mechanics, limit-load, or seepage-only route \\
+\code{[continuation]}, \code{[newton]}, \code{[linear\_solver]} & numerical controls & solver policy only; not geometry, materials, or hydraulic data \\
 \bottomrule
 \end{tabularx}
 \end{frame}
@@ -657,17 +655,17 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \small
 \begin{tabularx}{\textwidth}{p{0.24\textwidth}p{0.12\textwidth}p{0.27\textwidth}Y}
 \toprule
-\textbf{Family style} & \textbf{Analysis} & \textbf{Current continuation surface} & \textbf{Mesh input} \\
+\textbf{Route style} & \textbf{Analysis} & \textbf{Current continuation surface} & \textbf{Problem input} \\
 \midrule
-2D text-mesh families & \code{ssr}, \code{ll} & indirect everywhere; direct available here & \code{[case\_data].mesh\_dir} \\
-3D dry families & \code{ssr}, \code{ll} & indirect in the current config-driven mainline & \code{problem.mesh\_path} plus family metadata \\
-3D seepage-only & \code{seepage} & no continuation branch; seepage and linear-solver blocks drive the solve & \code{problem.mesh\_path} on the seepage mesh family \\
-3D seepage-coupled SSR families & \code{ssr} & indirect in the current families; hydro is activated with \code{problem.seepage = true} & dedicated seepage-SSR family \\
+2D mechanics assets & \code{ssr}, \code{ll} & continuation route selected by config & \code{asset}, \code{mesh\_variant}, optional \code{profile} \\
+3D mechanics assets & \code{ssr}, \code{ll} & indirect in the current config-driven mainline & \code{asset}, \code{mesh\_variant}, optional \code{profile} \\
+Seepage-only assets & \code{seepage} & no continuation branch; seepage and linear-solver blocks drive the solve & seepage spec from \code{definition.py} \\
+3D seepage-coupled SSR assets & \code{ssr} & indirect SSR after seepage solve & mechanics and seepage specs from \code{definition.py} \\
 \bottomrule
 \end{tabularx}
 \vspace{0.12cm}
 \begin{callout}
-\code{problem.analysis} is public. Which other knobs matter still depends on the chosen runner family.
+\code{case.toml} selects assets and numerical controls. Problem-specific physics belongs in \code{meshes/<asset>/definition.py}.
 \end{callout}
 \end{frame}
 
@@ -677,11 +675,10 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \begin{column}{0.51\textwidth}
 \begin{pseudobox}
 \code{[problem]}\\
-\code{case = "3d\_hetero\_ssr"}\\
+\code{asset = "3d\_hetero\_slope"}\\
+\code{mesh\_variant = "adaptive\_family\_a\_l1.msh"}\\
 \code{analysis = "ssr"}\\
-\code{elem\_type = "P4"}\\
-\code{mesh\_path = "<hetero SSR mesh>.msh"}\\
-\code{mesh\_boundary\_type = 0}\\[0.10cm]
+\code{elem\_type = "P4"}\\[0.10cm]
 \code{[execution]}\\
 \code{node\_ordering = "block\_metis"}\\[0.10cm]
 \code{[continuation]}\\
@@ -699,7 +696,7 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \begin{itemize}
   \item This selects the 3D dry SSR runner and the current distributed P4/PMG path.
   \item \code{continuation.method = "indirect"} matches the current config-driven 3D mainline.
-  \item Because \code{mesh\_path} lives under \code{meshes/3d\_hetero\_ssr/}, the run can inherit that family's BC labels and default materials.
+  \item The mesh variant resolves through \code{meshes/3d\_hetero\_slope/definition.py}; BC labels and materials are asset-owned.
   \item \code{[execution]}, \code{[continuation]}, \code{[newton]}, and \code{[linear\_solver]} own the parallel and solver policy; \code{[notebook]} only affects notebook defaults.
 \end{itemize}
 \end{softbox}
@@ -714,11 +711,10 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \miniheading{Seepage-only}
 \begin{pseudobox}
 \code{[problem]}\\
-\code{case = "3d\_hetero\_seepage"}\\
+\code{asset = "3d\_hetero\_seepage"}\\
+\code{mesh\_variant = "concave\_family\_b.msh"}\\
 \code{analysis = "seepage"}\\
-\code{mesh\_path = "<seepage mesh>.msh"}\\[0.10cm]
 \code{[seepage]}\\
-\code{conductivity = [ ... ]}\\
 \code{linear\_tolerance = 1e-10}
 \end{pseudobox}
 \end{column}
@@ -726,19 +722,18 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \miniheading{Seepage-coupled SSR}
 \begin{pseudobox}
 \code{[problem]}\\
-\code{case = "3d\_hetero\_seepage\_ssr\_comsol"}\\
+\code{asset = "3d\_hetero\_seepage\_transition"}\\
+\code{mesh\_variant = "transition\_default.msh"}\\
+\code{profile = "fixed\_base"}\\
 \code{analysis = "ssr"}\\
-\code{seepage = true}\\[0.10cm]
 \code{[continuation]}\\
-\code{method = "indirect"}\\[0.10cm]
-\code{[seepage]}\\
-\code{conductivity = [ ... ]}
+\code{method = "indirect"}
 \end{pseudobox}
 \end{column}
 \end{columns}
 \vspace{0.12cm}
 \begin{callout}
-\code{[seepage]} carries conductivity and seepage solver tolerances. Waterlevels versus COMSOL boundary handling is still selected by the seepage runner family and mesh convention, not by a generic TOML field.
+\code{[seepage]} carries numerical seepage solver tolerances only. Conductivity, water unit weight, and head conditions live in the selected asset definition.
 \end{callout}
 \end{frame}
 
@@ -747,26 +742,24 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.48\textwidth}
 \begin{pseudobox}
-\code{DEFINITION = \{}\\
-\code{  "default\_mesh": "SSR\_hetero\_ada\_L1.msh",}\\
-\code{  "dirichlet\_labels": \{"x": [1,2], ...\},}\\
-\code{  "materials": [ ... ]}\\
-\code{\}}\\[0.10cm]
-\code{[[materials]]}\\
-\code{name = "zone\_1"}\\
-\code{...}\\[0.10cm]
-\code{[case\_data]}\\
-\code{mesh\_dir = "../../meshes/2d\_franz\_dam"}
+\code{ASSET = build\_problem\_asset\_3d(}\\
+\code{\ \ asset\_id="3d\_hetero\_slope",}\\
+\code{\ \ mesh\_variants=\{...\},}\\
+\code{\ \ materials=\{...\},}\\
+\code{\ \ region\_assignment=\{...\},}\\
+\code{\ \ mechanics=\{... profiles ...\},}\\
+\code{\ \ seepage=build\_seepage\_spec(...)}\\
+\code{)}
 \end{pseudobox}
 \end{column}
 \begin{column}{0.48\textwidth}
 \begin{softbox}
 \begin{itemize}
-  \item If \code{mesh\_path} lives under \code{meshes/<family>/}, the asset loader can reuse that family's \code{dirichlet\_labels} and default materials.
-  \item The IO layer builds mechanical Dirichlet masks from those labels; if no family metadata exists, it falls back to default axis-label sets.
-  \item \code{mesh\_boundary\_type = 1} is the 3D glued-bottom special case.
-  \item \code{[[materials]]} overrides constitutive rows locally; \code{[seepage].conductivity} stays separate as hydraulic input.
-  \item 2D text-mesh cases use \code{[case\_data].mesh\_dir}; direct SSR is exposed there, not on the current 3D mainline.
+  \item Canonical Gmsh physical names use \code{region:*}, \code{boundary:*}, \code{nodeset:*}, and optional \code{boundary\_geom:*}.
+  \item The asset API maps regions to material ids and builds mechanics and seepage masks from named targets.
+  \item Named profiles replace integer boundary switches such as glued-base or roller-base modes.
+  \item \code{case.toml} should not contain raw mesh paths, local material rows, conductivity, water unit weight, or head BCs.
+  \item Generic mesh IO reads geometry and labels; problem ownership stays under \code{meshes/<asset>/definition.py}.
 \end{itemize}
 \end{softbox}
 \end{column}
@@ -777,16 +770,15 @@ Run and inspect outputs & execute the script and keep workspace state alive & ru
 \small
 \begin{enumerate}
   \item Copy the nearest benchmark folder under \code{benchmarks/}, rename it intentionally, and update \code{[benchmark]}.
-  \item Set \code{[problem]} first: \code{case}, \code{analysis}, \code{elem\_type}, and either \code{mesh\_path} or \code{[case\_data].mesh\_dir}.
-  \item Use \code{continuation.method} only if the chosen runner family exposes both indirect and direct paths.
-  \item Decide whether BC labels and constitutive rows should come from \code{meshes/*/definition.py} or from benchmark-local overrides such as \code{[[materials]]}.
-  \item Fill \code{[execution]}, \code{[continuation]}, \code{[newton]}, and \code{[linear\_solver]}; add \code{[seepage]} only when the case has a hydraulic block.
+  \item Set \code{[problem]} first: \code{asset}, \code{mesh\_variant}, optional \code{profile}, \code{analysis}, and \code{elem\_type}.
+  \item Put geometry, materials, mechanics BCs, hydraulics, seepage BCs, and profiles in \code{meshes/<asset>/definition.py}.
+  \item Fill \code{[execution]}, \code{[continuation]}, \code{[newton]}, and \code{[linear\_solver]}; add \code{[seepage]} only for numerical seepage controls.
   \item Run \code{./run.sh} or \code{run\_case\_from\_config}, then verify \code{artifacts/simulation/exports/*}.
   \item Keep \code{README.md}, \code{simulation.ipynb}, and \code{visualisation.ipynb} aligned with the same \code{case.toml}.
 \end{enumerate}
 \vspace{0.14cm}
 \begin{callout}
-A benchmark should remain explainable from \code{case.toml}, the mesh-family definition, and the output folder. If that is no longer true, too much logic has drifted back into hidden runner code.
+A benchmark should remain explainable from \code{case.toml}, \code{meshes/<asset>/definition.py}, and the output folder. If that is no longer true, too much logic has drifted back into hidden runner code.
 \end{callout}
 \end{frame}
 

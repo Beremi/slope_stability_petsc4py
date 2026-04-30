@@ -23,11 +23,11 @@ The preserved numerical sequence is:
 Stage & MATLAB location & PETSc location \\
 \midrule
 \endhead
-Mesh and labels & \texttt{+MESH/load\_mesh\_gmsh\_waterlevels.m} and related helpers & \petscmod{mesh/gmsh\_waterlevels.py}, \petscmod{mesh/comsol\_p2.py} \\
+Mesh, labels, materials, and head BCs & \texttt{+MESH/load\_mesh\_gmsh\_waterlevels.m} and related helpers & \code{meshes/<asset>/definition.py}, \petscmod{assets/support/canonical\_gmsh.py} \\
 Conductivity build & \texttt{+SEEPAGE/heter\_conduct.m} & \petscmod{seepage/flow.py} \\
-Boundary conditions & seepage boundary helpers under \texttt{+MESH} & seepage-specific mesh loaders \\
+Boundary conditions & seepage boundary helpers under \texttt{+MESH} & asset-owned head BCs resolved by \petscmod{problem\_asset\_runtime.py} \\
 Seepage Newton solve & \texttt{+SEEPAGE/seepage\_problem\_3D.m}, \texttt{newton\_flow.m} & \petscmod{seepage/flow.py} \\
-Transfer into mechanics & script-local coupling logic & \petscmod{cli/run\_3D\_hetero\_seepage\_SSR\_comsol\_capture.py} \\
+Transfer into mechanics & script-local coupling logic & \petscmod{execution/asset\_case/seepage\_ssr\_3d.py} \\
 \bottomrule
 \end{longtable}
 
@@ -36,7 +36,7 @@ Transfer into mechanics & script-local coupling logic & \petscmod{cli/run\_3D\_h
 The seepage branch is no longer embedded inside one large driver script. PETSc
 separates:
 \begin{itemize}
-\item seepage mesh and boundary loading,
+\item asset resolution and canonical mesh loading,
 \item seepage assembly and Newton flow,
 \item transfer of \code{pw}, \code{grad\_p}, and saturation into the
 mechanical stage,
@@ -50,10 +50,10 @@ and debugged independently.
 
 \begin{itemize}
 \item \petscmod{seepage/flow.py} for seepage numerics,
-\item \petscmod{mesh/gmsh\_waterlevels.py} and
-\petscmod{mesh/comsol\_p2.py} for seepage geometry and boundary rules,
-\item \petscmod{cli/run\_3D\_hetero\_seepage\_capture.py} for standalone
+\item \code{meshes/<asset>/definition.py} for seepage geometry ownership,
+materials, conductivity, water unit weight, and head conditions,
+\item \petscmod{execution/asset\_case/seepage\_3d.py} for standalone
 seepage,
-\item \petscmod{cli/run\_3D\_hetero\_seepage\_SSR\_comsol\_capture.py} for the
+\item \petscmod{execution/asset\_case/seepage\_ssr\_3d.py} for the
 coupled branch.
 \end{itemize}

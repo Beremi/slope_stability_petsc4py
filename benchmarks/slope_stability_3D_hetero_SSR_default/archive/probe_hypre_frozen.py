@@ -23,10 +23,9 @@ from slope_stability.linear.pmg import (
 )
 from slope_stability.linear.solver import SolverFactory
 from slope_stability.linear.preconditioners import attach_near_nullspace, make_near_nullspace_elasticity
-from slope_stability.mesh import load_mesh_from_file
 from slope_stability.mesh.materials import MaterialSpec, heterogenous_materials
 from slope_stability.mesh.reorder import reorder_mesh_nodes
-from slope_stability.problem_assets import load_material_rows_for_path
+from slope_stability.problem_asset_runtime import build_mesh_for_resolved_asset, resolve_problem_asset
 from slope_stability.utils import (
     extract_submatrix_free,
     global_array_to_petsc_vec,
@@ -372,7 +371,8 @@ def _select_state(args, run_info: dict) -> dict[str, object]:
 
 def _build_problem(
     *,
-    mesh_path: Path,
+    asset_name: str,
+    mesh_variant: str,
     elem_type: str,
     node_ordering: str,
     reorder_parts: int | None,
@@ -381,12 +381,13 @@ def _build_problem(
     constitutive_mode: str,
     tangent_kernel: str,
     pc_backend: str,
-    pmg_coarse_mesh_paths: tuple[Path, ...] | None = None,
+    pmg_coarse_mesh_variants: tuple[str, ...] | None = None,
 ):
+    resolved_asset = resolve_problem_asset(asset_name=asset_name, mesh_variant=mesh_variant)
     if material_rows is None:
-        material_rows = load_material_rows_for_path(mesh_path)
+        material_rows = resolved_asset.definition.material_rows()
     if material_rows is None:
-        raise ValueError(f"No material rows found for {mesh_path}")
+        raise ValueError(f"No material rows found for asset {asset_name!r} variant {mesh_variant!r}")
 
     mat_props = np.asarray(material_rows, dtype=np.float64)
     materials = [
@@ -404,22 +405,20 @@ def _build_problem(
 
     pmg_hierarchy = None
     if str(pc_backend).strip().lower() in {"pmg", "pmg_shell"}:
-        coarse_paths = tuple(pmg_coarse_mesh_paths or ())
-        if not coarse_paths:
+        coarse_variants = tuple(str(variant) for variant in (pmg_coarse_mesh_variants or ()))
+        if not coarse_variants:
             pmg_hierarchy = build_3d_pmg_hierarchy(
-                mesh_path,
-                boundary_type=0,
+                resolved_asset,
                 node_ordering=node_ordering,
                 reorder_parts=reorder_parts,
                 material_rows=[list(map(float, row)) for row in material_rows],
                 comm=PETSc.COMM_WORLD,
             )
-        elif len(coarse_paths) == 1:
+        elif len(coarse_variants) == 1:
             pmg_hierarchy = build_3d_mixed_pmg_hierarchy(
-                mesh_path,
-                coarse_paths[0],
+                resolved_asset,
+                coarse_mesh_variant=coarse_variants[0],
                 fine_elem_type=elem_type,
-                boundary_type=0,
                 node_ordering=node_ordering,
                 reorder_parts=reorder_parts,
                 material_rows=[list(map(float, row)) for row in material_rows],
@@ -427,10 +426,9 @@ def _build_problem(
             )
         else:
             pmg_hierarchy = build_3d_mixed_pmg_chain_hierarchy(
-                mesh_path,
-                coarse_paths,
+                resolved_asset,
+                coarse_mesh_variants=coarse_variants,
                 fine_elem_type=elem_type,
-                boundary_type=0,
                 node_ordering=node_ordering,
                 reorder_parts=reorder_parts,
                 material_rows=[list(map(float, row)) for row in material_rows],
@@ -450,7 +448,7 @@ def _build_problem(
             elem_type=elem_type,
         )
     else:
-        mesh = load_mesh_from_file(mesh_path, boundary_type=0, elem_type=elem_type)
+        mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
         reordered = reorder_mesh_nodes(
             mesh.coord,
             mesh.elem,
@@ -644,7 +642,8 @@ def run_probe(args) -> dict[str, object]:
     run_info = _resolve_state_run_info(args)
     state = _select_state(args, run_info)
     elem_type = validate_supported_elem_type(3, args.elem_type or state["source_elem_type"])
-    mesh_path = Path(args.mesh_path)
+    asset_name = str(args.asset)
+    mesh_variant = str(args.mesh_variant)
     node_ordering = str(args.node_ordering or state["source_node_ordering"])
     material_rows = state["material_rows"]
     if material_rows is not None:
@@ -652,13 +651,13 @@ def run_probe(args) -> dict[str, object]:
     regularization_r = float(args.regularization_r if args.regularization_r is not None else state["regularization_r"])
     outer_solver_family = str(args.outer_solver_family).strip().lower()
     if str(args.pc_backend).strip().lower() in {"pmg", "pmg_shell"}:
-        coarse_paths = tuple(Path(path) for path in (args.pmg_coarse_mesh_path or []))
-        if not coarse_paths:
+        coarse_variants = tuple(str(variant) for variant in (args.pmg_coarse_mesh_variant or []))
+        if not coarse_variants:
             if str(elem_type).upper() != "P4":
                 raise ValueError(f"{args.pc_backend} backend currently supports only P4 frozen-state probes.")
         elif str(elem_type).upper() not in {"P2", "P4"}:
             raise ValueError(
-                f"{args.pc_backend} backend with --pmg-coarse-mesh-path currently supports only P2 or P4 fine probes."
+                f"{args.pc_backend} backend with --pmg-coarse-mesh-variant currently supports only P2 or P4 fine probes."
             )
         if str(args.pmat_source).strip().lower() != "tangent":
             raise ValueError(f"{args.pc_backend} backend currently supports only pmat_source=tangent.")
@@ -674,7 +673,8 @@ def run_probe(args) -> dict[str, object]:
     t0 = perf_counter()
     t_problem_build0 = perf_counter()
     problem = _build_problem(
-        mesh_path=mesh_path,
+        asset_name=asset_name,
+        mesh_variant=mesh_variant,
         elem_type=elem_type,
         node_ordering=node_ordering,
         reorder_parts=state["reorder_parts"],
@@ -683,7 +683,7 @@ def run_probe(args) -> dict[str, object]:
         constitutive_mode=str(args.constitutive_mode),
         tangent_kernel=str(args.tangent_kernel),
         pc_backend=str(args.pc_backend),
-        pmg_coarse_mesh_paths=tuple(Path(path) for path in (args.pmg_coarse_mesh_path or [])),
+        pmg_coarse_mesh_variants=tuple(str(variant) for variant in (args.pmg_coarse_mesh_variant or [])),
     )
     problem_build_elapsed_s = float(perf_counter() - t_problem_build0)
     coord = problem["coord"]
@@ -871,7 +871,8 @@ def run_probe(args) -> dict[str, object]:
     solve_plus_setup_elapsed_s = float(float(solve_delta["preconditioner_time"]) + float(solve_delta["solve_time"]))
     result: dict[str, object] = {
         "status": "completed",
-        "mesh_path": str(mesh_path),
+        "asset": asset_name,
+        "mesh_variant": mesh_variant,
         "elem_type": str(elem_type),
         "node_ordering": str(node_ordering),
         "reorder_parts": (None if state["reorder_parts"] is None else int(state["reorder_parts"])),
@@ -888,13 +889,13 @@ def run_probe(args) -> dict[str, object]:
         "native_pc_type": (None if outer_solver_family != "native_petsc" else str(getattr(args, "native_pc_type", "hypre"))),
         "rhs_source": str(args.rhs_source),
         "pmat_source": str(args.pmat_source),
-        "pmg_coarse_mesh_path": (
+        "pmg_coarse_mesh_variant": (
             None
-            if not args.pmg_coarse_mesh_path
+            if not args.pmg_coarse_mesh_variant
             else (
-                str(Path(args.pmg_coarse_mesh_path[0]))
-                if len(args.pmg_coarse_mesh_path) == 1
-                else [str(Path(path)) for path in args.pmg_coarse_mesh_path]
+                str(args.pmg_coarse_mesh_variant[0])
+                if len(args.pmg_coarse_mesh_variant) == 1
+                else [str(variant) for variant in args.pmg_coarse_mesh_variant]
             )
         ),
         "regularization_r": float(regularization_r),
@@ -999,8 +1000,9 @@ def main() -> None:
     parser.add_argument("--state-run-info", type=Path, default=None)
     parser.add_argument("--state-selector", type=str, default="easy", choices=["easy", "hard", "final", "index"])
     parser.add_argument("--state-index", type=int, default=None)
-    parser.add_argument("--mesh-path", type=Path, default=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh")
-    parser.add_argument("--pmg-coarse-mesh-path", type=Path, action="append", default=[])
+    parser.add_argument("--asset", type=str, default="3d_hetero_slope")
+    parser.add_argument("--mesh-variant", type=str, default="adaptive_family_a_l1.msh")
+    parser.add_argument("--pmg-coarse-mesh-variant", type=str, action="append", default=[])
     parser.add_argument("--elem-type", type=str, default="P4", choices=["P1", "P2", "P4"])
     parser.add_argument(
         "--node-ordering",

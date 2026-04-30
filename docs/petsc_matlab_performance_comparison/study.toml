@@ -63,7 +63,7 @@ petsc_opt = [
 id = "homo_3d"
 label = "Homogeneous 3D SSR"
 report_slug = "homo_3d"
-petsc_module = "slope_stability.cli.run_3D_homo_SSR_capture"
+asset = "3d_homo_slope"
 matlab_script = "run_3D_homo_SSR_study_capture"
 boundary_mode = "none"
 lambda_init = 0.9
@@ -76,42 +76,42 @@ appendix_delta_lambda = false
 [[cases.levels]]
 id = "L1"
 label = "L1"
-petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+mesh_variant = "adaptive_family_a_l1.msh"
 matlab_mesh_key = "homo_l1"
 
 [[cases.levels]]
 id = "L2"
 label = "L2"
-petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L2.msh"
+mesh_variant = "adaptive_family_a_l2.msh"
 matlab_mesh_key = "homo_l2"
-pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases.levels]]
 id = "L3"
 label = "L3"
-petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L3.msh"
+mesh_variant = "adaptive_family_a_l3.msh"
 matlab_mesh_key = "homo_l3"
-pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases.levels]]
 id = "L4"
 label = "L4"
-petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L4.msh"
+mesh_variant = "adaptive_family_a_l4.msh"
 matlab_mesh_key = "homo_l4"
-pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases.levels]]
 id = "L5"
 label = "L5"
-petsc_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L5.msh"
+mesh_variant = "adaptive_family_a_l5.msh"
 matlab_mesh_key = "homo_l5"
-pmg_coarse_mesh = "../../meshes/3d_homo_ssr/SSR_homo_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases]]
 id = "hetero_3d"
 label = "Heterogeneous 3D SSR"
 report_slug = "hetero_3d"
-petsc_module = "slope_stability.cli.run_3D_hetero_SSR_capture"
+asset = "3d_hetero_slope"
 matlab_script = "run_3D_hetero_SSR_study_capture"
 boundary_mode = "none"
 lambda_init = 1.0
@@ -124,42 +124,42 @@ appendix_delta_lambda = true
 [[cases.levels]]
 id = "L1"
 label = "L1"
-petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+mesh_variant = "adaptive_family_a_l1.msh"
 matlab_mesh_key = "hetero_l1"
 
 [[cases.levels]]
 id = "L2"
 label = "L2"
-petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L2.msh"
+mesh_variant = "adaptive_family_a_l2.msh"
 matlab_mesh_key = "hetero_l2"
-pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases.levels]]
 id = "L3"
 label = "L3"
-petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L3.msh"
+mesh_variant = "adaptive_family_a_l3.msh"
 matlab_mesh_key = "hetero_l3"
-pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases.levels]]
 id = "L4"
 label = "L4"
-petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L4.msh"
+mesh_variant = "adaptive_family_a_l4.msh"
 matlab_mesh_key = "hetero_l4"
-pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases.levels]]
 id = "L5"
 label = "L5"
-petsc_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L5.msh"
+mesh_variant = "adaptive_family_a_l5.msh"
 matlab_mesh_key = "hetero_l5"
-pmg_coarse_mesh = "../../meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+pmg_coarse_mesh_variant = "adaptive_family_a_l1.msh"
 
 [[cases]]
 id = "seepage_3d"
 label = "Heterogeneous 3D Seepage SSR"
 report_slug = "seepage_3d"
-petsc_module = "slope_stability.cli.run_3D_seepage_SSR_capture"
+asset = "3d_hetero_seepage"
 matlab_script = "run_3D_hetero_seepage_SSR_study_capture"
 boundary_mode = "waterlevels"
 lambda_init = 0.00546875
@@ -170,32 +170,34 @@ it_newt_max = 50
 it_damp_max = 10
 tol = 5e-2
 appendix_delta_lambda = false
+# MATLAB harness inputs only. PETSc generated cases select asset-owned
+# hydraulics from meshes/3d_hetero_seepage/definition.py.
 water_unit_weight = 9.81
 conductivity = [1.0, 1.0, 1.0, 1.0]
 
 [[cases.levels]]
 id = "concave_L2"
 label = "concave L2"
-petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
+mesh_variant = "concave_family_a.msh"
 matlab_mesh_key = "seepage_concave_l2"
 
 [[cases.levels]]
 id = "concave"
 label = "concave"
-petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave.msh"
+mesh_variant = "concave_family_b.msh"
 matlab_mesh_key = "seepage_concave"
-pmg_coarse_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
+pmg_coarse_mesh_variant = "concave_family_a.msh"
 
 [[cases.levels]]
 id = "concave_L3"
 label = "concave L3"
-petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L3.msh"
+mesh_variant = "concave_family_c.msh"
 matlab_mesh_key = "seepage_concave_l3"
-pmg_coarse_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
+pmg_coarse_mesh_variant = "concave_family_a.msh"
 
 [[cases.levels]]
 id = "concave_L4"
 label = "concave L4"
-petsc_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L4.msh"
+mesh_variant = "concave_family_d.msh"
 matlab_mesh_key = "seepage_concave_l4"
-pmg_coarse_mesh = "../../meshes/3d_hetero_seepage/slope_with_waterlevels_concave_L2.msh"
+pmg_coarse_mesh_variant = "concave_family_a.msh"

@@ -1,6 +1,7 @@
 [study]
 name = "heterogeneous_3d_ssr_integration_point_study_relative_residual"
-mesh_path = "meshes/3d_hetero_ssr/SSR_hetero_ada_L1.msh"
+asset = "3d_hetero_slope"
+mesh_variant = "adaptive_family_a_l1.msh"
 artifact_dir = "artifacts/heterogeneous_3d_ssr_integration_point_study_relative_residual"
 report_basename = "heterogeneous_3d_ssr_integration_point_study_relative_residual"
 mpi_ranks = 8

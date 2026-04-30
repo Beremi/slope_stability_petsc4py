@@ -12,8 +12,8 @@ The workflow is intentionally split into validation, execution, normalization, f
 
 ## Files
 
-- `study.toml`: committed study definition, solver settings, case ordering, and mesh ladders
-- `mesh_manifest.example.toml`: example mapping from logical MATLAB H5 keys to local absolute paths, with optional PETSc mesh overrides
+- `study.toml`: committed study definition, solver settings, case ordering, and asset mesh variants
+- `mesh_manifest.example.toml`: example mapping from logical MATLAB H5 keys to local absolute paths
 - `mesh_manifest.local.toml`: local-only mesh mapping used by the runner
 - `data/*.csv`: normalized source tables used by the report and figure scripts
 - `scripts/`: validators, sequential runner, collectors, and figure/table generation
@@ -23,7 +23,6 @@ The workflow is intentionally split into validation, execution, normalization, f
 ## Workflow
 
 1. Copy `mesh_manifest.example.toml` to `mesh_manifest.local.toml` and fill in the absolute MATLAB `.h5` paths.
-2. If needed, add `petsc_mesh_override` entries for levels that should run on external meshes instead of the committed PETSc mesh paths.
 2. Validate the setup:
 
 ```bash
@@ -57,6 +56,9 @@ make -C docs/petsc_matlab_performance_comparison pdf
 ## Notes
 
 - PETSc runs use `mpirun -n 8` with `OMP_NUM_THREADS=1`.
+- The seepage `water_unit_weight` and `conductivity` entries in `study.toml`
+  are MATLAB harness inputs only. PETSc study configs are generated through
+  `run_case_from_config` and take hydraulics from `meshes/<asset>/definition.py`.
 - MATLAB runs use `OMP_NUM_THREADS=8` and BoomerAMG threads `8`.
 - Runs are executed one by one and recorded under `artifacts/petsc_matlab_performance_comparison`.
 - The runner stops adding finer levels for a case once the PETSc main runtime exceeds `1000 s`, while still finishing the matching MATLAB run and the hetero appendix run on that level.

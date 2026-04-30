@@ -15,8 +15,7 @@ from slope_stability.core.elements import validate_supported_elem_type
 from slope_stability.fem.assembly import assemble_strain_operator, build_elastic_stiffness_matrix
 from slope_stability.fem.distributed_elastic import assemble_owned_elastic_rows_for_comm
 from slope_stability.fem.distributed_tangent import prepare_bddc_subdomain_pattern
-from slope_stability.mesh import load_mesh_from_file
-from slope_stability.problem_assets import load_material_rows_for_path
+from slope_stability.problem_asset_runtime import build_mesh_for_resolved_asset, resolve_problem_asset
 from slope_stability.linear.solver import SolverFactory
 from slope_stability.mesh.materials import MaterialSpec, heterogenous_materials
 from slope_stability.mesh.reorder import reorder_mesh_nodes
@@ -273,17 +272,19 @@ def _native_petsc_ksp_solve_once(
 
 def _build_problem(
     *,
-    mesh_path: Path,
+    asset_name: str,
+    mesh_variant: str,
     elem_type: str,
     node_ordering: str,
     material_rows: list[list[float]] | None,
     adjacency_source: str,
     corner_only_primals: bool,
 ):
+    resolved_asset = resolve_problem_asset(asset_name=asset_name, mesh_variant=mesh_variant)
     if material_rows is None:
-        material_rows = load_material_rows_for_path(mesh_path)
+        material_rows = resolved_asset.definition.material_rows()
     if material_rows is None:
-        raise ValueError(f"No material rows found for {mesh_path}")
+        raise ValueError(f"No material rows found for asset {asset_name!r} variant {mesh_variant!r}")
     mat_props = np.asarray(material_rows, dtype=np.float64)
     materials = [
         MaterialSpec(
@@ -297,7 +298,7 @@ def _build_problem(
         )
         for row in mat_props
     ]
-    mesh = load_mesh_from_file(mesh_path, boundary_type=0, elem_type=elem_type)
+    mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
     partition_count = int(PETSc.COMM_WORLD.getSize()) if str(node_ordering).lower() == "block_metis" else None
     reordered = reorder_mesh_nodes(
         mesh.coord,
@@ -437,7 +438,8 @@ def run_probe(args) -> dict[str, object]:
 
     t0 = perf_counter()
     coord, q_mask, K_elast, f_V, const_builder, bddc_pattern = _build_problem(
-        mesh_path=Path(args.mesh_path),
+        asset_name=str(args.asset),
+        mesh_variant=str(args.mesh_variant),
         elem_type=str(args.elem_type),
         node_ordering=str(args.node_ordering),
         material_rows=None,
@@ -611,7 +613,8 @@ def run_probe(args) -> dict[str, object]:
     result = {
         "status": "completed",
         "mode": str(args.mode),
-        "mesh_path": str(Path(args.mesh_path)),
+        "asset": str(args.asset),
+        "mesh_variant": str(args.mesh_variant),
         "elem_type": str(args.elem_type),
         "pc_backend": str(args.pc_backend),
         "outer_solver_family": str(args.outer_solver_family),
@@ -727,7 +730,8 @@ def run_probe(args) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Contained elastic-only PETSc/BDDC probe.")
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--mesh-path", type=Path, default=ROOT / "meshes" / "3d_hetero_ssr" / "SSR_hetero_ada_L1.msh")
+    parser.add_argument("--asset", type=str, default="3d_hetero_slope")
+    parser.add_argument("--mesh-variant", type=str, default="adaptive_family_a_l1.msh")
     parser.add_argument("--elem-type", type=str, default="P2", choices=["P2", "P4"])
     parser.add_argument("--mode", type=str, default="single_solve", choices=["single_solve", "repeat_solve"])
     parser.add_argument("--node-ordering", type=str, default="block_metis")

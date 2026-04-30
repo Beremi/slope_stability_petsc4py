@@ -32,15 +32,11 @@ from slope_stability.linear.pmg import (
 )
 from slope_stability.mesh import MaterialSpec, heterogenous_materials, reorder_mesh_nodes
 from slope_stability.problem_asset_runtime import (
-    build_mesh_for_path,
     build_mesh_for_resolved_asset,
     build_seepage_boundary_for_resolved_asset,
     load_mechanical_problem_spec,
     load_seepage_problem_spec,
     resolve_problem_asset,
-)
-from slope_stability.problem_assets import (
-    build_seepage_boundary_for_path,
 )
 from slope_stability.seepage import heter_conduct, seepage_problem_3d
 from slope_stability.utils import local_csr_to_petsc_aij_matrix, owned_block_range, release_petsc_aij_matrix
@@ -166,7 +162,6 @@ def _load_labeled_mesh(
         "q_mask": np.asarray(reordered.q_mask, dtype=bool),
         "material_identifier": np.asarray(mesh.material_id, dtype=np.int64).ravel(),
         "triangle_labels": np.asarray(mesh.boundary_labels, dtype=np.int64).ravel(),
-        "mesh_boundary_type": 0,
     }
 
 
@@ -197,7 +192,7 @@ def run_capture(
     preconditioner_threads: int = 16,
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     pc_backend: str | None = "hypre",
-    pmg_coarse_mesh_path: Path | None = None,
+    pmg_coarse_mesh_variant: str | None = None,
     pmg_fine_hierarchy_mode: str = "default",
     mpi_distribute_by_nodes: bool = True,
     pc_hypre_coarsen_type: str = "HMIS",
@@ -283,16 +278,13 @@ def run_capture(
     q_mask = labeled["q_mask"]
     material_identifier = labeled["material_identifier"]
     triangle_labels = labeled["triangle_labels"]
-    mesh_boundary_type = int(labeled["mesh_boundary_type"])
 
     pmg_hierarchy = None
     if effective_pc_backend in {"pmg", "pmg_shell"}:
-        if pmg_coarse_mesh_path is None:
+        if pmg_coarse_mesh_variant is None:
             pmg_hierarchy = build_3d_same_mesh_pmg_hierarchy(
-                mesh_path,
+                resolved_asset,
                 fine_elem_type=elem_type,
-                profile=profile,
-                boundary_type=mesh_boundary_type,
                 node_ordering=node_ordering,
                 reorder_parts=partition_count,
                 material_rows=mat_props.tolist(),
@@ -300,11 +292,9 @@ def run_capture(
             )
         else:
             pmg_hierarchy = build_3d_mixed_pmg_hierarchy(
-                mesh_path,
-                pmg_coarse_mesh_path,
+                resolved_asset,
+                coarse_mesh_variant=str(pmg_coarse_mesh_variant),
                 fine_elem_type=elem_type,
-                profile=profile,
-                boundary_type=mesh_boundary_type,
                 node_ordering=node_ordering,
                 reorder_parts=partition_count,
                 material_rows=mat_props.tolist(),
@@ -359,8 +349,8 @@ def run_capture(
             def _seepage_q_mask_builder(level_coord, level_surf, level_triangle_labels):
                 if level_triangle_labels is None:
                     raise ValueError("Seepage PMG hierarchy requires triangle labels for boundary detection.")
-                level_q_w, _ = build_seepage_boundary_for_path(
-                    mesh_path,
+                level_q_w, _ = build_seepage_boundary_for_resolved_asset(
+                    resolved_asset,
                     level_coord,
                     level_surf,
                     level_triangle_labels,
@@ -369,13 +359,10 @@ def run_capture(
                 return np.asarray(level_q_w, dtype=bool).reshape(1, -1)
 
             seepage_pmg_hierarchy = build_3d_same_mesh_scalar_pmg_hierarchy(
-                mesh_path,
+                resolved_asset,
                 fine_elem_type=elem_type,
-                profile=profile,
-                boundary_type=mesh_boundary_type,
                 node_ordering=node_ordering,
                 reorder_parts=partition_count,
-                material_rows=mat_props.tolist(),
                 q_mask_builder=_seepage_q_mask_builder,
                 comm=PETSc.COMM_SELF,
             )
@@ -512,7 +499,7 @@ def run_capture(
         "print_level": 0,
         "use_as_preconditioner": True,
         "pc_backend": effective_pc_backend,
-        "pmg_coarse_mesh_path": None if pmg_coarse_mesh_path is None else str(pmg_coarse_mesh_path),
+        "pmg_coarse_mesh_variant": None if pmg_coarse_mesh_variant is None else str(pmg_coarse_mesh_variant),
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "preconditioner_matrix_source": "tangent",
         "preconditioner_matrix_policy": "current",
@@ -592,10 +579,9 @@ def run_capture(
         "mesh_variant": resolved_asset.variant_name,
         "profile": profile,
         "node_ordering": node_ordering,
-        "mesh_boundary_type": mesh_boundary_type,
         "mpi_distribute_by_nodes": bool(mpi_distribute_by_nodes),
         "pc_backend": effective_pc_backend,
-        "pmg_coarse_mesh_path": None if pmg_coarse_mesh_path is None else str(pmg_coarse_mesh_path),
+        "pmg_coarse_mesh_variant": None if pmg_coarse_mesh_variant is None else str(pmg_coarse_mesh_variant),
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "pc_hypre_coarsen_type": pc_hypre_coarsen_type,
         "pc_hypre_interp_type": pc_hypre_interp_type,
@@ -765,7 +751,7 @@ def main() -> None:
     parser.add_argument("--preconditioner_threads", type=int, default=16)
     parser.add_argument("--solver_type", type=str, default="PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")
     parser.add_argument("--pc_backend", type=str, default="hypre", choices=["hypre", "gamg", "pmg", "pmg_shell"])
-    parser.add_argument("--pmg_coarse_mesh_path", type=Path, default=None)
+    parser.add_argument("--pmg_coarse_mesh_variant", type=str, default=None)
     parser.add_argument("--pmg_fine_hierarchy_mode", type=str, default="default")
     parser.add_argument("--mpi_distribute_by_nodes", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--pc_hypre_coarsen_type", type=str, default="HMIS")
@@ -817,7 +803,7 @@ def main() -> None:
         preconditioner_threads=args.preconditioner_threads,
         solver_type=args.solver_type,
         pc_backend=args.pc_backend,
-        pmg_coarse_mesh_path=args.pmg_coarse_mesh_path,
+        pmg_coarse_mesh_variant=args.pmg_coarse_mesh_variant,
         pmg_fine_hierarchy_mode=args.pmg_fine_hierarchy_mode,
         mpi_distribute_by_nodes=args.mpi_distribute_by_nodes,
         pc_hypre_coarsen_type=args.pc_hypre_coarsen_type,
