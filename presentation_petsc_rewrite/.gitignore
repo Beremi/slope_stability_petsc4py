@@ -3,7 +3,7 @@
 !/Makefile
 !/presentation_petsc_rewrite.tex
 !/theme.tex
-!/speaker_notes.md
+!/speaker-notes.md
 !/presentation_petsc_rewrite.pdf
 
 # Track only the assets that the deck currently uses.

@@ -1,13 +1,6 @@
 # 2D Kozinec SSR
 
-This program solves a 2D slope stability problem by the modified shear strength reduction
-(SSR) method described in (Sysala et al., CAS 2025). The Mohr-Coulomb yield criterion, 3
-Davis approaches (denoted by A, B, C), standard finite elements (P1, P2 or P4 elements) and
-meshes with different densities are considered. For P2 elements, the 7-point Gauss
-quadrature is used. To find the safety factor of the SSR method, two continuation techniques
-are available: direct and indirect. A benchmark with a homogeneous slope is considered. A
-heterogeneous slope from the locality Doubrava-Kozinec is considered, see (Sysala et al.,
-NAG 2021).
+This 2D case runs a config-driven shear strength reduction (SSR) analysis using asset `2d_kozinec` and mesh variant `default.msh`.
 
 ## Run
 
@@ -15,18 +8,17 @@ NAG 2021).
 ./run.sh
 ```
 
-## Source
+## Case Inputs
 
-- MATLAB driver: `slope_stability_2D_Kozinec_SSR.m`
-- PETSc config: [`case.toml`](case.toml)
-
-## Asset Definition
-
+- Case config: [`case.toml`](case.toml)
 - Asset: `2d_kozinec`
 - Mesh variant: `default.msh`
-- Profile: default
+- Profile: `default`
 - Analysis: `ssr`
-- Element: `P2`
+- Element order: `P2`
 
-Geometry, materials, hydraulics, and boundary conditions are defined in
-[`../../meshes/2d_kozinec/definition.py`](../../meshes/2d_kozinec/definition.py).
+Geometry, materials, hydraulic behavior, and boundary conditions are defined in [`../../meshes/2d_kozinec/definition.py`](../../meshes/2d_kozinec/definition.py).
+
+## Reference
+
+- MATLAB driver: `slope_stability_2D_Kozinec_SSR.m`

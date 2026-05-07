@@ -17,7 +17,7 @@ The active runtime no longer depends on generated geometry assets, textmesh bund
 - Active benchmark asset count: `10`
 - Health result: every active canonical asset is `sound`
 
-Validation used for this post-migration audit:
+Recorded validation for this post-migration audit:
 
 - `PYTHONPATH=src ./.venv/bin/pytest -q tests/test_benchmark_notebooks.py tests/test_pmg_hierarchy.py tests/test_compare_preconditioners.py`
   - result: `93 passed`
@@ -110,7 +110,7 @@ Active benchmark configs no longer rely on:
 
 - Every current asset under `meshes/` is `.msh` + `definition.py`
 - all non-`.msh` historical inputs were converted and moved under per-asset `legacy/source/`
-- converter inventory lives in `meshes/CONVERTERS.md`
+- converter inventory lives in `meshes/converter-index.md`
 
 ### 2. LL And SSR Wrapper Duplication Is Gone
 
@@ -315,7 +315,7 @@ Active benchmark configs no longer rely on:
 
 The migration is reproducible from the repository itself.
 
-- Index: `meshes/CONVERTERS.md`
+- Index: `meshes/converter-index.md`
 - Per-asset rerun helpers: `meshes/<asset>/legacy/convert_to_msh.py` or `meshes/<asset>/legacy/retag_to_canonical.py`
 - Per-asset source preservation: `meshes/<asset>/legacy/source/`
 

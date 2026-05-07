@@ -122,6 +122,56 @@ def test_init_phase_ssr_indirect_backs_off_initial_lambda(monkeypatch: pytest.Mo
     np.testing.assert_allclose(U2, np.array([[0.4]], dtype=np.float64))
 
 
+def test_init_phase_seed_failure_reports_attempt_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    builder = _DummyBuilder()
+    solver = _DummyContinuationSolver()
+
+    def _fake_newton(
+        U_ini,
+        tol,
+        it_newt_max,
+        it_damp_max,
+        r_min,
+        K_elast,
+        Q,
+        f,
+        constitutive_matrix_builder,
+        linear_system_solver,
+        **kwargs,
+    ):
+        lam = float(constitutive_matrix_builder.current_lambda)
+        history = {"residual": np.array([1.0, lam], dtype=np.float64)}
+        return np.zeros_like(U_ini, dtype=np.float64), 1, 3, history
+
+    monkeypatch.setattr(indirect_module, "newton", _fake_newton)
+
+    with pytest.raises(RuntimeError) as exc:
+        indirect_module.init_phase_SSR_indirect_continuation(
+            lambda_init=0.7,
+            d_lambda_init=0.1,
+            d_lambda_min=0.02,
+            it_newt_max=20,
+            it_damp_max=5,
+            tol=1.0e-4,
+            r_min=1.0e-4,
+            K_elast=np.eye(1, dtype=np.float64),
+            Q=np.ones((1, 1), dtype=bool),
+            f=np.ones((1, 1), dtype=np.float64),
+            constitutive_matrix_builder=builder,
+            linear_system_solver=solver,
+        )
+
+    message = str(exc.value)
+    assert "Initial choice of lambda seems to be too large." in message
+    assert "stage=seed" in message
+    assert "configured_lambda_init=0.7" in message
+    assert "configured_d_lambda_init=0.1" in message
+    assert "attempts=3" in message
+    assert "attempted_lambdas=[0.7, 0.35, 0.175]" in message
+    assert "last_newton_iterations=3" in message
+    assert "last_rel_residual=0.175" in message
+
+
 def test_init_phase_absolute_delta_lambda_uses_residual_stop_for_plain_newton(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

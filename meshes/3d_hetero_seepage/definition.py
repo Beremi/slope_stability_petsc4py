@@ -39,7 +39,7 @@ ASSET = build_problem_asset_3d(
     mechanics={
         "dirichlet": [
             {"target": "x_lock", "components": ["x"]},
-            {"target": "y_lateral_lock", "components": ["y"]},
+            {"target": "y_lateral_lock", "components": ["z"]},
             {"target": "base", "components": ["x", "y", "z"]},
         ],
     },

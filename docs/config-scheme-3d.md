@@ -5,15 +5,15 @@ superseded by the asset-first `RunCaseConfig` loader and the canonical mesh asse
 
 For new work, use:
 
-- [new_benchmark_new_geometry_guide.md](new_benchmark_new_geometry_guide.md)
-- [config_case_matrix.md](config_case_matrix.md)
+- [new-benchmark-new-geometry-guide.md](new-benchmark-new-geometry-guide.md)
+- [config-case-matrix.md](config-case-matrix.md)
 
 ## Current Contract
 
 Config-driven runs use:
 
 ```bash
-python -m slope_stability.cli.run_case_from_config <benchmarks/.../case.toml> --out_dir <dir>
+./.venv/bin/python -m slope_stability.cli.run_case_from_config <benchmarks/.../case.toml> --out_dir <dir>
 ```
 
 `case.toml` may select:
@@ -40,7 +40,7 @@ weight, or hydraulic conductivity. Those values are owned by
 ## Element Orders
 
 - 2D configs accept `P1`, `P2`, and `P4`
-- 3D configs accept `P1`, `P2`, and `P4`
+- 3D configs accept `P1`, `P2`, `P3`, and `P4`
 
 Numerical availability still depends on the selected runner and solver path, but mesh
 loading and asset resolution are unified across dimensions.

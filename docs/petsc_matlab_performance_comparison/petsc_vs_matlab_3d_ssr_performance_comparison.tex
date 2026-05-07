@@ -67,9 +67,10 @@
 {\large Indirect SSR, P2 elements, MPI-8 PETSc vs OMP-8 MATLAB\par}
 \vfill
 \begin{tabular}{rl}
-Repository: & \code{/home/beremi/repos/slope\_stability-1} \\
+Repository: & \code{slope\_stability} checkout \\
 Study root: & \code{docs/petsc\_matlab\_performance\_comparison} \\
-Raw artifacts: & \code{artifacts/petsc\_matlab\_performance\_comparison} \\
+Performance artifacts: & \code{artifacts/petsc\_matlab\_performance\_comparison} \\
+Seepage artifacts: & \code{artifacts/benchmarks/mpi8} \\
 \end{tabular}
 \vfill
 \end{titlepage}
@@ -78,13 +79,13 @@ Raw artifacts: & \code{artifacts/petsc\_matlab\_performance\_comparison} \\
 \clearpage
 
 \section{Methodology}
-The comparison uses indirect SSR only and P2 elements only. The three primary cases are homogeneous 3D SSR, heterogeneous 3D SSR, and heterogeneous 3D seepage SSR on the concave mesh ladder.
+The study definition uses indirect SSR only and P2 elements only. It covers homogeneous 3D SSR, heterogeneous 3D SSR, and the benchmarked heterogeneous 3D seepage SSR COMSOL-transition case.
 
-PETSc runs use \code{mpirun -n 8} with \code{OMP\_NUM\_THREADS=1}. MATLAB runs use \code{OMP\_NUM\_THREADS=8} and the BoomerAMG MATLAB path with 8 threads. All main PETSc and MATLAB runs for a given case share the same continuation horizon, estimated by a PETSc smoke run on the coarsest physical mesh with \code{d\_lambda\_diff\_scaled\_min = 0.01}. Main runs then disable the continuation delta-lambda stop and terminate on \(\omega_{\max}\). The seepage case also uses a case-specific continuation seed \code{lambda\_init = 0.00546875} and \code{d\_lambda\_init = 0.01} in both codes to avoid repeated failed initialization solves on the waterlevels ladder.
+PETSc runs use \code{mpirun -n 8} with \code{OMP\_NUM\_THREADS=1}. MATLAB runs use \code{OMP\_NUM\_THREADS=8} and the BoomerAMG MATLAB path with 8 threads. The dry PETSc and MATLAB runs for a given case share the same continuation horizon, estimated by a PETSc smoke run on the coarsest physical mesh with \code{d\_lambda\_diff\_scaled\_min = 0.01}. Main runs then disable the continuation delta-lambda stop and terminate on \(\omega_{\max}\). The seepage section uses the existing benchmark-suite COMSOL-transition SSR artifacts with \code{lambda\_init = 1.0}, \code{d\_lambda\_init = 0.1}, and \code{d\_lambda\_diff\_scaled\_min = 0.005}.
 
 The heterogeneous 3D case adds one appendix variant where PETSc Newton stopping changes from relative residual to absolute delta-lambda with tolerance \(10^{-4}\).
 
-The homogeneous and heterogeneous dry cases use the requested relative-residual Newton tolerance \(10^{-4}\). For the waterlevels seepage ladder, repeated smoke attempts showed that the original \(10^{-4}\) init-phase target was not attainable on the chosen meshes with the shared study formulation, so the seepage comparison uses the same relative-residual criterion in both codes with a case-specific tolerance \(5\times 10^{-2}\). This keeps PETSc and MATLAB aligned within the seepage case while preserving the original \(10^{-4}\) setting for the two dry reference cases.
+The homogeneous and heterogeneous dry cases use the requested relative-residual Newton tolerance \(10^{-4}\). The normalized seepage inputs use the benchmarked COMSOL-transition PETSc/MATLAB pair and exclude the waterlevels/concave study rows until that separate seepage parity issue is resolved.
 
 \section{Environment And Outputs}
 The report consumes only normalized CSV files under \code{data/}. Figures are generated as vector PDFs under \code{figures/}, and table fragments are generated under \code{generated/}. Long-running raw solver outputs remain under \code{artifacts/petsc\_matlab\_performance\_comparison}. Figures and tables include only completed PETSc/MATLAB runs captured in those CSV files.
@@ -104,7 +105,7 @@ The report consumes only normalized CSV files under \code{data/}. Figures are ge
 \StudyFigure{figures/seepage_3d_timings.pdf}{Runtime comparison by mesh level for the heterogeneous 3D seepage SSR case.}
 \IfFileExists{generated/seepage_3d_table.tex}{\input{generated/seepage_3d_table.tex}}{\textit{Seepage summary table not generated yet.}}
 
-Only the \code{concave\_L2} seepage level completed under the requested mixed PMG-shell study setup. The next seepage level, \code{concave}, reproducibly failed on the PETSc side after hierarchy construction and outer-solver setup, with a rank-4 SIGSEGV in the mixed \code{P2(LN)->P1(LN)->P1(Lc)} shell hierarchy. Same-mesh fallback diagnostics avoided the crash but did not yield a usable converged benchmark within the locked study protocol, so the seepage section reports the completed \code{concave\_L2} comparison only.
+The seepage section reports the benchmark-suite COMSOL-transition pair from \code{run\_3D\_hetero\_seepage\_SSR\_comsol\_capture}. This is the current PETSc/MATLAB SSR seepage parity surface: both histories start from the configured continuation seed path at \(\lambda=1.0\) and follow the same accepted continuation curve. The experimental waterlevels/concave rows are excluded from this report because their seepage field parity is not yet verified.
 
 \appendix
 \section{Heterogeneous 3D Newton Stopping Appendix}

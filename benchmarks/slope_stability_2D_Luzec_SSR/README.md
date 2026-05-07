@@ -1,13 +1,6 @@
 # 2D Luzec SSR
 
-This program solves a 2D slope stability problem by the modified shear strength reduction
-(SSR) method described in (Sysala et al., CAS 2025). The Mohr-Coulomb yield criterion, 3
-Davis approaches (denoted by A, B, C), standard finite elements (P1, P2 or P4 elements) and
-meshes with different densities are considered. For P2 elements, the 7-point Gauss
-quadrature is used. To find the safety factor of the SSR method, two continuation techniques
-are available: direct and indirect. A case study on a heterogeneous river embankment with
-unconfined seepage from the locality Luzec (Czechia) is considered, see (Sysala et al., CAS
-2023).
+This 2D case runs a config-driven shear strength reduction (SSR) analysis using asset `2d_luzec` and mesh variant `default.msh`.
 
 ## Run
 
@@ -15,18 +8,17 @@ unconfined seepage from the locality Luzec (Czechia) is considered, see (Sysala 
 ./run.sh
 ```
 
-## Source
+## Case Inputs
 
-- MATLAB driver: `slope_stability_2D_Luzec_SSR.m`
-- PETSc config: [`case.toml`](case.toml)
-
-## Asset Definition
-
+- Case config: [`case.toml`](case.toml)
 - Asset: `2d_luzec`
 - Mesh variant: `default.msh`
-- Profile: default
+- Profile: `default`
 - Analysis: `ssr`
-- Element: `P2`
+- Element order: `P2`
 
-Geometry, materials, hydraulics, and boundary conditions are defined in
-[`../../meshes/2d_luzec/definition.py`](../../meshes/2d_luzec/definition.py).
+Geometry, materials, hydraulic behavior, and boundary conditions are defined in [`../../meshes/2d_luzec/definition.py`](../../meshes/2d_luzec/definition.py).
+
+## Reference
+
+- MATLAB driver: `slope_stability_2D_Luzec_SSR.m`

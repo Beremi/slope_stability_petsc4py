@@ -1,6 +1,8 @@
-# MATLAB Original Script Benchmarks
+# Benchmark Cases
 
-Unified case registry.
+This directory is the runnable case registry. Each case is driven by a `case.toml` file
+that selects an asset, mesh variant, optional profile, analysis type, element order, solver
+settings, and exports.
 
 Each case folder contains at least:
 
@@ -15,10 +17,10 @@ BCs, seepage BCs, hydraulic state, and profiles are defined in
 `meshes/<asset>/definition.py`.
 
 For a complete guide to adding a benchmark on a new geometry, see
-[docs/new_benchmark_new_geometry_guide.md](../docs/new_benchmark_new_geometry_guide.md).
+[docs/new-benchmark-new-geometry-guide.md](../docs/new-benchmark-new-geometry-guide.md).
 
-Per-case `README.md` files are descriptive only. Generated MATLAB-vs-PETSc comparison output for parity cases
-is kept in `archive/report.md`.
+Per-case `README.md` files are descriptive only. MATLAB-vs-PETSc comparison output for
+parity cases is kept in `archive/report.md`.
 
 The canonical MATLAB-parity benchmark suite is the subset with `[benchmark].suite = true` in `case.toml`.
 
@@ -32,6 +34,9 @@ Run any single case from its folder with `./run.sh`.
 
 ## MATLAB-Parity Benchmarks
 
+The timing and parity values below come from committed benchmark reports and artifacts. They
+are reproducibility records, not new validation claims from this documentation cleanup.
+
 | Case | Title | Kind | Status | MATLAB [s] | PETSc [s] | Parity summary | README | Report | Run |
 | --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- |
 | `run_2D_homo_SSR_capture` | 2D homogeneous SSR | continuation | done | 9.270 | 8.286 | `steps 14/14`, `lambda 6.74e-06`, `omega 3.05e-05` | [README](run_2D_homo_SSR_capture/README.md) | [report](run_2D_homo_SSR_capture/archive/report.md) | [run.sh](run_2D_homo_SSR_capture/run.sh) |
@@ -44,7 +49,7 @@ Run any single case from its folder with `./run.sh`.
 
 These folders are part of the unified case registry, but they are not included in the canonical MATLAB-parity suite.
 
-| Folder | Problem case | Analysis | Dimension | Element | README | Run | Config |
+| Folder | Asset | Analysis | Dimension | Element | README | Run | Config |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `SIOPT_LL` | 3d_siopt | ll | 3D | P2 | [README](SIOPT_LL/README.md) | [run.sh](SIOPT_LL/run.sh) | [case.toml](SIOPT_LL/case.toml) |
 | `SIOPT_SSR` | 3d_siopt | ssr | 3D | P2 | [README](SIOPT_SSR/README.md) | [run.sh](SIOPT_SSR/run.sh) | [case.toml](SIOPT_SSR/case.toml) |

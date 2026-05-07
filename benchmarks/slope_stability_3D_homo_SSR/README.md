@@ -1,12 +1,6 @@
 # 3D homogeneous SSR
 
-This program solves a 3D slope stability problem by the modified shear strength reduction
-(SSR) method described in (Sysala et al., CAS 2025). The Mohr-Coulomb yield criterion, 3
-Davis approaches (denoted by A, B, C), standard finite elements (either P1 or P2 elements)
-and meshes with different densities are considered. For P2 elements, the 11-point Gauss
-quadrature is used. To find the safety factor of the SSR method, two continuation techniques
-are available: direct and indirect. A benchmark with a homogeneous slope from (Sysala et
-al., CAS 2025) is considered.
+This 3D case runs a config-driven shear strength reduction (SSR) analysis using asset `3d_homo_slope` and mesh variant `adaptive_family_a_l1.msh`.
 
 ## Run
 
@@ -14,18 +8,17 @@ al., CAS 2025) is considered.
 ./run.sh
 ```
 
-## Source
+## Case Inputs
 
-- MATLAB driver: `slope_stability_3D_homo_SSR.m`
-- PETSc config: [`case.toml`](case.toml)
-
-## Asset Definition
-
+- Case config: [`case.toml`](case.toml)
 - Asset: `3d_homo_slope`
 - Mesh variant: `adaptive_family_a_l1.msh`
-- Profile: default
+- Profile: `default`
 - Analysis: `ssr`
-- Element: `P2`
+- Element order: `P2`
 
-Geometry, materials, hydraulics, and boundary conditions are defined in
-[`../../meshes/3d_homo_slope/definition.py`](../../meshes/3d_homo_slope/definition.py).
+Geometry, materials, hydraulic behavior, and boundary conditions are defined in [`../../meshes/3d_homo_slope/definition.py`](../../meshes/3d_homo_slope/definition.py).
+
+## Reference
+
+- MATLAB driver: `slope_stability_3D_homo_SSR.m`

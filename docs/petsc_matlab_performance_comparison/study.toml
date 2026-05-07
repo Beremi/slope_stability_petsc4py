@@ -162,8 +162,7 @@ report_slug = "seepage_3d"
 asset = "3d_hetero_seepage"
 matlab_script = "run_3D_hetero_seepage_SSR_study_capture"
 boundary_mode = "waterlevels"
-lambda_init = 0.00546875
-d_lambda_init = 0.01
+lambda_init = 0.7
 d_lambda_min = 1e-5
 omega_smoke_seed = 7.0e7
 it_newt_max = 50
@@ -178,15 +177,15 @@ conductivity = [1.0, 1.0, 1.0, 1.0]
 [[cases.levels]]
 id = "concave_L2"
 label = "concave L2"
-mesh_variant = "concave_family_a.msh"
+mesh_variant = "concave_family_b.msh"
 matlab_mesh_key = "seepage_concave_l2"
 
 [[cases.levels]]
 id = "concave"
 label = "concave"
-mesh_variant = "concave_family_b.msh"
+mesh_variant = "concave_family_a.msh"
 matlab_mesh_key = "seepage_concave"
-pmg_coarse_mesh_variant = "concave_family_a.msh"
+pmg_coarse_mesh_variant = "concave_family_b.msh"
 
 [[cases.levels]]
 id = "concave_L3"

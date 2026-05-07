@@ -1,6 +1,6 @@
 # P4 Elements and Parallel Tangent Assembly: Current Implementation Brief
 
-This note summarizes how `P4` elements, `B` construction, tangent matrix/value assembly, index precomputation, and parallelization are implemented in the current repository. It is intended as a handoff document for an external FEM/HPC expert.
+This note summarizes how `P4` elements, `B` construction, tangent matrix/value assembly, index precomputation, and parallelization are implemented in the current repository. It is a technical brief for FEM/HPC review.
 
 ## Scope
 

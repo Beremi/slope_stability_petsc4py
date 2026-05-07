@@ -17,6 +17,7 @@ if str(THIS_DIR) not in sys.path:
 from study_common import (
     canonical_matlab_env,
     canonical_petsc_env,
+    completion_files,
     load_horizons,
     load_study,
     quote_for_matlab,
@@ -44,6 +45,16 @@ def write_run_metadata(output_dir: Path, metadata: dict) -> None:
     write_json(output_dir / "study_run.json", payload)
 
 
+def invalidate_completion_files(output_dir: Path, engine: str) -> None:
+    """Remove stale completion artifacts before an explicit no-resume refresh."""
+    for rel in completion_files(engine):
+        if rel == "study_run.json":
+            continue
+        path = output_dir / rel
+        if path.exists():
+            path.unlink()
+
+
 def read_petsc_metrics(output_dir: Path) -> dict:
     run_info = json.loads((output_dir / "data" / "run_info.json").read_text(encoding="utf-8"))
     with np.load(output_dir / "data" / "petsc_run.npz", allow_pickle=True) as npz:
@@ -55,6 +66,22 @@ def read_petsc_metrics(output_dir: Path) -> dict:
         "final_lambda": float(lambda_hist[-1]),
         "accepted_steps": int(lambda_hist.size),
     }
+
+
+def choose_main_horizon_from_smoke(output_dir: Path, final_omega: float) -> float:
+    """Use the smoke endpoint plus one smoke omega increment as main-run headroom."""
+    npz_path = output_dir / "data" / "petsc_run.npz"
+    if not npz_path.exists():
+        return float(final_omega)
+    with np.load(npz_path, allow_pickle=True) as npz:
+        omega_hist = np.asarray(npz.get("omega_hist", []), dtype=np.float64).reshape(-1)
+    finite = omega_hist[np.isfinite(omega_hist)]
+    if finite.size < 2:
+        return float(final_omega)
+    last_step = abs(float(finite[-1] - finite[-2]))
+    if last_step <= 0.0:
+        return float(final_omega)
+    return float(final_omega) + last_step
 
 
 def read_matlab_metrics(output_dir: Path) -> dict:
@@ -279,6 +306,8 @@ def run_one_petsc(study: dict, case: dict, level: dict, *, phase: str, variant: 
     if resume and run_complete(output_dir, "petsc"):
         append_ledger(artifact_root, {"event": "skipped_complete", **meta, "output_dir": str(output_dir)})
         return {"output_dir": output_dir, **read_petsc_metrics(output_dir)}
+    if not resume:
+        invalidate_completion_files(output_dir, "petsc")
 
     case_config = write_petsc_case_config(
         output_dir / "case.toml",
@@ -346,6 +375,8 @@ def run_one_matlab(study: dict, case: dict, level: dict, *, omega_max_stop: floa
     if resume and run_complete(output_dir, "matlab"):
         append_ledger(artifact_root, {"event": "skipped_complete", **meta, "output_dir": str(output_dir)})
         return {"output_dir": output_dir, **read_matlab_metrics(output_dir)}
+    if not resume:
+        invalidate_completion_files(output_dir, "matlab")
 
     config_json = output_dir / "matlab_config.json"
     out_mat = output_dir / "matlab_run.mat"
@@ -410,12 +441,14 @@ def run_smoke_phase(study: dict, cases: list[dict], *, dry_run: bool, resume: bo
             resume=resume,
         )
         if not dry_run:
+            chosen_omega = choose_main_horizon_from_smoke(result["output_dir"], float(result["final_omega"]))
             horizons[case["id"]] = {
                 "case_id": case["id"],
                 "case_label": case["label"],
                 "level_id": level["id"],
                 "level_label": level["label"],
                 "omega_max_stop": float(result["final_omega"]),
+                "chosen_omega_max_stop": float(chosen_omega),
                 "runtime_seconds": float(result["runtime_seconds"]),
                 "accepted_steps": int(result["accepted_steps"]),
                 "output_dir": str(result["output_dir"]),
@@ -433,7 +466,8 @@ def run_main_phase(study: dict, cases: list[dict], *, dry_run: bool, resume: boo
         raise RuntimeError("No smoke horizons found. Run `run_study.py --phase smoke` first.")
 
     for case in cases:
-        shared_omega = float(horizons.get(case["id"], {}).get("omega_max_stop", case["omega_smoke_seed"]))
+        horizon = horizons.get(case["id"], {})
+        shared_omega = float(horizon.get("chosen_omega_max_stop", horizon.get("omega_max_stop", case["omega_smoke_seed"])))
         stop_after_case = False
         for level in case["levels"]:
             petsc_main = run_one_petsc(

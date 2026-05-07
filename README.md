@@ -1,4 +1,4 @@
-# slope_stability
+# Slope Stability
 
 PETSc-based Python reimplementation of the slope-stability workflows, organized around config-driven runs and benchmark parity against the local MATLAB reference tree.
 
@@ -42,7 +42,7 @@ Run one case:
 ```bash
 ./.venv/bin/python -m slope_stability.cli.run_case_from_config \
   benchmarks/run_3D_hetero_SSR_capture/case.toml \
-  --out_dir /tmp/ssr_run
+  --out_dir artifacts/examples/ssr-run
 ```
 
 Run one canonical benchmark:
@@ -57,9 +57,9 @@ Run the whole benchmark suite:
 ./.venv/bin/python -m slope_stability.cli.run_benchmark_suite
 ```
 
-## Codespaces and devcontainer
+## Codespaces And Devcontainer
 
-The repository ships a prebuild-friendly devcontainer under [`.devcontainer/`](/home/beremi/repos/slope_stability-1/.devcontainer).
+The repository ships a prebuild-friendly devcontainer under [`.devcontainer`](.devcontainer/).
 
 - slow setup runs in `onCreateCommand` and `updateContentCommand`, so Codespaces prebuilds can absorb:
   - local PETSc compilation under `./.build`
@@ -118,10 +118,10 @@ The intent is straightforward postprocessing with PyVista, meshio, or ParaView.
   BCs, seepage head BCs, hydraulic state, profiles, and region assignments
 - runtime code in `src/` stays problem-agnostic
 
-## Notes / TODO
+## Notes
 
 - Benchmarks are currently live MATLAB-vs-PETSc comparisons, not frozen regression snapshots yet.
-- TODO: once benchmark parity is stable, freeze compact reference snapshots for regression-style testing.
+- Once benchmark parity is stable, freeze compact reference snapshots for regression-style testing.
 - `tests_local/` is intentionally ignored and reserved for local smoke/regression scripts during development.
 - `scripts_local/` is intentionally ignored and holds exploratory utilities that are not part of the benchmark-replication surface.
 - The MATLAB tree is expected at `./slope_stability_matlab` locally for benchmark runs.
@@ -129,7 +129,7 @@ The intent is straightforward postprocessing with PyVista, meshio, or ParaView.
 ## Supporting docs
 
 - `benchmarks/README.md`
-- `docs/new_benchmark_new_geometry_guide.md`
-- `docs/config_case_matrix.md`
-- `docs/config_scheme_3d.md`
-- `docs/computational_path.md`
+- `docs/new-benchmark-new-geometry-guide.md`
+- `docs/config-case-matrix.md`
+- `docs/config-scheme-3d.md`
+- `docs/computational-path.md`

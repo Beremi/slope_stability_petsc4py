@@ -1,6 +1,6 @@
 # Heterogeneous 3D SSR Integration-Point Study
 
-This study compares tetrahedral integration-point counts on the standard heterogeneous 3D SSR benchmark `SSR_hetero_ada_L1`.
+This study compares tetrahedral integration-point counts on the standard heterogeneous 3D SSR benchmark asset `3d_hetero_slope` with mesh variant `adaptive_family_a_l1.msh`.
 
 The matrix is:
 
@@ -16,7 +16,7 @@ The matrix is:
 
 ## Important benchmark note
 
-The standard `SSR_hetero_ada_L1` benchmark reaches `omega` on the order of `6.7e6` only on the indirect continuation path. The earlier direct-study scaffold was therefore not the same problem. This package uses the standard indirect heterogeneous 3D SSR capture path so the continuation curves live on the correct omega scale.
+The standard `3d_hetero_slope`/`adaptive_family_a_l1.msh` benchmark reaches `omega` on the order of `6.7e6` only on the indirect continuation path. The earlier direct-study scaffold was therefore not the same problem. This package uses the standard indirect heterogeneous 3D SSR config-driven path so the continuation curves live on the correct omega scale.
 
 ## Files
 

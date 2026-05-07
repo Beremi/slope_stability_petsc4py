@@ -26,25 +26,25 @@ The workflow is intentionally split into validation, execution, normalization, f
 2. Validate the setup:
 
 ```bash
-python docs/petsc_matlab_performance_comparison/scripts/validate_study.py
+./.venv/bin/python docs/petsc_matlab_performance_comparison/scripts/validate_study.py
 ```
 
 3. Run smoke horizons:
 
 ```bash
-python docs/petsc_matlab_performance_comparison/scripts/run_study.py --phase smoke
+./.venv/bin/python docs/petsc_matlab_performance_comparison/scripts/run_study.py --phase smoke
 ```
 
 4. Run the full sequential benchmark:
 
 ```bash
-python docs/petsc_matlab_performance_comparison/scripts/run_study.py --phase main --resume
+./.venv/bin/python docs/petsc_matlab_performance_comparison/scripts/run_study.py --phase main --resume
 ```
 
 5. Normalize raw outputs into CSV:
 
 ```bash
-python docs/petsc_matlab_performance_comparison/scripts/collect_results.py
+./.venv/bin/python docs/petsc_matlab_performance_comparison/scripts/collect_results.py
 ```
 
 6. Generate figures and tables, then build the PDF:
@@ -62,3 +62,20 @@ make -C docs/petsc_matlab_performance_comparison pdf
 - MATLAB runs use `OMP_NUM_THREADS=8` and BoomerAMG threads `8`.
 - Runs are executed one by one and recorded under `artifacts/petsc_matlab_performance_comparison`.
 - The runner stops adding finer levels for a case once the PETSc main runtime exceeds `1000 s`, while still finishing the matching MATLAB run and the hetero appendix run on that level.
+- The normalized seepage rows use the verified benchmark-suite
+  `run_3D_hetero_seepage_SSR_comsol_capture` artifacts under
+  `artifacts/benchmarks/mpi8`. The waterlevels/concave study rows stay out of
+  the report until their separate seepage-field parity issue is resolved.
+
+## Seepage Report Source
+
+The seepage figure and table use the benchmarked COMSOL-transition SSR case:
+
+- PETSc: `artifacts/benchmarks/mpi8/run_3D_hetero_seepage_SSR_comsol_capture/petsc`
+- MATLAB: `artifacts/benchmarks/mpi8/run_3D_hetero_seepage_SSR_comsol_capture/matlab`
+
+Those histories use `lambda_init = 1.0`, `d_lambda_init = 0.1`,
+`d_lambda_min = 1e-5`, `d_lambda_diff_scaled_min = 0.005`, and `tol = 1e-4`.
+The previous waterlevels `concave_L2` row is intentionally omitted because the
+PETSc and MATLAB seepage pressure fields do not yet match closely enough for a
+performance comparison.

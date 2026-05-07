@@ -1,18 +1,23 @@
-# Docs
+# Documentation
 
-Active docs:
+This directory contains current architecture, config, benchmark, and study notes for the
+asset-first slope-stability runtime. Historical notes are retained when they preserve useful
+debug or design context.
 
-- `new_benchmark_new_geometry_guide.md`
-- `config_case_matrix.md`
-- `config_scheme_3d.md`
-- `computational_path.md`
+## Active Guides
 
-Start with `new_benchmark_new_geometry_guide.md` when adding a new problem, mesh, or
-benchmark. It is the asset-first reference for `meshes/<asset>/definition.py`, canonical
-Gmsh physical names, and benchmark `case.toml` fields.
-Use `computational_path.md` when tracing a benchmark command through config loading,
-asset resolution, mesh building, solver execution, and exports.
+- [New Benchmark On A New Geometry](new-benchmark-new-geometry-guide.md)
+- [Config Case Matrix](config-case-matrix.md)
+- [3D Configuration Scheme](config-scheme-3d.md)
+- [Computational Path](computational-path.md)
+- [Problem Definition Audit](problem-definition-audit.md)
 
-Historical notes from earlier investigation phases are kept here as reference material.
-Some of those notes may still mention the pre-reorganization `slope_stability/...` path
-layout; the current root layout is described in the top-level `README.md`.
+Start with the new-benchmark guide when adding a new problem, mesh, or benchmark. Use the
+computational path note when tracing a case config through asset resolution, mesh building,
+solver execution, and exports.
+
+## Historical Notes
+
+Older phase summaries and solver notes may mention paths or experiments that are no longer
+active. Treat the current source tree, `meshes/<asset>/definition.py`, and benchmark
+`case.toml` files as authoritative.

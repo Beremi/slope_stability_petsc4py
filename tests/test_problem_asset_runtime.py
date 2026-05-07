@@ -13,6 +13,7 @@ from slope_stability.problem_asset_runtime import (
     build_mesh_for_resolved_asset,
     build_seepage_boundary_for_resolved_asset,
     load_mechanical_problem_spec,
+    load_seepage_problem_spec,
     resolve_problem_asset,
     resolve_problem_asset_from_config,
 )
@@ -198,6 +199,56 @@ def test_seepage_boundaries_are_asset_owned() -> None:
         assert q_w.dtype == np.dtype(bool)
         assert np.all(np.isfinite(pw_d))
         assert np.any(~q_w)
+
+
+def test_waterlevels_seepage_asset_matches_matlab_boundary_and_material_semantics() -> None:
+    resolved = resolve_problem_asset(asset_name="3d_hetero_seepage", mesh_variant="concave_family_a.msh")
+    mesh = build_mesh_for_resolved_asset(resolved, elem_type="P2")
+
+    lateral = np.setdiff1d(mesh.nodesets["y_lateral_lock"], mesh.nodesets["base"])
+    x_lock = np.setdiff1d(mesh.nodesets["x_lock"], mesh.nodesets["base"])
+
+    assert lateral.size > 0
+    assert x_lock.size > 0
+    assert np.all(mesh.q_mask[1, lateral])
+    assert not np.any(mesh.q_mask[2, lateral])
+    assert not np.any(mesh.q_mask[0, x_lock])
+    assert not np.any(mesh.q_mask[:, mesh.nodesets["base"]])
+
+    expected_by_region = {
+        "general_foundation": [15.0, 38.0, 0.0, 50000.0, 0.30, 22.0, 22.0],
+        "weak_foundation": [10.0, 35.0, 0.0, 50000.0, 0.30, 21.0, 21.0],
+        "slope_mass": [18.0, 32.0, 0.0, 20000.0, 0.33, 20.0, 20.0],
+        "cover_layer": [15.0, 30.0, 0.0, 10000.0, 0.33, 19.0, 19.0],
+    }
+    rows = resolved.definition.material_rows()
+    assert rows is not None
+    for region, expected_row in expected_by_region.items():
+        material_id = mesh.region_id_by_name[region]
+        assert rows[material_id] == expected_row
+
+    seepage = load_seepage_problem_spec(resolved)
+    assert seepage.seepage.water_unit_weight == pytest.approx(9.81)
+    np.testing.assert_allclose(seepage.conductivity, np.ones(4, dtype=np.float64))
+
+    q_w, pw_d = build_seepage_boundary_for_resolved_asset(
+        resolved,
+        mesh.coord,
+        mesh.surf,
+        mesh.boundary_labels,
+        grho=9.81,
+    )
+    head_dry = np.asarray(mesh.nodesets["head_dry"], dtype=np.int64)
+    head_porous = np.asarray(mesh.nodesets["head_porous"], dtype=np.int64)
+    head_free = np.asarray(mesh.nodesets["head_free"], dtype=np.int64)
+    dry_only = np.setdiff1d(np.setdiff1d(head_dry, head_porous), head_free)
+
+    assert not np.any(q_w[head_dry])
+    assert not np.any(q_w[head_porous])
+    assert not np.any(q_w[head_free])
+    np.testing.assert_allclose(pw_d[dry_only], 0.0)
+    np.testing.assert_allclose(pw_d[head_porous], 9.81 * np.maximum(55.0 - mesh.coord[1, head_porous], 0.0))
+    np.testing.assert_allclose(pw_d[head_free], 9.81 * np.maximum(35.0 - mesh.coord[1, head_free], 0.0))
 
 
 def test_rebuild_case_mesh_uses_asset_runtime() -> None:

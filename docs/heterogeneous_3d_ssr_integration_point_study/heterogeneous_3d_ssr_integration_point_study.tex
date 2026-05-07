@@ -28,14 +28,14 @@
 \maketitle
 
 \section{Goal}
-This note studies how tetrahedral integration-point count changes the continuation response of the standard heterogeneous 3D SSR benchmark on \texttt{SSR\_hetero\_ada\_L1}. The comparison is run for \texttt{P1}, \texttt{P2}, and \texttt{P4} elements and focuses on continuation-curve shape, runtime, final load level at a shared horizon, and numerical stability.
+This note studies how tetrahedral integration-point count changes the continuation response of the standard heterogeneous 3D SSR benchmark on asset \texttt{3d\_hetero\_slope} with mesh variant \texttt{adaptive\_family\_a\_l1.msh}. The comparison is run for \texttt{P1}, \texttt{P2}, and \texttt{P4} elements and focuses on continuation-curve shape, runtime, final load level at a shared horizon, and numerical stability.
 
 \section{Benchmark Setup}
 The shared comparison target is $\omega_{\mathrm{final}} = \num{\StudyOmegaFinal}$. Every run uses the same continuation settings: \texttt{secant} indirect continuation, \texttt{step\_max = 100}, \texttt{d\_lambda\_diff\_scaled\_min = 1e-4}, and Newton \texttt{absolute\_delta\_lambda = 1e-4}. The initial Newton solve uses \texttt{relative\_residual = 1e-4}. The execution environment is fixed at \texttt{mpirun -n \StudyMpiRanks} with \texttt{OMP\_NUM\_THREADS = 1}, \texttt{node\_ordering = block\_metis}, \texttt{constitutive\_mode = overlap}, and the PETSc-side \texttt{PETSC\_MATLAB\_DFGMRES\_HYPRE\_NULLSPACE} linear solver.
 
 The published matrix is element-specific: \texttt{P1} uses \texttt{q1}, \texttt{q4}, \texttt{q11}, \texttt{q24}, and \texttt{q45}; \texttt{P2} uses \texttt{q4}, \texttt{q11}, \texttt{q24}, and \texttt{q45}; and \texttt{P4} is reported only for \texttt{q24} and \texttt{q45}. This keeps the \texttt{q11} rule as the established \texttt{P2} baseline in the code base while dropping the unhelpful \texttt{P4/q11} failure from the published comparison. The \texttt{q45} curve is treated as the within-element reference because it is the richest rule in the published comparison matrix.
 
-One methodological clarification matters here: the standard \texttt{SSR\_hetero\_ada\_L1} benchmark reaches the familiar $\omega \approx 6.7\times 10^6$ scale only on the indirect continuation path. The earlier direct-study omega scale was therefore not the same problem, so this corrected study uses the standard indirect heterogeneous 3D SSR capture path throughout.
+One methodological clarification matters here: the standard asset \texttt{3d\_hetero\_slope} with mesh variant \texttt{adaptive\_family\_a\_l1.msh} reaches the familiar $\omega \approx 6.7\times 10^6$ scale only on the indirect continuation path. The earlier direct-study omega scale was therefore not the same problem, so this corrected study uses the standard indirect heterogeneous 3D SSR config-driven path throughout.
 The wall-clock policy is also element-specific: \texttt{P1} and \texttt{P2} retain a \SI{1200}{s} guard, while \texttt{P4} is allowed to run without a wall-clock timeout so the higher-order curves can finish unless a real watchdog abort is triggered by solver pathologies such as repeated zero-correction stalls.
 
 \section{Reference-Element Quadrature Rules}

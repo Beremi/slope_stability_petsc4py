@@ -1,8 +1,9 @@
 \chapter{Seepage Coupling}
 
 For the committed default benchmark, this chapter is intentionally short because
-the seepage branch is \textbf{inactive}. The case file sets
-\code{seepage = false}, so the mainline 3D PMG solve does not run any hydraulic
+the seepage branch is \textbf{inactive}. The case config selects
+\code{analysis = ssr} on asset \code{3d\_hetero\_slope}, which has no seepage
+capability, so the mainline 3D PMG solve does not run any hydraulic
 preprocessing or pore-pressure Newton loop.
 
 \section{What The Mainline Mechanical Path Uses Instead}

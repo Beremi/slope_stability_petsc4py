@@ -1,4 +1,8 @@
-# WORKPLAN
+# Implementation Workplan
+
+This checklist records the implementation work that moved the repository toward the current
+asset-first PETSc/Cython runtime. It is retained as project history rather than a current
+release plan.
 
 ## Phase 1 — Structural parity pass
 - [x] Recreate `NEWTON` API (`newton`, `newton_ind_ssr`, `newton_ind_ll`, `damping`, `damping_ALG5`).

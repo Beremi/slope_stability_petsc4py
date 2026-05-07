@@ -144,7 +144,7 @@ Interpretation:
 
 ## Long P4 Short-Run Prototype
 
-I started the rank-2 `P4 step_max=10` BDDC short-run gate and stopped it once it had already demonstrated stable continuation beyond initialization. The goal of this run was correctness/stability signal, not a final timing number.
+The rank-2 `P4 step_max=10` BDDC short-run gate was stopped after it had already demonstrated stable continuation beyond initialization. The goal of this run was correctness/stability signal, not a final timing number.
 
 - artifact:
   - `artifacts/bddc_short_runs/p4_step10_bddc_gamg_elastic_clean_v1`
@@ -178,7 +178,7 @@ An earlier `P4 step_max=1` attempt was polluted by two stale rank-2 `P4` Hypre p
 
 ### 2. Two PETSc-outer-FGMRES branches still need explicit-`P` plumbing
 
-During investigation I also tried to move the nonlinear P4 path off the fully Python-driven DFGMRES outer loop.
+The investigation also checked whether the nonlinear P4 path could move off the fully Python-driven DFGMRES outer loop.
 
 Findings:
 
@@ -217,4 +217,3 @@ The next contained tuning candidates are:
 1. try `pc_bddc_use_deluxe_scaling=true` now that the branch is stable on heterogeneous `P4`
 2. try PETSc-documented local-GAMG smoother tuning under the BDDC Dirichlet/Neumann prefixes
 3. fix explicit-`P` support in the `KSPFGMRES_*` PETSc-outer branches so the same BDDC `MATIS` preconditioner can be tested without the fully Python-driven outer DFGMRES path
-

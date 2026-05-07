@@ -1,6 +1,10 @@
-# INSTRUCTIONS
+# Development Setup And Run Commands
 
-## Environment and venv
+This page collects the local setup and smoke-run commands used by the PETSc/Cython
+implementation. It is a quick command reference; the top-level README describes the
+repository layout.
+
+## Environment And Venv
 1. Create an isolated venv and install build/runtime deps.
 
 ```bash
@@ -44,7 +48,7 @@ Use `mpiexec` with the packaged CLI entrypoints:
 ```bash
 mpiexec -n 4 python -m slope_stability.cli.run_case_from_config \
   benchmarks/run_3D_hetero_SSR_capture/case.toml \
-  --out_dir /tmp/ssr_run
+  --out_dir artifacts/examples/ssr-run
 ```
 
 The linear solvers and context are MPI-aware through PETSc communicators and support distributed matrix/vector handles.

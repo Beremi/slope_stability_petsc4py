@@ -1,17 +1,19 @@
-# slope_stability: Phase 0 Wrap-up and Starting Point for Next Investigation
+# Phase Summary 2026-03-10
+
+This historical note records an early investigation before the current asset-first
+repository layout. Paths and local artifacts in this document are provenance notes, not
+current runnable entrypoints.
 
 Date: 2026-03-10
 
 ## 1) What was done
 
 ### A. MATLAB reference baseline captured
-- Added/used MATLAB capture script:
-  - [slope_stability/scripts/run_3D_hetero_SSR_capture.m](/home/beremi/repos/slope_stability-1/slope_stability/scripts/run_3D_hetero_SSR_capture.m)
-- Executed on `SSR_hetero_ada_L1.h5` and produced:
-  - [matlab_run4.mat](/tmp/slope_run/matlab_run4.mat)
-  - [matlab_displacements_3D.png](/home/beremi/repos/slope_stability-1/slope_stability/results/matlab/matlab_displacements_3D.png)
-  - [matlab_deviatoric_strain_3D.png](/home/beremi/repos/slope_stability-1/slope_stability/results/matlab/matlab_deviatoric_strain_3D.png)
-  - [matlab_omega_lambda.png](/home/beremi/repos/slope_stability-1/slope_stability/results/matlab/matlab_omega_lambda.png)
+- Added/used the local MATLAB capture script `run_3D_hetero_SSR_capture.m`.
+- Executed on the historical `SSR_hetero_ada_L1.h5` input and produced local MATLAB
+  artifacts under a local temporary output directory and the then-local
+  `slope_stability/results/matlab`
+  tree.
 - MATLAB reference statistics observed in full run:
   - Final `lambda = 1.6660984712183886`
   - Final `omega = 12,000,000`
@@ -19,20 +21,18 @@ Date: 2026-03-10
   - Initial Newton attempts: `[11, 6]`
 
 ### B. PETSc implementation scaffold / run path prepared
-- Maintained a structured PETSc reimplementation under:
-  - [slope_stability](/home/beremi/repos/slope_stability-1/slope_stability)
-- Capture driver implemented and tuned for parity workflow:
+- Maintained a structured PETSc reimplementation that has since moved to the current
+  `src/slope_stability` package layout.
+- Mechanics runner implemented and tuned for parity workflow:
   - [src/slope_stability/execution/asset_case/mechanics_3d.py](../src/slope_stability/execution/asset_case/mechanics_3d.py)
 - Run driver now supports MATLAB-like parameterization through asset-first `case.toml` sections for continuation, Newton, and linear-solver controls.
-- Environment bootstrap exists:
-  - [slope_stability/build_scripts/bootstrap_petsc4py_venv.sh](/home/beremi/repos/slope_stability-1/slope_stability/build_scripts/bootstrap_petsc4py_venv.sh)
-- Result artifacts and docs already collected for MATLAB, plus this handoff summary:
-  - [slope_stability/results/matlab](/home/beremi/repos/slope_stability-1/slope_stability/results/matlab)
-  - [slope_stability/results/matlab_vs_petsc_run_3D_hetero_SSR.md](/home/beremi/repos/slope_stability-1/slope_stability/results/matlab_vs_petsc_run_3D_hetero_SSR.md)
+- Environment bootstrap now lives under `bootstrap.sh` and `build_scripts/`.
+- Result artifacts were collected locally during the investigation; they are not a current
+  public artifact contract.
 
 ### C. Key bugfixes made during debug
-- Fixed orthogonalization shape handling in deflated solver path:
-  - [slope_stability/src/slope_stability/linear/orthogonalize.py](/home/beremi/repos/slope_stability-1/slope_stability/src/slope_stability/linear/orthogonalize.py)
+- Fixed orthogonalization shape handling in the deflated solver path:
+  - [src/slope_stability/linear/orthogonalize.py](../src/slope_stability/linear/orthogonalize.py)
 - Result: avoids mismatch crash for multi-column projection operations in `A`-orthogonalization.
 
 ## 2) Core design choices so far
@@ -46,8 +46,9 @@ Date: 2026-03-10
 - Linear system solving was done through a custom deflated GMRES path with configurable preconditioner strategy.
 
 3. Data/path parity with MATLAB
-- Use same mesh (`SSR_hetero_ada_L1.h5`) and same material setup.
-- Use same intermediate outputs: `lambda_hist`, `omega_hist`, `step_U`, attempt/newton counters, timings, etc.
+- The early investigation used the same historical MATLAB mesh and material setup.
+- Current config-driven runs express that setup through `asset`, `mesh_variant`, and
+  optional `profile` instead of raw mesh paths.
 
 4. Maintain optional performance path for kernels
 - Kept fallback pure-NumPy/Python versions and optional Cython hooks to evolve performance later.
@@ -63,7 +64,7 @@ Date: 2026-03-10
 ### B) Environment/runtime setup friction
 - Initial runs lacked PETSc dependencies in interpreter path.
 - After installing `petsc4py`, additional runtime modules were needed (`matplotlib`, `h5py`, `scipy`).
-- Cython build previously failed (`dot` signature issue), so we proceeded with NumPy fallback behavior.
+- Cython build previously failed (`dot` signature issue), so NumPy fallback behavior was used.
 
 ### C) Solver robustness/performance gap
 - Even with smaller Newton/iteration budgets, full-mesh continuation remained too slow to complete robustly in the environment.
@@ -75,7 +76,7 @@ Date: 2026-03-10
 - Replace/augment current custom linear path with PETSc-native
   - `KSPFGMRES` + `PCGAMG`
   - with explicit elastic near-nullspace support.
-- Use the nullspace construction from elasticity modes already discussed in `docs.md` to help GAMG convergence.
+- Use the nullspace construction from elasticity modes already discussed in `matlab-parity-notes.md` to help GAMG convergence.
 - Keep outer Newton + damping + indirect continuation and deflation logic as explicit code (do not use PETSc high-level Newton wrappers).
 
 ### Concrete next-phase plan

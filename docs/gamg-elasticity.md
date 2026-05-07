@@ -8,7 +8,7 @@ used in this repository, focusing on:
 - 3D hyperelasticity in the FEniCS custom Newton path,
 - 3D hyperelasticity in the JAX + PETSc path,
 - the current trust-region benchmark defaults,
-- the main pitfalls we hit before the setup became reliable,
+- known pitfalls from earlier setup attempts,
 - the 2D topology mechanics benchmark as a smaller elastic-like sanity check.
 
 The goal is practical: what to set, why it matters, and what not to repeat.

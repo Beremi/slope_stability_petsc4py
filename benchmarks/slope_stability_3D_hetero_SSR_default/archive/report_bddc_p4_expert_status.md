@@ -167,7 +167,7 @@ Exact-LU BDDC local solves were kept as a correctness fallback but remain imprac
 
 ### 2. PETSc-outer-FGMRES branches are not yet usable for this explicit-`P` BDDC path
 
-I tried to move off the fully Python-driven outer DFGMRES branch and found two repo bugs:
+Checks that moved off the fully Python-driven outer DFGMRES branch found two repo bugs:
 
 - `KSPFGMRES_GAMG` with `pc_backend=bddc`
   - not wired for the owned-row local solve API
@@ -227,12 +227,11 @@ These are the concrete next-step questions where guidance would be most useful:
 
 ## Recommended Next Experiments
 
-If continuing from the current branch, the next contained sequence I would run is:
+If continuing from the current branch, the recommended contained sequence is:
 
 1. `P4 step_max=1`, same working branch, but with `pc_bddc_use_deluxe_scaling=true`
 2. `P4` elastic-only probe with tuned local-GAMG options under Dirichlet/Neumann prefixes
 3. if still too many iterations, add an experiment-only corner-only primal path
 4. separately, fix explicit-`P` support in `KSPFGMRES_GAMG` and `KSPFGMRES_MATLAB_GAMG`
 
-I would not go to rank-8 or full-trajectory `P4` with BDDC yet. The branch is finally functioning, but it is not yet competitive enough.
-
+Do not go to rank-8 or full-trajectory `P4` with BDDC yet. The branch is functioning, but it is not yet competitive enough.

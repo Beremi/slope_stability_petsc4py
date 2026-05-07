@@ -3,7 +3,7 @@
 
 This appendix chapter collects runner surfaces and configuration defaults that
 exist in the repository but are not part of the current
-\code{3d\_hetero\_ssr\_default} benchmark path.
+\code{slope\_stability\_3D\_hetero\_SSR\_default} benchmark path.
 
 \section{Generic Framework Defaults}
 
@@ -24,13 +24,17 @@ benchmark overrides the backend to \code{pmg\_shell}.
 
 \section{Other Runner Surfaces}
 
-The repository also contains top-level flows that are not on the current
-mainline path:
+The public entrypoint for these flows is still
+\petscmod{cli/run\_case\_from\_config.py}. After config and asset resolution,
+\petscmod{execution/asset\_case/runner.py} dispatches to generic route modules
+that are not on the current mainline path:
 \begin{itemize}
-\item \petscmod{cli/run\_3D\_hetero\_seepage\_capture.py} for standalone
+\item \petscmod{execution/asset\_case/seepage\_3d.py} for standalone 3D
 seepage,
-\item \petscmod{cli/run\_3D\_hetero\_seepage\_SSR\_comsol\_capture.py} for the
-coupled seepage-to-mechanics path,
+\item \petscmod{execution/asset\_case/seepage\_ssr\_3d.py} for the coupled
+seepage-to-mechanics path,
+\item \petscmod{execution/asset\_case/mechanics\_2d.py} and
+\petscmod{execution/asset\_case/seepage\_2d.py} for 2D mechanics and seepage,
 \item the limit-load branch launched through
 \code{LL\_indirect\_continuation(...)},
 \item direct SSR entry points exposed through

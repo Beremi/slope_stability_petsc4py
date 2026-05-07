@@ -1,7 +1,7 @@
 \chapter{Execution Map}
 
 This chapter follows only the committed default benchmark
-\code{benchmarks/3d\_hetero\_ssr\_default/case.toml}. In that benchmark the
+\code{benchmarks/slope\_stability\_3D\_hetero\_SSR\_default/case.toml}. In that benchmark the
 main path is:
 \[
 \text{3D hetero SSR} \rightarrow
@@ -15,9 +15,11 @@ main path is:
 For the current mainline reading path, the important settings are:
 \begin{itemize}
 \item \code{analysis = ssr},
+\item \code{asset = 3d\_hetero\_slope},
+\item \code{mesh\_variant = adaptive\_family\_a\_l1.msh},
+\item \code{profile = default},
 \item \code{method = indirect},
 \item \code{elem\_type = P4},
-\item \code{seepage = false},
 \item \code{node\_ordering = block\_metis},
 \item \code{mpi\_distribute\_by\_nodes = true},
 \item \code{constitutive\_mode = overlap},
@@ -37,11 +39,16 @@ The MATLAB reference script
 one file. The current PETSc path is the same algorithm broken into explicit
 stages:
 \begin{enumerate}
-\item \petscmod{core/run\_config.py} loads the TOML case and resolves paths.
-\item \petscmod{cli/run\_case\_from\_config.py} selects the 3D SSR runner.
-\item \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py::run\_capture} performs
-mesh preprocessing, constitutive-builder setup, solver construction, and
-continuation launch.
+\item \petscmod{cli/run\_case\_from\_config.py} receives the case config.
+\item \petscmod{core/run\_config.py} loads the TOML, derives dimension from the
+asset, and rejects legacy problem-owned fields such as raw mesh paths.
+\item \petscmod{problem\_asset\_runtime.py} resolves the asset, mesh variant,
+and profile.
+\item \petscmod{execution/asset\_case/runner.py} selects the generic 3D
+mechanics route.
+\item \petscmod{execution/asset\_case/mechanics\_3d.py::run\_capture}
+performs mesh construction, constitutive-builder setup, solver construction,
+and continuation launch.
 \item \petscmod{continuation/indirect.py::SSR\_indirect\_continuation} drives
 the branch tracking.
 \item \petscmod{nonlinear/newton.py::newton\_ind\_ssr} performs the nested
@@ -54,7 +61,9 @@ preconditioned outer Krylov solve.
 
 For the default 3D PMG benchmark, the runner sequence is:
 \begin{enumerate}
-\item load the mesh with \code{load\_mesh\_from\_file(...)},
+\item resolve asset \code{3d\_hetero\_slope} and mesh variant
+\code{adaptive\_family\_a\_l1.msh},
+\item build the promoted solver mesh from the canonical asset definition,
 \item reorder nodes with \code{reorder\_mesh\_nodes(...)} using
 \code{block\_metis},
 \item expand material rows with \code{heterogenous\_materials(...)},
@@ -83,7 +92,7 @@ MATLAB role & MATLAB location & Mainline PETSc location \\
 \midrule
 \endhead
 Case declaration & top of \matlabpkg{slope\_stability\_3D\_hetero\_SSR.m} & \code{case.toml} plus \petscmod{core/run\_config.py} \\
-Mesh and material preprocessing & script body plus \matlabpkg{+MESH/*} and \matlabpkg{+ASSEMBLY/*} & \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py}, \petscmod{mesh/*}, \petscmod{fem/*} \\
+Mesh and material preprocessing & script body plus \matlabpkg{+MESH/*} and \matlabpkg{+ASSEMBLY/*} & \petscmod{problem\_asset\_runtime.py}, \petscmod{execution/asset\_case/mechanics\_3d.py}, \petscmod{mesh/*}, \petscmod{fem/*} \\
 Constitutive handle construction & \matlabpkg{+CONSTITUTIVE\_PROBLEM/CONSTITUTIVE.m} & \petscmod{constitutive/problem.py::ConstitutiveOperator} \\
 Linear solver setup & \matlabpkg{+LINEAR\_SOLVERS/set\_linear\_solver.m} & \petscmod{linear/solver.py::SolverFactory.create} \\
 Continuation launch & \matlabpkg{+CONTINUATION/SSR\_indirect\_continuation.m} & \petscmod{continuation/indirect.py::SSR\_indirect\_continuation} \\
@@ -94,7 +103,9 @@ Continuation launch & \matlabpkg{+CONTINUATION/SSR\_indirect\_continuation.m} & 
 
 For the current mainline path, the shortest route through the PETSc code is:
 \begin{enumerate}
-\item \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py} for orchestration,
+\item \petscmod{cli/run\_case\_from\_config.py} and
+\petscmod{execution/asset\_case/runner.py} for orchestration,
+\item \petscmod{execution/asset\_case/mechanics\_3d.py} for 3D mechanics setup,
 \item \petscmod{cli/assembly\_policy.py} for the owned-path choice,
 \item \petscmod{fem/distributed\_elastic.py} and
 \petscmod{fem/distributed\_tangent.py} for matrix construction,

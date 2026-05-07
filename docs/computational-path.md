@@ -8,7 +8,7 @@ mechanics boundary conditions live in `meshes/<asset>/definition.py`.
 ## Flow
 
 1. Command:
-   `python -m slope_stability.cli.run_case_from_config benchmarks/<case>/case.toml --out_dir <dir>`
+   `./.venv/bin/python -m slope_stability.cli.run_case_from_config benchmarks/<case>/case.toml --out_dir <dir>`
    enters `src/slope_stability/cli/run_case_from_config.py`.
 2. Config load:
    `src/slope_stability/core/run_config.py` parses TOML, derives dimension from
@@ -44,9 +44,9 @@ mechanics boundary conditions live in `meshes/<asset>/definition.py`.
 Command:
 
 ```bash
-python -m slope_stability.cli.run_case_from_config \
+./.venv/bin/python -m slope_stability.cli.run_case_from_config \
   benchmarks/run_3D_hetero_seepage_SSR_comsol_capture/case.toml \
-  --out_dir /tmp/transition_ssr
+  --out_dir artifacts/examples/transition-ssr
 ```
 
 The config selects:

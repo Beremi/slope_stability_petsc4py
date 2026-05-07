@@ -15,7 +15,7 @@ generic value model or boundary-condition evaluator.
    - analysis, element type, solver, export, and notebook settings
 2. `meshes/<asset>/definition.py` exports `ASSET`.
 3. Runtime loads `ASSET`, resolves the selected mesh variant/profile, reads the canonical
-   linear Gmsh `.msh`, elevates it to `P1`, `P2`, or `P4`, maps regions to material ids,
+   linear Gmsh `.msh`, elevates it to the requested supported element order, maps regions to material ids,
    maps boundaries/nodesets to solver masks, and builds seepage arrays from declared head
    boundary conditions.
 4. Solver runners receive resolved arrays/specs only. They do not contain problem-specific
@@ -386,7 +386,7 @@ Notebook families:
 | `mesh_variant` | Optional mesh variant; defaults to the asset default. |
 | `profile` | Optional asset mechanics profile. |
 | `analysis` | `ssr`, `ll`, or `seepage`. |
-| `elem_type` | `P1`, `P2`, or `P4`. |
+| `elem_type` | 2D: `P1`, `P2`, or `P4`; 3D: `P1`, `P2`, `P3`, or `P4`. |
 | `davis_type` | Davis approach for mechanics, usually `B`. |
 
 The loader derives dimension from `asset`.

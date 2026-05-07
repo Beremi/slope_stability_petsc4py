@@ -31,6 +31,13 @@ if str(SRC_DIR) not in sys.path:
 from slope_stability.fem import available_tetra_quadrature_rules, quadrature_volume_3d
 
 
+def _repo_relative(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def _load_study(study_path: Path) -> dict:
     with study_path.open("rb") as handle:
         raw = tomllib.load(handle)
@@ -1034,7 +1041,7 @@ def _write_frames(config: dict, *, records: list[dict], curve_rows: list[dict]) 
                 "report_basename": config["report_basename"],
                 "asset": str(config["asset"]),
                 "mesh_variant": str(config["mesh_variant"]),
-                "artifact_dir": str(config["artifact_dir"]),
+                "artifact_dir": _repo_relative(Path(config["artifact_dir"])),
                 "omega_final": float(config["omega_final"]),
                 "element_types": list(config["element_types"]),
                 "quadrature_matrix": {key: list(value) for key, value in config["quadrature_matrix"].items()},
@@ -1049,7 +1056,7 @@ def _write_frames(config: dict, *, records: list[dict], curve_rows: list[dict]) 
                 "linear_solver": config["linear_solver"],
                 "execution": config["execution"],
                 "benchmark_note": (
-                    "The standard heterogeneous 3D SSR benchmark on SSR_hetero_ada_L1 reaches "
+                    "The standard heterogeneous 3D SSR benchmark on asset `3d_hetero_slope` with mesh variant `adaptive_family_a_l1.msh` reaches "
                     "omega on the order of 6.7e6 only in the indirect continuation formulation. "
                     "The earlier direct-study omega scale was therefore not the same benchmark."
                 ),

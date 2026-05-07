@@ -57,10 +57,10 @@
 {\large A chapter-by-chapter map from the original MATLAB workflow to the PETSc-based Python implementation\par}
 \vfill
 \begin{tabular}{rl}
-Repository: & \code{/home/beremi/repos/slope\_stability-1} \\
+Repository: & \code{slope\_stability} checkout \\
 Audience: & original MATLAB authors and maintainers \\
 Intent: & fastest path to locating each old concept in the PETSc codebase \\
-Date: & April 4, 2026 \\
+Date: & April 30, 2026 \\
 \end{tabular}
 \vfill
 \end{titlepage}
@@ -69,7 +69,7 @@ Date: & April 4, 2026 \\
 \chapter*{Reading Guide}
 This document is split into two parts.
 \begin{itemize}
-\item \textbf{Mainline path} follows only the committed default 3D benchmark in \code{benchmarks/3d\_hetero\_ssr\_default/case.toml}.
+\item \textbf{Mainline path} follows only the committed default 3D benchmark in \code{benchmarks/slope\_stability\_3D\_hetero\_SSR\_default/case.toml}.
 \item \textbf{Annex} collects code paths that are present in the repository but inactive in that benchmark: seepage, alternative constitutive ownership modes, legacy tangent kernels, BDDC, Hypre/GAMG backends, direct SSR, limit load, and other optional continuation features.
 \end{itemize}
 
@@ -81,7 +81,7 @@ Each chapter pair answers four questions:
 \item where to look next if the inactive or alternative code paths matter.
 \end{itemize}
 
-The reference thread throughout the mainline part is the classical 3D heterogeneous SSR case, centered on \matlabpkg{slope\_stability\_3D\_hetero\_SSR.m} and the PETSc runner \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py}, with
+The reference thread throughout the mainline part is the classical 3D heterogeneous SSR case, centered on \matlabpkg{slope\_stability\_3D\_hetero\_SSR.m} and the config-driven PETSc entrypoint \petscmod{cli/run\_case\_from\_config.py}. Internally, \petscmod{execution/asset\_case/runner.py} dispatches the resolved asset to the 3D mechanics route, with
 \code{constitutive\_mode = overlap},
 \code{tangent\_kernel = rows},
 \code{method = indirect}, and

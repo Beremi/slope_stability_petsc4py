@@ -50,14 +50,14 @@
 \code{README.md}\\
 \code{run\_config.py}\\
 \code{run\_case\_from\_config.py}\\
-\code{run\_3D\_hetero\_SSR\_capture.py}
+\code{execution/asset\_case/runner.py}
 }
 \end{column}
 \begin{column}{0.32\textwidth}
 \MetricTile{Local Docs And Studies}{
 \code{petsc\_matlab\_map}\\
-\code{config\_scheme\_3d.md}\\
-\code{config\_case\_matrix.md}\\
+\code{config-scheme-3d.md}\\
+\code{config-case-matrix.md}\\
 \code{performance\_comparison}
 }
 \end{column}
@@ -901,26 +901,26 @@ Free-mask source & Loader-specific face conventions & Less separation between ge
 \begin{columns}[T,totalwidth=\textwidth]
 \begin{column}{0.52\textwidth}
 \begin{pseudobox}
-\code{DEFINITION = \{}\\
-\code{  "name": "3d\_hetero\_ssr",}\\
-\code{  "storage": "gmsh\_tet4\_physical\_groups",}\\
-\code{  "default\_mesh": "SSR\_hetero\_ada\_L1.msh",}\\
-\code{  "dirichlet\_labels": \{...\},}\\
-\code{  "materials": [ ... ]}\\
+\code{ASSET = build\_problem\_asset\_3d(}\\
+\code{  asset\_id="3d\_hetero\_slope",}\\
+\code{  default\_variant="adaptive\_family\_a\_l1.msh",}\\
+\code{  mesh\_variants=\{...\},}\\
+\code{  mechanics=\{profiles, materials, BCs\}}\\
+\code{)}
 \code{\}}
 \end{pseudobox}
 \end{column}
 \begin{column}{0.44\textwidth}
 \begin{softbox}
 \begin{itemize}
-  \item Each mesh family can declare canonical storage, default files, boundary labels, and material rows.
-  \item The benchmark can then reference the family by mesh path and optionally inherit its material table.
-  \item This makes the mesh family a reusable asset, not just a raw file on disk.
+  \item Each asset declares mesh variants, profiles, boundary labels, materials, and hydraulics.
+  \item The case config selects the asset, mesh variant, optional profile, analysis, and solver settings.
+  \item The runtime receives reusable asset data, not problem-specific source modules.
 \end{itemize}
 \end{softbox}
 \end{column}
 \end{columns}
-\sourceline{\code{meshes/3d\_hetero\_ssr/definition.py}; \code{src/slope\_stability/problem\_assets.py}}
+\sourceline{\code{meshes/3d\_hetero\_slope/definition.py}; \code{src/slope\_stability/assets/}}
 \end{frame}
 
 \begin{frame}{Mesh Family And \code{elem\_type} Are Now Separate Concepts}
@@ -1151,7 +1151,7 @@ Constitutive law & \code{constitutive/problem.py} for stress/tangent logic and \
 Newton solve & \code{nonlinear/newton.py} for SSR and LL Newton kernels; \code{nonlinear/damping.py} for damping and Armijo logic \\
 Continuation policy & \code{continuation/indirect.py}, \code{continuation/direct.py}, and \code{continuation/limit\_load.py} \\
 Linear solver / PMG & \code{linear/solver.py} and \code{linear/pmg.py} \\
-Runner-side assembly and problem wiring & the relevant capture runner under \code{src/slope\_stability/cli/} \\
+Runner-side assembly and problem wiring & \code{execution/asset\_case/runner.py} dispatching to generic mechanics or seepage runners \\
 Postprocess / visualisation & \code{postprocess/case\_mesh.py}, \code{postprocess/field\_exports.py}, and \code{benchmarks/notebook\_support.py} \\
 \bottomrule
 \end{tabularx}
@@ -1274,10 +1274,10 @@ Read this appendix as a protocol sensitivity note, not as a replacement for the 
 \small
 \begin{enumerate}
   \item \code{docs/petsc\_matlab\_map/petsc\_to\_matlab\_solution\_map.tex}
-  \item \code{docs/config\_scheme\_3d.md}
+  \item \code{docs/config-scheme-3d.md}
   \item \code{README.md}
   \item \code{src/slope\_stability/cli/run\_case\_from\_config.py}
-  \item \code{src/slope\_stability/cli/run\_3D\_hetero\_SSR\_capture.py}
+  \item \code{src/slope\_stability/execution/asset\_case/runner.py}
   \item \code{src/slope\_stability/fem/distributed\_tangent.py}
   \item \code{src/slope\_stability/linear/solver.py}
   \item \code{benchmarks/notebook\_support.py}

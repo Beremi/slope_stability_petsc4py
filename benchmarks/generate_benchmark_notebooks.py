@@ -26,6 +26,7 @@ def _load_metadata(case_toml: Path) -> dict[str, object]:
 
     raw = tomllib.loads(case_toml.read_text(encoding="utf-8"))
     benchmark = dict(raw.get("benchmark", {}))
+    problem = dict(raw.get("problem", {}))
     notebook = dict(raw.get("notebook", {}))
     return {
         "case_dir_name": case_toml.parent.name,
@@ -33,6 +34,11 @@ def _load_metadata(case_toml: Path) -> dict[str, object]:
         "matlab_script": str(benchmark.get("matlab_script", "")),
         "comparison_kind": str(benchmark.get("comparison_kind", "")).lower(),
         "mpi_ranks": int(benchmark.get("mpi_ranks", 8)),
+        "asset": str(problem.get("asset", "")),
+        "mesh_variant": str(problem.get("mesh_variant", "")),
+        "profile": str(problem.get("profile", "default") or "default"),
+        "analysis": str(problem.get("analysis", "")),
+        "elem_type": str(problem.get("elem_type", "")),
         "family": str(notebook.get("family", "")),
         "material_palette": notebook.get("material_palette"),
         "slice_planes_x": list(notebook.get("slice_planes_x", [])),
@@ -397,18 +403,23 @@ def _family_cells(meta: dict[str, object]):
 
 
 def _common_intro_cell(meta: dict[str, object], *, role: str):
-    return _markdown_cell(
-        f"""
-        # {meta["title"]} ({role})
-
-        This notebook is generated from the shared benchmark notebook framework.
-
-        - Benchmark folder: `{meta["case_dir_name"]}`
-        - Original MATLAB driver: `{meta["matlab_script"]}`
-        - Comparison kind: `{meta["comparison_kind"]}`
-        - Notebook family: `{meta["family"]}`
-        """
-    )
+    lines = [
+        f"# {meta['title']} ({role})",
+        "",
+        "This notebook uses the shared benchmark notebook workflow for a config-driven run.",
+        "",
+        f"- Case config: `benchmarks/{meta['case_dir_name']}/case.toml`",
+        f"- Asset: `{meta['asset']}`",
+        f"- Mesh variant: `{meta['mesh_variant']}`",
+        f"- Profile: `{meta['profile']}`",
+        f"- Analysis: `{meta['analysis']}`",
+        f"- Element order: `{meta['elem_type']}`",
+        f"- Comparison kind: `{meta['comparison_kind']}`",
+        f"- Notebook family: `{meta['family']}`",
+    ]
+    if meta["matlab_script"]:
+        lines.append(f"- Reference MATLAB driver: `{meta['matlab_script']}`")
+    return _markdown_cell("\n".join(lines))
 
 
 def build_simulation_notebook(case_toml: Path):
@@ -426,7 +437,7 @@ def build_simulation_notebook(case_toml: Path):
             ## Editable Runtime Sections
 
             Modify values directly in `sections` or `materials`, then rerun the config-write and solver cells below.
-            Generated notebook configs and notebook-local solver artifacts are written under
+            Notebook configs and notebook-local solver artifacts are written under
             `artifacts/<run_label>/` inside this benchmark folder.
             """
         ),
@@ -439,7 +450,7 @@ def build_simulation_notebook(case_toml: Path):
             """
             ## Next Step
 
-            Open `visualisation.ipynb` to inspect the generated VTU fields, continuation history, and MATLAB-style plots.
+            Open `visualisation.ipynb` to inspect the VTU fields, continuation history, and MATLAB-style plots.
             """
         ),
     ]

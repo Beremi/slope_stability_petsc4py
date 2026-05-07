@@ -22,7 +22,7 @@
 - Target: 1 minute.
 - Key message: three source layers are used, and each answers a different question.
 - Point at visually: legacy MATLAB entry points, PETSc runtime entry points, and local docs/studies.
-- Fallback detail: the architecture anchor is the default `3d_hetero_ssr` `P4` benchmark; timing claims later come from the committed `P2` study.
+- Fallback detail: the architecture anchor is the default `3d_hetero_slope` `P4` benchmark; timing claims later come from the committed `P2` study.
 
 ## Slide 04. Section Divider: MATLAB Baseline
 - Target: 20 seconds.
@@ -256,7 +256,7 @@
 - Target: 1.5 minutes.
 - Key message: geometry/material family selection and FE degree selection are now different decisions.
 - Point at visually: the concept table.
-- Fallback detail: this is the cleanest contrast with the MATLAB `P2`-centric mesh path.
+- Fallback detail: this is the cleanest contrast with the MATLAB `P2`-centric mesh workflow.
 
 ## Slide 44. Boundary Tags, Material Tags, And Reordering Stay Explicit
 - Target: 1.5 minutes.
@@ -332,7 +332,7 @@
 - Target: 2 minutes.
 - Key message: the main numerical behavior is concentrated enough that adaptation does not require reading the whole repository.
 - Point at visually: constitutive, Newton, continuation, linear solver/PMG, runner wiring, and postprocess rows.
-- Fallback detail: the `cli/` capture runners are where benchmark-side wiring and algorithm modules meet.
+- Fallback detail: `run_case_from_config` and the asset-case runner are where benchmark-side wiring and algorithm modules meet.
 
 ## Slide 57. Final Summary
 - Target: 1 minute.

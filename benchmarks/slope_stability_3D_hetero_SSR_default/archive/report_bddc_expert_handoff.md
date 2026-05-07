@@ -38,16 +38,15 @@ What still fails:
 
 ## Relevant Code Paths
 
-Main source changes relevant to this handoff:
+Main source paths relevant to this archived expert brief:
 
-- [solver.py](../../src/slope_stability/linear/solver.py)
-- [problem.py](../../src/slope_stability/constitutive/problem.py)
-- [distributed_tangent.py](../../src/slope_stability/fem/distributed_tangent.py)
-- [utils.py](../../src/slope_stability/utils.py)
-- [run_3D_hetero_SSR_capture.py](../../src/slope_stability/cli/run_3D_hetero_SSR_capture.py)
-- [run_case_from_config.py](../../src/slope_stability/cli/run_case_from_config.py)
-- [config.py](../../src/slope_stability/core/config.py)
-- [run_config.py](../../src/slope_stability/core/run_config.py)
+- [solver.py](../../../src/slope_stability/linear/solver.py)
+- [problem.py](../../../src/slope_stability/constitutive/problem.py)
+- [distributed_tangent.py](../../../src/slope_stability/fem/distributed_tangent.py)
+- [utils.py](../../../src/slope_stability/utils.py)
+- [run_case_from_config.py](../../../src/slope_stability/cli/run_case_from_config.py)
+- [asset_case/runner.py](../../../src/slope_stability/execution/asset_case/runner.py)
+- [run_config.py](../../../src/slope_stability/core/run_config.py)
 
 Benchmark and probe scripts:
 
@@ -56,13 +55,13 @@ Benchmark and probe scripts:
 
 Relevant tests:
 
-- [test_solver_preconditioner_policies.py](../../tests/test_solver_preconditioner_policies.py)
-- [test_petsc_matis_bddc_helpers.py](../../tests/test_petsc_matis_bddc_helpers.py)
-- [test_preconditioner_mpi.py](../../tests/test_preconditioner_mpi.py)
-- [test_probe_bddc_elastic.py](../../tests/test_probe_bddc_elastic.py)
-- [test_compare_preconditioners.py](../../tests/test_compare_preconditioners.py)
-- [mpi_bddc_overlap_check.py](../../tests/mpi_bddc_overlap_check.py)
-- [mpi_preconditioner_linear_check.py](../../tests/mpi_preconditioner_linear_check.py)
+- [test_solver_preconditioner_policies.py](../../../tests/test_solver_preconditioner_policies.py)
+- [test_petsc_matis_bddc_helpers.py](../../../tests/test_petsc_matis_bddc_helpers.py)
+- [test_preconditioner_mpi.py](../../../tests/test_preconditioner_mpi.py)
+- [test_probe_bddc_elastic.py](../../../tests/test_probe_bddc_elastic.py)
+- [test_compare_preconditioners.py](../../../tests/test_compare_preconditioners.py)
+- [mpi_bddc_overlap_check.py](../../../tests/mpi_bddc_overlap_check.py)
+- [mpi_preconditioner_linear_check.py](../../../tests/mpi_preconditioner_linear_check.py)
 
 ## Important Fixes Already Applied
 
@@ -321,8 +320,8 @@ This passed with:
 
 Additional BDDC-related tests also exist in the tree and were used earlier in the cycle:
 
-- [test_preconditioner_mpi.py](../../tests/test_preconditioner_mpi.py)
-- [test_solver_preconditioner_policies.py](../../tests/test_solver_preconditioner_policies.py)
+- [test_preconditioner_mpi.py](../../../tests/test_preconditioner_mpi.py)
+- [test_solver_preconditioner_policies.py](../../../tests/test_solver_preconditioner_policies.py)
 
 ## Recommended Next Experiment For The Expert
 

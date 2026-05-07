@@ -36,6 +36,66 @@ def _free_dot(a: np.ndarray, b: np.ndarray, Q: np.ndarray) -> float:
     return float(np.dot(_free(a, Q), _free(b, Q)))
 
 
+def _fmt_init_value(value: object) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(numeric):
+        return "n/a"
+    return f"{numeric:.6g}"
+
+
+def _last_history_value(history: dict[str, object], key: str) -> float | None:
+    if not history or key not in history:
+        return None
+    arr = np.asarray(history[key], dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        return None
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return None
+    return float(finite[-1])
+
+
+def _newton_with_optional_history(*args, **kwargs):
+    kwargs.setdefault("return_history", True)
+    result = newton(*args, **kwargs)
+    if len(result) == 4:
+        return result
+    U_it, flag_N, it_newt = result
+    return U_it, flag_N, it_newt, {}
+
+
+def _init_failure_message(
+    summary: str,
+    *,
+    stage: str,
+    configured_lambda_init: float,
+    configured_d_lambda_init: float,
+    d_lambda_min: float,
+    attempts: list[dict[str, float | int | None]],
+    next_d_lambda: float,
+) -> str:
+    last = attempts[-1] if attempts else {}
+    attempted = ", ".join(_fmt_init_value(item.get("lambda")) for item in attempts)
+    return (
+        f"{summary} "
+        f"(stage={stage}; configured_lambda_init={_fmt_init_value(configured_lambda_init)}; "
+        f"configured_d_lambda_init={_fmt_init_value(configured_d_lambda_init)}; "
+        f"d_lambda_min={_fmt_init_value(d_lambda_min)}; attempts={len(attempts)}; "
+        f"attempted_lambdas=[{attempted}]; "
+        f"last_lambda={_fmt_init_value(last.get('lambda'))}; "
+        f"last_d_lambda={_fmt_init_value(last.get('d_lambda'))}; "
+        f"next_d_lambda={_fmt_init_value(next_d_lambda)}; "
+        f"last_newton_flag={_fmt_init_value(last.get('flag'))}; "
+        f"last_newton_iterations={_fmt_init_value(last.get('iterations'))}; "
+        f"last_rel_residual={_fmt_init_value(last.get('last_rel_residual'))})"
+    )
+
+
 def _destroy_petsc_mat(A) -> None:
     if PETSc is not None and isinstance(A, PETSc.Mat):
         release_petsc_aij_matrix(A)
@@ -1666,6 +1726,8 @@ def init_phase_SSR_indirect_continuation(
     )
     init_stop_tol = default_init_stop_tol if init_newton_stopping_tol is None else init_newton_stopping_tol
     init_attempt = 0
+    seed_attempts: list[dict[str, float | int | None]] = []
+    advance_attempts: list[dict[str, float | int | None]] = []
 
     def _init_progress(stage: str, lambda_before: float, omega_target: float | None = None):
         if progress_callback is None:
@@ -1690,7 +1752,7 @@ def init_phase_SSR_indirect_continuation(
         init_attempt += 1
         constitutive_matrix_builder.reduction(lambda1)
         basis_before_attempt = _basis_snapshot(linear_system_solver)
-        U_it, flag_N, it_newt = newton(
+        U_it, flag_N, it_newt, newton_history = _newton_with_optional_history(
             U_ini,
             tol,
             it_newt_max,
@@ -1706,13 +1768,32 @@ def init_phase_SSR_indirect_continuation(
             stopping_tol=init_stop_tol,
         )
         all_newton_its.append(it_newt)
+        seed_attempts.append(
+            {
+                "lambda": float(lambda1),
+                "d_lambda": float(d_lambda),
+                "flag": int(flag_N),
+                "iterations": int(it_newt),
+                "last_rel_residual": _last_history_value(newton_history, "residual"),
+            }
+        )
         if flag_N == 0:
             break
         _basis_restore(linear_system_solver, basis_before_attempt)
         lambda1 *= 0.5
         d_lambda *= 0.5
         if d_lambda < d_lambda_min:
-            raise RuntimeError("Initial choice of lambda seems to be too large.")
+            raise RuntimeError(
+                _init_failure_message(
+                    "Initial choice of lambda seems to be too large.",
+                    stage="seed",
+                    configured_lambda_init=float(lambda_init),
+                    configured_d_lambda_init=float(d_lambda_init),
+                    d_lambda_min=float(d_lambda_min),
+                    attempts=seed_attempts,
+                    next_d_lambda=float(d_lambda),
+                )
+            )
 
     U1 = U_it
     omega1 = _free_dot(f, U1, Q)
@@ -1726,7 +1807,7 @@ def init_phase_SSR_indirect_continuation(
         constitutive_matrix_builder.reduction(lambda_it)
         basis_before_attempt = _basis_snapshot(linear_system_solver)
 
-        U_it, flag_N, it_newt = newton(
+        U_it, flag_N, it_newt, newton_history = _newton_with_optional_history(
             U1,
             tol,
             it_newt_max,
@@ -1742,6 +1823,15 @@ def init_phase_SSR_indirect_continuation(
             stopping_tol=init_stop_tol,
         )
         all_newton_its.append(it_newt)
+        advance_attempts.append(
+            {
+                "lambda": float(lambda_it),
+                "d_lambda": float(d_lambda),
+                "flag": int(flag_N),
+                "iterations": int(it_newt),
+                "last_rel_residual": _last_history_value(newton_history, "residual"),
+            }
+        )
 
         if flag_N == 1:
             _basis_restore(linear_system_solver, basis_before_attempt)
@@ -1758,7 +1848,17 @@ def init_phase_SSR_indirect_continuation(
                 break
 
         if d_lambda < d_lambda_min:
-            raise RuntimeError("It seems that the FoS is equal to lambda_init.")
+            raise RuntimeError(
+                _init_failure_message(
+                    "It seems that the FoS is equal to lambda_init.",
+                    stage="advance",
+                    configured_lambda_init=float(lambda_init),
+                    configured_d_lambda_init=float(d_lambda_init),
+                    d_lambda_min=float(d_lambda_min),
+                    attempts=advance_attempts,
+                    next_d_lambda=float(d_lambda),
+                )
+            )
         if lambda1 > 10.0:
             raise RuntimeError("It seems that the FoS is greater than 10.")
 

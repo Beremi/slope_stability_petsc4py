@@ -8,10 +8,13 @@ one global elastic matrix.
 
 \section{Mainline Preprocessing Sequence}
 
-For the committed 3D benchmark, \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py}
-performs the following sequence:
+For the committed 3D benchmark, \petscmod{execution/asset\_case/mechanics\_3d.py}
+receives the asset-resolved mesh and problem data through
+\petscmod{execution/asset\_case/runner.py}. The sequence is:
 \begin{enumerate}
-\item load the Gmsh mesh through \code{load\_mesh\_from\_file(...)},
+\item resolve \code{3d\_hetero\_slope} and \code{adaptive\_family\_a\_l1.msh}
+from \code{case.toml},
+\item build the canonical Gmsh mesh through the asset API,
 \item reorder nodes with \code{block\_metis},
 \item compute \code{n\_q} from \code{quadrature\_volume\_3d(elem\_type)},
 \item expand material rows over integration points through
@@ -96,7 +99,7 @@ because it is not the default parallel PMG route.
 \item \petscmod{mesh/reorder.py} for ownership-oriented numbering,
 \item \petscmod{mesh/materials.py} for integration-point material expansion,
 \item \petscmod{fem/distributed\_elastic.py} for the owned elastic precursor,
-\item \petscmod{cli/run\_3D\_hetero\_SSR\_capture.py} for the exact mainline
+\item \petscmod{execution/asset\_case/mechanics\_3d.py} for the exact mainline
 assembly order.
 \end{itemize}
 

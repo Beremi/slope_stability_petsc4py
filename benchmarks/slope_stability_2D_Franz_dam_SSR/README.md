@@ -1,12 +1,6 @@
 # 2D Franz dam SSR
 
-This program solves a 2D slope stability problem by the modified shear strength reduction
-(SSR) method described in (Sysala et al., CAS 2025). The Mohr-Coulomb yield criterion, 3
-Davis approaches (denoted by A, B, C), standard finite elements (P1, P2 or P4 elements) and
-meshes with different densities are considered. For P2 elements, the 7-point Gauss
-quadrature is used. To find the safety factor of the SSR method, two continuation techniques
-are available: direct and indirect. A bechmark problem on a high heterogeneous embankment
-dam with unconfined seepage is considered, see (Sysala et al., CAS 2023).
+This 2D case runs a config-driven shear strength reduction (SSR) analysis using asset `2d_franz_dam` and mesh variant `default.msh`.
 
 ## Run
 
@@ -14,18 +8,17 @@ dam with unconfined seepage is considered, see (Sysala et al., CAS 2023).
 ./run.sh
 ```
 
-## Source
+## Case Inputs
 
-- MATLAB driver: `slope_stability_2D_Franz_dam_SSR.m`
-- PETSc config: [`case.toml`](case.toml)
-
-## Asset Definition
-
+- Case config: [`case.toml`](case.toml)
 - Asset: `2d_franz_dam`
 - Mesh variant: `default.msh`
-- Profile: default
+- Profile: `default`
 - Analysis: `ssr`
-- Element: `P2`
+- Element order: `P2`
 
-Geometry, materials, hydraulics, and boundary conditions are defined in
-[`../../meshes/2d_franz_dam/definition.py`](../../meshes/2d_franz_dam/definition.py).
+Geometry, materials, hydraulic behavior, and boundary conditions are defined in [`../../meshes/2d_franz_dam/definition.py`](../../meshes/2d_franz_dam/definition.py).
+
+## Reference
+
+- MATLAB driver: `slope_stability_2D_Franz_dam_SSR.m`
