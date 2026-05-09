@@ -474,7 +474,7 @@ def _build_owned_row_structural_pattern(
         indices_chunks.append(cols_arr)
         indptr[local_row + 1] = indptr[local_row] + cols_arr.size
     indices = np.concatenate(indices_chunks) if indices_chunks else np.empty(0, dtype=np.int32)
-    data = np.ones(indices.size, dtype=np.float64)
+    data = np.ones(indices.size, dtype=bool)
     return csr_matrix((data, indices, indptr), shape=(n_local_rows, global_dofs))
 
 
@@ -507,7 +507,7 @@ def _build_local_square_structural_pattern(
         indices_chunks.append(cols_arr)
         indptr[row_local + 1] = indptr[row_local] + cols_arr.size
     indices = np.concatenate(indices_chunks) if indices_chunks else np.empty(0, dtype=np.int32)
-    data = np.ones(indices.size, dtype=np.float64)
+    data = np.ones(indices.size, dtype=bool)
     return csr_matrix((data, indices, indptr), shape=(local_dofs, local_dofs))
 
 
@@ -1324,7 +1324,7 @@ def prepare_bddc_subdomain_pattern(
     if local_elements.size:
         _c0, _phi, _psi, shear, bulk, lame, _gamma = heterogenous_materials(
             material_identifier[local_elements],
-            np.ones(asm.n_int, dtype=bool),
+            True,
             asm.n_q,
             materials,
         )

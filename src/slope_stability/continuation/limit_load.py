@@ -79,6 +79,8 @@ def LL_indirect_continuation(
     constitutive_matrix_builder,
     linear_system_solver,
     progress_callback: Callable[[dict], None] | None = None,
+    *,
+    store_step_u: bool = True,
 ):
     """Limit-load continuation (indirect) for ``F(U) = t f`` and ``f'U = omega``."""
 
@@ -123,7 +125,7 @@ def LL_indirect_continuation(
         "step_linear_orthogonalization_time": [],
         "step_lambda": [],
         "step_omega": [],
-        "step_U": [U.copy()],
+        "step_U": [U.copy()] if store_step_u else [],
         "total_wall_time": 0.0,
     }
 
@@ -306,7 +308,8 @@ def LL_indirect_continuation(
             stats["step_linear_orthogonalization_time"].append(float(step_orth_accum))
             stats["step_lambda"].append(float(t))
             stats["step_omega"].append(float(omega))
-            stats["step_U"].append(U.copy())
+            if store_step_u:
+                stats["step_U"].append(U.copy())
 
             _emit(
                 "step_accepted",

@@ -183,6 +183,20 @@ def test_cached_regularized_fallback_ignores_missing_cached_tangent() -> None:
     assert newton_module._build_regularized_from_cached_if_available(builder, 1.0e-4) is None
 
 
+def test_cached_regularized_fallback_ignores_owned_only_builder_without_owned_pattern() -> None:
+    class _NoOwnedPatternBuilder:
+        def build_K_regularized(self, r):
+            raise RuntimeError("Regularized in-place matrix path requires owned_tangent_pattern")
+
+        def build_F_K_regularized_all(self, lam, U, r):
+            raise RuntimeError("Regularized in-place matrix path requires owned_tangent_pattern")
+
+    builder = _NoOwnedPatternBuilder()
+
+    assert newton_module._build_regularized_from_cached_if_available(builder, 1.0e-4) is None
+    assert newton_module._build_regularized_if_available(builder, lam=1.0, U=np.zeros((1, 1)), r=1.0e-4) is None
+
+
 def test_newton_ind_ssr_applies_first_iteration_warm_start_then_restores_basis(monkeypatch) -> None:
     observed_basis: list[np.ndarray] = []
 

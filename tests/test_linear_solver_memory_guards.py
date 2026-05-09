@@ -66,6 +66,41 @@ def test_petsc_solver_zero_max_deflation_disables_recycling_and_orthogonalizatio
     assert solver.deflation_basis.shape == (q_mask.size, 0)
 
 
+def test_matlab_deflated_solver_expands_free_basis_into_owned_rows(monkeypatch) -> None:
+    q_mask = np.array([[True, False, True], [True, True, False]], dtype=bool)
+    solver = PetscMatlabExactDFGMRESSolver(
+        pc_type="HYPRE",
+        q_mask=q_mask,
+        coord=np.zeros((2, 3), dtype=np.float64),
+        preconditioner_options={"max_deflation_basis_vectors": 2},
+    )
+    solver._using_full_system = True
+    solver._ownership_range = (0, 3)
+
+    class _DummyMat:
+        def getSize(self):
+            return (q_mask.size, q_mask.size)
+
+    solver._A_petsc = _DummyMat()
+    monkeypatch.setattr(solver, "_distributed_local_projector_active", lambda A_ref=None: True)
+
+    solver.expand_deflation_basis(np.array([10.0, 11.0, 12.0, 13.0], dtype=np.float64))
+    snapshot = solver.get_deflation_basis_snapshot()
+    solver.expand_deflation_basis(np.array([20.0, 21.0, 22.0, 23.0], dtype=np.float64))
+    solver.expand_deflation_basis(np.array([30.0, 31.0, 32.0, 33.0], dtype=np.float64))
+
+    assert solver._deflation_basis_is_local is True
+    assert solver.deflation_basis.shape == (3, 2)
+    assert np.allclose(solver.deflation_basis[:, 0], np.array([20.0, 21.0, 0.0]))
+    assert np.allclose(solver.deflation_basis[:, 1], np.array([30.0, 31.0, 0.0]))
+
+    solver.restore_deflation_basis(snapshot)
+
+    assert solver._deflation_basis_is_local is True
+    assert solver.deflation_basis.shape == (3, 1)
+    assert np.allclose(solver.deflation_basis[:, 0], np.array([10.0, 11.0, 0.0]))
+
+
 def test_pmg_shell_apply_timing_does_not_force_full_manualmg_diagnostics() -> None:
     q_mask = np.array([[True, True], [True, True], [True, True]], dtype=bool)
     solver = PetscKSPFGMRESSolver(

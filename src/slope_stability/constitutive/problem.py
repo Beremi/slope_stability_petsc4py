@@ -1276,8 +1276,20 @@ class ConstitutiveOperator:
         self._owned_overlap_sin_phi = None
         self._owned_unique_c_bar = None
         self._owned_unique_sin_phi = None
+        self._owned_overlap_materials = None
+        self._owned_unique_materials = None
 
-        # Precompute sparse assembly helpers.
+        # Sparse assembly helpers for the legacy global B.T @ D @ B path.  Large
+        # distributed runs attach an owned_tangent_pattern after construction and
+        # never use these arrays, so keep them lazy to avoid multi-GiB setup peaks.
+        self.AUX = None
+        self.iD = None
+        self.jD = None
+        self.vD_pre = None
+
+    def _ensure_global_sparse_helpers(self) -> None:
+        if self.iD is not None and self.jD is not None and self.vD_pre is not None:
+            return
         aux = np.arange(self.n_strain * self.n_int).reshape(self.n_strain, self.n_int, order="F")
         self.AUX = aux
         self.iD = np.tile(aux, (self.n_strain, 1))
@@ -1304,6 +1316,7 @@ class ConstitutiveOperator:
         self.owned_tangent_kernel = str(tangent_kernel).lower()
         self.use_compiled_owned_constitutive = bool(use_compiled_constitutive)
         self.owned_constitutive_mode = str(constitutive_mode).lower()
+        self._prepare_owned_material_arrays()
         self.release_petsc_caches()
 
     def set_bddc_subdomain_pattern(self, pattern: BDDCSubdomainPattern | None) -> None:
@@ -1329,6 +1342,33 @@ class ConstitutiveOperator:
         self._owned_overlap_sin_phi = None
         self._owned_unique_c_bar = None
         self._owned_unique_sin_phi = None
+
+    def _prepare_owned_material_arrays(self) -> None:
+        pattern = self.owned_tangent_pattern
+        if pattern is None or str(self.owned_constitutive_mode).lower() == "global":
+            self._owned_overlap_materials = None
+            self._owned_unique_materials = None
+            return
+
+        material_arrays = (self.c0, self.phi, self.psi, self.shear, self.bulk, self.lame)
+        overlap_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
+        self._owned_overlap_materials = tuple(np.asarray(arr[overlap_idx], dtype=np.float64) for arr in material_arrays)
+
+        unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
+        if unique_idx.size:
+            self._owned_unique_materials = tuple(np.asarray(arr[unique_idx], dtype=np.float64) for arr in material_arrays)
+        else:
+            self._owned_unique_materials = tuple(np.empty(0, dtype=np.float64) for _ in material_arrays)
+
+        if self.B is None:
+            empty = np.empty(0, dtype=np.float64)
+            self.c0 = empty
+            self.phi = empty
+            self.psi = empty
+            self.shear = empty
+            self.bulk = empty
+            self.lame = empty
+            self.WEIGHT = empty
 
     def _use_owned_constitutive(self) -> bool:
         return (
@@ -1358,14 +1398,18 @@ class ConstitutiveOperator:
                 raise ValueError("Material reduction not set. Call reduction(lambda) first.")
             c_bar_local = np.asarray(self.c_bar[local_idx], dtype=np.float64)
             sin_phi_local = np.asarray(self.sin_phi[local_idx], dtype=np.float64)
+        overlap_materials = self._owned_overlap_materials
+        shear_local = overlap_materials[3] if overlap_materials is not None else self.shear[local_idx]
+        bulk_local = overlap_materials[4] if overlap_materials is not None else self.bulk[local_idx]
+        lame_local = overlap_materials[5] if overlap_materials is not None else self.lame[local_idx]
         if return_tangent:
             S_local, DS_local = _batch_constitutive_problem_local(
                 E_local,
                 c_bar_local,
                 sin_phi_local,
-                self.shear[local_idx],
-                self.bulk[local_idx],
-                self.lame[local_idx],
+                shear_local,
+                bulk_local,
+                lame_local,
                 dim=self.dim,
                 return_tangent=True,
                 use_compiled=self.use_compiled_owned_constitutive,
@@ -1376,9 +1420,9 @@ class ConstitutiveOperator:
                 E_local,
                 c_bar_local,
                 sin_phi_local,
-                self.shear[local_idx],
-                self.bulk[local_idx],
-                self.lame[local_idx],
+                shear_local,
+                bulk_local,
+                lame_local,
                 dim=self.dim,
                 return_tangent=False,
                 use_compiled=self.use_compiled_owned_constitutive,
@@ -1414,14 +1458,18 @@ class ConstitutiveOperator:
                 raise ValueError("Material reduction not set. Call reduction(lambda) first.")
             c_bar_unique = np.asarray(self.c_bar[unique_idx], dtype=np.float64)
             sin_phi_unique = np.asarray(self.sin_phi[unique_idx], dtype=np.float64)
+        unique_materials = self._owned_unique_materials
+        shear_unique = unique_materials[3] if unique_materials is not None else self.shear[unique_idx]
+        bulk_unique = unique_materials[4] if unique_materials is not None else self.bulk[unique_idx]
+        lame_unique = unique_materials[5] if unique_materials is not None else self.lame[unique_idx]
         if return_tangent:
             S_unique, DS_unique = _batch_constitutive_problem_local(
                 E_unique,
                 c_bar_unique,
                 sin_phi_unique,
-                self.shear[unique_idx],
-                self.bulk[unique_idx],
-                self.lame[unique_idx],
+                shear_unique,
+                bulk_unique,
+                lame_unique,
                 dim=self.dim,
                 return_tangent=True,
                 use_compiled=self.use_compiled_owned_constitutive,
@@ -1431,9 +1479,9 @@ class ConstitutiveOperator:
                 E_unique,
                 c_bar_unique,
                 sin_phi_unique,
-                self.shear[unique_idx],
-                self.bulk[unique_idx],
-                self.lame[unique_idx],
+                shear_unique,
+                bulk_unique,
+                lame_unique,
                 dim=self.dim,
                 return_tangent=False,
                 use_compiled=self.use_compiled_owned_constitutive,
@@ -1498,14 +1546,18 @@ class ConstitutiveOperator:
                 raise ValueError("Material reduction not set. Call reduction(lambda) first.")
             c_bar_unique = np.asarray(self.c_bar[unique_idx], dtype=np.float64)
             sin_phi_unique = np.asarray(self.sin_phi[unique_idx], dtype=np.float64)
+        unique_materials = self._owned_unique_materials
+        shear_unique = unique_materials[3] if unique_materials is not None else self.shear[unique_idx]
+        bulk_unique = unique_materials[4] if unique_materials is not None else self.bulk[unique_idx]
+        lame_unique = unique_materials[5] if unique_materials is not None else self.lame[unique_idx]
         if return_tangent:
             S_unique, DS_unique = _batch_constitutive_problem_local(
                 E_unique,
                 c_bar_unique,
                 sin_phi_unique,
-                self.shear[unique_idx],
-                self.bulk[unique_idx],
-                self.lame[unique_idx],
+                shear_unique,
+                bulk_unique,
+                lame_unique,
                 dim=self.dim,
                 return_tangent=True,
                 use_compiled=self.use_compiled_owned_constitutive,
@@ -1516,9 +1568,9 @@ class ConstitutiveOperator:
                 E_unique,
                 c_bar_unique,
                 sin_phi_unique,
-                self.shear[unique_idx],
-                self.bulk[unique_idx],
-                self.lame[unique_idx],
+                shear_unique,
+                bulk_unique,
+                lame_unique,
                 dim=self.dim,
                 return_tangent=False,
                 use_compiled=self.use_compiled_owned_constitutive,
@@ -1571,9 +1623,11 @@ class ConstitutiveOperator:
         )
         tang = np.asarray(tang, dtype=np.float64)
         if self._owned_tangent_values is None or self._owned_tangent_values.shape != tang.shape:
-            self._owned_tangent_values = np.empty_like(tang)
-        values = self._owned_tangent_values
-        np.copyto(values, tang)
+            self._owned_tangent_values = tang
+            values = tang
+        else:
+            values = self._owned_tangent_values
+            np.copyto(values, tang)
         self.time_build_tangent_local.append(perf_counter() - t0)
 
         if self._owned_tangent_indptr is None:
@@ -1586,7 +1640,7 @@ class ConstitutiveOperator:
             from scipy.sparse import csr_matrix
 
             local_matrix = csr_matrix(
-                (np.array(values, dtype=np.float64, copy=True), self._owned_tangent_indices, self._owned_tangent_indptr),
+                (values, self._owned_tangent_indices, self._owned_tangent_indptr),
                 shape=pattern.local_matrix_pattern.shape,
             )
             self._owned_tangent_mat = local_csr_to_petsc_aij_matrix(
@@ -1620,9 +1674,11 @@ class ConstitutiveOperator:
         )
         tang = np.asarray(tang, dtype=np.float64)
         if self._owned_regularized_values is None or self._owned_regularized_values.shape != tang.shape:
-            self._owned_regularized_values = np.empty_like(tang)
-        values = self._owned_regularized_values
-        np.copyto(values, tang)
+            self._owned_regularized_values = tang
+            values = tang
+        else:
+            values = self._owned_regularized_values
+            np.copyto(values, tang)
         values *= 1.0 - float(r)
         values += float(r) * np.asarray(pattern.elastic_values, dtype=np.float64)
         self.time_build_tangent_local.append(perf_counter() - t0)
@@ -1637,7 +1693,7 @@ class ConstitutiveOperator:
             from scipy.sparse import csr_matrix
 
             local_matrix = csr_matrix(
-                (np.array(values, dtype=np.float64, copy=True), self._owned_regularized_indices, self._owned_regularized_indptr),
+                (values, self._owned_regularized_indices, self._owned_regularized_indptr),
                 shape=pattern.local_matrix_pattern.shape,
             )
             self._owned_regularized_mat = local_csr_to_petsc_aij_matrix(
@@ -1734,9 +1790,11 @@ class ConstitutiveOperator:
         )
         tang = np.asarray(tang, dtype=np.float64)
         if self._bddc_tangent_values is None or self._bddc_tangent_values.shape != tang.shape:
-            self._bddc_tangent_values = np.empty_like(tang)
-        values = self._bddc_tangent_values
-        np.copyto(values, tang)
+            self._bddc_tangent_values = tang
+            values = tang
+        else:
+            values = self._bddc_tangent_values
+            np.copyto(values, tang)
         self.time_build_tangent_local.append(perf_counter() - t0)
 
         if self._bddc_tangent_indptr is None:
@@ -1749,7 +1807,7 @@ class ConstitutiveOperator:
             from scipy.sparse import csr_matrix
 
             local_matrix = csr_matrix(
-                (np.array(values, dtype=np.float64, copy=True), self._bddc_tangent_indices, self._bddc_tangent_indptr),
+                (values, self._bddc_tangent_indices, self._bddc_tangent_indptr),
                 shape=pattern.local_matrix_pattern.shape,
             )
             local_vector_size = int(self.dim * (int(pattern.owned_node_range[1]) - int(pattern.owned_node_range[0])))
@@ -1794,7 +1852,7 @@ class ConstitutiveOperator:
             from scipy.sparse import csr_matrix
 
             local_matrix = csr_matrix(
-                (np.array(self._bddc_elastic_values, dtype=np.float64, copy=True), self._bddc_elastic_indices, self._bddc_elastic_indptr),
+                (self._bddc_elastic_values, self._bddc_elastic_indices, self._bddc_elastic_indptr),
                 shape=pattern.local_matrix_pattern.shape,
             )
             local_vector_size = int(self.dim * (int(pattern.owned_node_range[1]) - int(pattern.owned_node_range[0])))
@@ -1825,9 +1883,11 @@ class ConstitutiveOperator:
         )
         tang = np.asarray(tang, dtype=np.float64)
         if self._bddc_regularized_values is None or self._bddc_regularized_values.shape != tang.shape:
-            self._bddc_regularized_values = np.empty_like(tang)
-        values = self._bddc_regularized_values
-        np.copyto(values, tang)
+            self._bddc_regularized_values = tang
+            values = tang
+        else:
+            values = self._bddc_regularized_values
+            np.copyto(values, tang)
         values *= 1.0 - float(r)
         values += float(r) * np.asarray(pattern.elastic_values, dtype=np.float64)
         self.time_build_tangent_local.append(perf_counter() - t0)
@@ -1841,7 +1901,7 @@ class ConstitutiveOperator:
             from scipy.sparse import csr_matrix
 
             local_matrix = csr_matrix(
-                (np.array(values, dtype=np.float64, copy=True), self._bddc_regularized_indices, self._bddc_regularized_indptr),
+                (values, self._bddc_regularized_indices, self._bddc_regularized_indptr),
                 shape=pattern.local_matrix_pattern.shape,
             )
             local_vector_size = int(self.dim * (int(pattern.owned_node_range[1]) - int(pattern.owned_node_range[0])))
@@ -1884,19 +1944,33 @@ class ConstitutiveOperator:
             if pattern is None:
                 raise ValueError("Owned tangent pattern not configured")
             local_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
+            overlap_materials = self._owned_overlap_materials
+            if overlap_materials is not None:
+                c0_overlap, phi_overlap, psi_overlap = overlap_materials[:3]
+            else:
+                c0_overlap = self.c0[local_idx]
+                phi_overlap = self.phi[local_idx]
+                psi_overlap = self.psi[local_idx]
             self._owned_overlap_c_bar, self._owned_overlap_sin_phi = reduction(
-                self.c0[local_idx],
-                self.phi[local_idx],
-                self.psi[local_idx],
+                c0_overlap,
+                phi_overlap,
+                psi_overlap,
                 lam,
                 self.Davis_type,
             )
             unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
             if unique_idx.size:
+                unique_materials = self._owned_unique_materials
+                if unique_materials is not None:
+                    c0_unique, phi_unique, psi_unique = unique_materials[:3]
+                else:
+                    c0_unique = self.c0[unique_idx]
+                    phi_unique = self.phi[unique_idx]
+                    psi_unique = self.psi[unique_idx]
                 self._owned_unique_c_bar, self._owned_unique_sin_phi = reduction(
-                    self.c0[unique_idx],
-                    self.phi[unique_idx],
-                    self.psi[unique_idx],
+                    c0_unique,
+                    phi_unique,
+                    psi_unique,
                     lam,
                     self.Davis_type,
                 )
@@ -2029,6 +2103,7 @@ class ConstitutiveOperator:
         if self.owned_tangent_pattern is not None:
             K_tangent = self._build_owned_tangent_matrix()
         else:
+            self._ensure_global_sparse_helpers()
             vD = self.vD_pre * self.DS.ravel(order="F")
             D = csc_matrix(
                 (vD, (self.iD.ravel(order="F"), self.jD.ravel(order="F"))),

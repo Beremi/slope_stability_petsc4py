@@ -244,6 +244,85 @@ def a_orthogonalize_with_local_metadata(
     return kept_cols[:, ::-1], kept_norms[::-1], kept_source_idx[::-1]
 
 
+def a_orthogonalize_local_with_metadata(
+    W_local: np.ndarray,
+    A,
+    eps_add: float = 1e-3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A-orthogonalize an already-owned distributed basis slice.
+
+    This is the memory-lean companion to ``a_orthogonalize_with_local_metadata``:
+    callers pass only the owned rows of the dense basis.  Global inner products
+    are still exact MPI reductions, so the resulting local slices represent the
+    same distributed A-orthogonal basis without ever gathering full columns onto
+    every rank.
+    """
+
+    if W_local is None:
+        n_local = int(A.getOwnershipRange()[1] - A.getOwnershipRange()[0])
+        return np.empty((n_local, 0), dtype=np.float64), np.empty(0, dtype=np.float64), np.empty(0, dtype=np.int64)
+
+    if not (hasattr(A, "mult") and hasattr(A, "getComm") and int(A.getComm().getSize()) > 1):
+        basis, norms, kept = _a_orthogonalize_impl(W_local, A, eps_add)
+        return basis, norms, kept
+
+    W_mat = np.asarray(W_local, dtype=np.float64)
+    if W_mat.ndim == 1:
+        W_mat = W_mat[:, None]
+    n_local = int(A.getOwnershipRange()[1] - A.getOwnershipRange()[0])
+    if W_mat.size == 0 or W_mat.shape[1] == 0:
+        return np.empty((n_local, 0), dtype=np.float64), np.empty(0, dtype=np.float64), np.empty(0, dtype=np.int64)
+    if W_mat.shape[0] != n_local:
+        raise ValueError(f"Local deflation basis has {W_mat.shape[0]} rows, expected owned row count {n_local}")
+
+    mpi_comm = A.getComm().tompi4py()
+    n_cols = int(W_mat.shape[1])
+    x_vec = A.createVecRight()
+    y_vec = A.createVecRight()
+    x_arr = x_vec.getArray(readonly=False)
+
+    w_orth_local = np.zeros((n_local, n_cols), dtype=np.float64)
+    norms = np.ones(n_cols, dtype=np.float64)
+    keep = np.zeros(n_cols, dtype=bool)
+    keep_source_idx = np.full(n_cols, -1, dtype=np.int64)
+
+    for i in range(n_cols):
+        idx = n_cols - i - 1
+        v_local = W_mat[:, idx].copy()
+
+        x_arr[...] = v_local
+        A.mult(x_vec, y_vec)
+        a_v_local = np.asarray(y_vec.getArray(readonly=True), dtype=np.float64).copy()
+
+        if i > 0:
+            w_prev_local = w_orth_local[:, :i]
+            coeff_local = w_prev_local.T @ a_v_local
+            coeff = np.asarray(mpi_comm.allreduce(coeff_local, op=MPI.SUM), dtype=np.float64)
+            v_local = v_local - (w_prev_local * norms[:i]) @ coeff
+
+        norm_val = float(mpi_comm.allreduce(float(np.dot(v_local, a_v_local)), op=MPI.SUM))
+        if abs(norm_val) > eps_add:
+            if norm_val > 0:
+                scale = np.sqrt(norm_val)
+            else:
+                scale = np.sqrt(abs(norm_val))
+                norms[i] = -1.0
+            w_orth_local[:, i] = v_local / scale
+            keep[i] = True
+            keep_source_idx[i] = idx
+
+    x_vec.destroy()
+    y_vec.destroy()
+
+    if not np.any(keep):
+        return np.empty((n_local, 0), dtype=np.float64), np.empty(0, dtype=np.float64), np.empty(0, dtype=np.int64)
+
+    kept_cols = w_orth_local[:, keep]
+    kept_norms = norms[keep]
+    kept_source_idx = keep_source_idx[keep]
+    return kept_cols[:, ::-1], kept_norms[::-1], kept_source_idx[::-1]
+
+
 def a_orthogonalize(W: np.ndarray, A, eps_add: float = 1e-3) -> np.ndarray:
     """A-orthogonalize columns of ``W`` in-place."""
 

@@ -311,12 +311,32 @@ def _build_regularized_if_available(constitutive_matrix_builder, *, lam=None, U,
     if lam is None:
         fn = getattr(constitutive_matrix_builder, "build_F_K_regularized_reduced", None)
         if callable(fn):
-            return fn(U, r)
+            try:
+                return fn(U, r)
+            except (ValueError, RuntimeError) as exc:
+                if _regularized_builder_unavailable(exc):
+                    return None
+                raise
         return None
     fn = getattr(constitutive_matrix_builder, "build_F_K_regularized_all", None)
     if callable(fn):
-        return fn(lam, U, r)
+        try:
+            return fn(lam, U, r)
+        except (ValueError, RuntimeError) as exc:
+            if _regularized_builder_unavailable(exc):
+                return None
+            raise
     return None
+
+
+def _regularized_builder_unavailable(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        "Tangent DS not computed" in message
+        or "DS must have shape" in message
+        or "requires owned_tangent_pattern" in message
+        or "Owned tangent pattern not configured" in message
+    )
 
 
 def _build_regularized_from_cached_if_available(constitutive_matrix_builder, r: float):
@@ -324,9 +344,8 @@ def _build_regularized_from_cached_if_available(constitutive_matrix_builder, r: 
     if callable(fn):
         try:
             return fn(r)
-        except ValueError as exc:
-            message = str(exc)
-            if "Tangent DS not computed" in message or "DS must have shape" in message:
+        except (ValueError, RuntimeError) as exc:
+            if _regularized_builder_unavailable(exc):
                 return None
             raise
     return None

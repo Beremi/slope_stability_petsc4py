@@ -1118,6 +1118,16 @@ def _select_continuation_state_history(
     return history[-window_n:], hist_len
 
 
+def _trim_history_in_place(history: list, max_len: int | None) -> None:
+    if max_len is None:
+        return
+    limit = max(int(max_len), 0)
+    if limit == 0:
+        history.clear()
+    elif len(history) > limit:
+        del history[:-limit]
+
+
 def _secant_orthogonal_increment_ls_predictor(
     *,
     omega_old: float,
@@ -2589,6 +2599,36 @@ def SSR_indirect_continuation(
         raise ValueError(
             f"Unsupported continuation_first_newton_warm_start_mode {continuation_first_newton_warm_start_mode!r}."
         )
+    configured_predictor_modes = {predictor_mode}
+    if predictor_switch_to_mode is not None:
+        configured_predictor_modes.add(predictor_switch_to_mode)
+    keep_increment_history = bool(
+        {"reduced_newton_all_prev", "reduced_newton_window"} & configured_predictor_modes
+        or secant_correction_mode == "orthogonal_increment_ls"
+        or first_newton_warm_start_mode == "history_deflation"
+    )
+    increment_history_limit: int | None = 0
+    if keep_increment_history:
+        if "reduced_newton_all_prev" in configured_predictor_modes:
+            increment_history_limit = None
+        else:
+            increment_history_limit = 1
+            if "reduced_newton_window" in configured_predictor_modes:
+                increment_history_limit = max(increment_history_limit, 3 if predictor_window_size is None else int(predictor_window_size))
+            if secant_correction_mode == "orthogonal_increment_ls":
+                increment_history_limit = max(increment_history_limit, 2)
+            if first_newton_warm_start_mode == "history_deflation":
+                increment_history_limit = max(increment_history_limit, 1)
+    keep_affine_state_history = bool("reduced_newton_affine_all_prev" in configured_predictor_modes)
+    affine_state_history_limit: int | None = None if keep_affine_state_history and predictor_window_size is None else 0
+    if keep_affine_state_history and predictor_window_size is not None:
+        affine_state_history_limit = max(int(predictor_window_size), 2)
+    keep_power_state_history = bool("reduced_newton_increment_power" in configured_predictor_modes)
+    power_state_history_limit = (
+        max((1 if predictor_window_size is None else int(predictor_window_size)) + 1, 2)
+        if keep_power_state_history
+        else 0
+    )
     step_length_cap_mode_name = str(step_length_cap_mode).strip().lower()
     if step_length_cap_mode_name not in {"none", "initial_segment", "history_box"}:
         raise ValueError(f"Unsupported step_length_cap_mode {step_length_cap_mode!r}.")
@@ -2862,14 +2902,10 @@ def SSR_indirect_continuation(
 
     predictor_omega_hist: list[float] = [float(omega_old), float(omega)]
     predictor_lambda_hist: list[float] = [float(lambda_old), float(lambda_value)]
-    predictor_u_hist: list[np.ndarray] = [U_old.copy(), U.copy()]
     continuation_increment_free_hist: list[np.ndarray] = []
     continuation_first_newton_correction_free_hist: list[np.ndarray] = []
     continuation_state_hist_only: list[np.ndarray] = []
-    continuation_u_hist_full: list[np.ndarray] = [U_old.copy(), U.copy()]
-    continuation_omega_hist_full: list[float] = [float(omega_old), float(omega)]
-    continuation_lambda_hist_full: list[float] = [float(lambda_old), float(lambda_value)]
-    continuation_increment_full_hist: list[np.ndarray] = []
+    continuation_u_hist_full: list[np.ndarray] = [U_old.copy(), U.copy()] if keep_power_state_history else []
     last_fine_hist_idx = 1
 
     d_omega = omega - omega_old
@@ -3620,22 +3656,26 @@ def SSR_indirect_continuation(
 
             predictor_omega_hist.append(float(omega))
             predictor_lambda_hist.append(float(lambda_value))
-            predictor_u_hist.append(U.copy())
-            continuation_increment_free_hist.append(_free(U - U_old, Q))
-            first_newton_correction_free = np.asarray(history.get("first_accepted_correction_free", np.zeros(0, dtype=np.float64)), dtype=np.float64)
-            if first_newton_correction_free.size:
-                continuation_first_newton_correction_free_hist.append(first_newton_correction_free.reshape(-1).copy())
-                if len(continuation_first_newton_correction_free_hist) > 2:
-                    continuation_first_newton_correction_free_hist.pop(0)
-            continuation_state_hist_only.append(U.copy())
-            continuation_u_hist_full.append(U.copy())
-            continuation_omega_hist_full.append(float(omega))
-            continuation_lambda_hist_full.append(float(lambda_value))
-            continuation_increment_full_hist.append(np.asarray(U - U_old, dtype=np.float64))
+            if keep_increment_history:
+                continuation_increment_free_hist.append(_free(U - U_old, Q))
+                _trim_history_in_place(continuation_increment_free_hist, increment_history_limit)
+            if first_newton_warm_start_mode == "history_deflation":
+                first_newton_correction_free = np.asarray(
+                    history.get("first_accepted_correction_free", np.zeros(0, dtype=np.float64)),
+                    dtype=np.float64,
+                )
+                if first_newton_correction_free.size:
+                    continuation_first_newton_correction_free_hist.append(first_newton_correction_free.reshape(-1).copy())
+                    _trim_history_in_place(continuation_first_newton_correction_free_hist, 2)
+            if keep_affine_state_history:
+                continuation_state_hist_only.append(U.copy())
+                _trim_history_in_place(continuation_state_hist_only, affine_state_history_limit)
+            if keep_power_state_history:
+                continuation_u_hist_full.append(U.copy())
+                _trim_history_in_place(continuation_u_hist_full, power_state_history_limit)
             if len(predictor_omega_hist) > 3:
                 predictor_omega_hist.pop(0)
                 predictor_lambda_hist.pop(0)
-                predictor_u_hist.pop(0)
 
             accepted_step_newton_total = int(step_newton_it_accum)
             accepted_step_linear_total = int(step_lin_it_accum)

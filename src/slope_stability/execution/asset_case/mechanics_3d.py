@@ -383,6 +383,109 @@ def _newton_guess_difference_volume_integrals(
     }
 
 
+def _element_mean_deviatoric_strain(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    elem_type: str,
+    quadrature_rule: int | str | None,
+    U: np.ndarray,
+) -> np.ndarray:
+    """Return per-element mean deviatoric strain without building the global B matrix."""
+
+    coord = np.asarray(coord, dtype=np.float64)
+    elem = np.asarray(elem, dtype=np.int64)
+    U = np.asarray(U, dtype=np.float64)
+    if coord.shape[0] != 3 or U.shape[0] != 3:
+        raise ValueError("3D strain plotting requires (3, n_nodes) coordinates and fields")
+
+    xi, _wf = quadrature_volume_3d(elem_type, quadrature_rule)
+    _hatp, dhat1, dhat2, dhat3 = local_basis_volume_3d(elem_type, xi)
+    n_p = int(dhat1.shape[0])
+    n_q = int(xi.shape[1])
+    if elem.shape[0] != n_p:
+        raise ValueError(f"Element connectivity width {elem.shape[0]} does not match {elem_type} basis width {n_p}")
+    if dhat1.shape[1] == 1 and n_q > 1:
+        dhat1 = np.repeat(dhat1, n_q, axis=1)
+        dhat2 = np.repeat(dhat2, n_q, axis=1)
+        dhat3 = np.repeat(dhat3, n_q, axis=1)
+
+    chunk_elems = max(32, min(1024, int(max(1, 2_000_000 // max(n_p * n_q, 1)))))
+    elem_strain = np.empty(int(elem.shape[1]), dtype=np.float64)
+
+    for elem0 in range(0, int(elem.shape[1]), chunk_elems):
+        elem1 = min(elem0 + chunk_elems, int(elem.shape[1]))
+        elem_chunk = elem[:, elem0:elem1]
+        n_elem_chunk = int(elem_chunk.shape[1])
+        u_chunk = U[:, elem_chunk]
+
+        x = coord[0, elem_chunk]
+        y = coord[1, elem_chunk]
+        z = coord[2, elem_chunk]
+
+        j11 = np.einsum("pe,pq->eq", x, dhat1, optimize=True)
+        j12 = np.einsum("pe,pq->eq", y, dhat1, optimize=True)
+        j13 = np.einsum("pe,pq->eq", z, dhat1, optimize=True)
+        j21 = np.einsum("pe,pq->eq", x, dhat2, optimize=True)
+        j22 = np.einsum("pe,pq->eq", y, dhat2, optimize=True)
+        j23 = np.einsum("pe,pq->eq", z, dhat2, optimize=True)
+        j31 = np.einsum("pe,pq->eq", x, dhat3, optimize=True)
+        j32 = np.einsum("pe,pq->eq", y, dhat3, optimize=True)
+        j33 = np.einsum("pe,pq->eq", z, dhat3, optimize=True)
+
+        det_j = j11 * (j22 * j33 - j23 * j32) - j12 * (j21 * j33 - j23 * j31) + j13 * (j21 * j32 - j22 * j31)
+        inv_det = 1.0 / det_j
+
+        c11 = (j22 * j33 - j23 * j32) * inv_det
+        c12 = (j12 * j33 - j13 * j32) * inv_det
+        c13 = (j12 * j23 - j13 * j22) * inv_det
+        c21 = -(j21 * j33 - j23 * j31) * inv_det
+        c22 = (j11 * j33 - j13 * j31) * inv_det
+        c23 = -(j11 * j23 - j13 * j21) * inv_det
+        c31 = (j21 * j32 - j22 * j31) * inv_det
+        c32 = -(j11 * j32 - j12 * j31) * inv_det
+        c33 = (j11 * j22 - j12 * j21) * inv_det
+
+        dphi1 = (
+            dhat1[:, None, :] * c11[None, :, :]
+            - dhat2[:, None, :] * c12[None, :, :]
+            + dhat3[:, None, :] * c13[None, :, :]
+        )
+        dphi2 = (
+            dhat1[:, None, :] * c21[None, :, :]
+            + dhat2[:, None, :] * c22[None, :, :]
+            + dhat3[:, None, :] * c23[None, :, :]
+        )
+        dphi3 = (
+            dhat1[:, None, :] * c31[None, :, :]
+            + dhat2[:, None, :] * c32[None, :, :]
+            + dhat3[:, None, :] * c33[None, :, :]
+        )
+
+        ux = u_chunk[0, :, :]
+        uy = u_chunk[1, :, :]
+        uz = u_chunk[2, :, :]
+        e11 = np.einsum("pe,peq->eq", ux, dphi1, optimize=True)
+        e22 = np.einsum("pe,peq->eq", uy, dphi2, optimize=True)
+        e33 = np.einsum("pe,peq->eq", uz, dphi3, optimize=True)
+        g12 = np.einsum("pe,peq->eq", ux, dphi2, optimize=True) + np.einsum("pe,peq->eq", uy, dphi1, optimize=True)
+        g23 = np.einsum("pe,peq->eq", uy, dphi3, optimize=True) + np.einsum("pe,peq->eq", uz, dphi2, optimize=True)
+        g13 = np.einsum("pe,peq->eq", ux, dphi3, optimize=True) + np.einsum("pe,peq->eq", uz, dphi1, optimize=True)
+        strain = np.vstack(
+            [
+                e11.reshape(1, n_elem_chunk * n_q, order="C"),
+                e22.reshape(1, n_elem_chunk * n_q, order="C"),
+                e33.reshape(1, n_elem_chunk * n_q, order="C"),
+                g12.reshape(1, n_elem_chunk * n_q, order="C"),
+                g23.reshape(1, n_elem_chunk * n_q, order="C"),
+                g13.reshape(1, n_elem_chunk * n_q, order="C"),
+            ]
+        )
+        dev_norm = _deviatoric_strain_norm(strain).reshape(n_elem_chunk, n_q, order="C")
+        elem_strain[elem0:elem1] = np.mean(dev_norm, axis=1)
+
+    return elem_strain
+
+
 def _save_plots(
     coord,
     surf,
@@ -394,6 +497,8 @@ def _save_plots(
     step_u: np.ndarray,
     elem: np.ndarray,
     n_q: int,
+    elem_type: str,
+    quadrature_rule: int | str | None,
     *,
     load_label: str = r"$\lambda$",
     title_prefix: str = r"Indirect continuation: $\omega$ vs $\lambda$",
@@ -425,12 +530,15 @@ def _save_plots(
     plt.close(fig)
 
     # MATLAB-style surface coloring on the undeformed boundary mesh.
-    E = B @ U.reshape(-1, order="F")
-    E = E.reshape(6, -1, order="F")
-    dev_norm = _deviatoric_strain_norm(E)
-    n_e = elem.shape[1]
-    elem_strain = dev_norm.reshape(n_q, n_e, order="F")
-    elem_strain = np.mean(elem_strain, axis=0)
+    if B is None:
+        elem_strain = _element_mean_deviatoric_strain(coord, elem, elem_type, quadrature_rule, U)
+    else:
+        E = B @ U.reshape(-1, order="F")
+        E = E.reshape(6, -1, order="F")
+        dev_norm = _deviatoric_strain_norm(E)
+        n_e = elem.shape[1]
+        elem_strain = dev_norm.reshape(n_q, n_e, order="F")
+        elem_strain = np.mean(elem_strain, axis=0)
     tri_surface, tri_face_ids = _build_plotting_mesh_with_face_ids(surf.astype(np.int64))
     face_parent = _surface_parent_elements(elem.astype(np.int64), surf.astype(np.int64))
     tri_vals = elem_strain[face_parent[tri_face_ids]]
@@ -745,11 +853,11 @@ def run_capture(
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
                     comm=PETSc.COMM_WORLD,
                 )
-        coord = pmg_hierarchy.fine_level.coord.astype(np.float64)
-        elem = pmg_hierarchy.fine_level.elem.astype(np.int64)
-        surf = pmg_hierarchy.fine_level.surf.astype(np.int64)
-        q_mask = pmg_hierarchy.fine_level.q_mask.astype(bool)
-        material_identifier = pmg_hierarchy.fine_level.material_identifier.astype(np.int64).ravel()
+        coord = pmg_hierarchy.fine_level.coord.astype(np.float64, copy=False)
+        elem = pmg_hierarchy.fine_level.elem.astype(np.int64, copy=False)
+        surf = pmg_hierarchy.fine_level.surf.astype(np.int64, copy=False)
+        q_mask = pmg_hierarchy.fine_level.q_mask.astype(bool, copy=False)
+        material_identifier = pmg_hierarchy.fine_level.material_identifier.astype(np.int64, copy=False).ravel()
     else:
         mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
         reordered = reorder_mesh_nodes(
@@ -761,21 +869,16 @@ def run_capture(
             n_parts=partition_count,
         )
 
-        coord = reordered.coord.astype(np.float64)
-        elem = reordered.elem.astype(np.int64)
-        surf = reordered.surf.astype(np.int64)
-        q_mask = reordered.q_mask.astype(bool)
-        material_identifier = mesh.material_id.astype(np.int64).ravel()
+        coord = reordered.coord.astype(np.float64, copy=False)
+        elem = reordered.elem.astype(np.int64, copy=False)
+        surf = reordered.surf.astype(np.int64, copy=False)
+        q_mask = reordered.q_mask.astype(bool, copy=False)
+        material_identifier = mesh.material_id.astype(np.int64, copy=False).ravel()
+        mesh = None
+        reordered = None
 
     n_q = int(quadrature_volume_3d(elem_type, quadrature_rule)[0].shape[1])
     n_int = int(elem.shape[1] * n_q)
-    c0, phi, psi, shear, bulk, lame, gamma = heterogenous_materials(
-        material_identifier,
-        np.ones(n_int, dtype=bool),
-        n_q,
-        materials,
-    )
-
     use_owned_mpi_tangent_path = use_owned_tangent_path(
         solver_type=solver_type,
         mpi_distribute_by_nodes=mpi_distribute_by_nodes,
@@ -785,9 +888,15 @@ def run_capture(
         mpi_distribute_by_nodes=mpi_distribute_by_nodes,
         constitutive_mode=constitutive_mode,
     )
+    c0, phi, psi, shear, bulk, lame, gamma = heterogenous_materials(
+        material_identifier,
+        True,
+        n_q,
+        materials,
+    )
 
     B = None
-    weight = np.zeros(n_int, dtype=np.float64)
+    weight = np.empty(0, dtype=np.float64) if use_lightweight_mpi_path else np.zeros(n_int, dtype=np.float64)
     elastic_rows = None
     tangent_pattern = None
     bddc_pattern = None
@@ -812,6 +921,7 @@ def run_capture(
         )
         rhs_parts = MPI.COMM_WORLD.allgather(np.asarray(elastic_rows.local_rhs, dtype=np.float64))
         f_V = np.concatenate(rhs_parts).reshape(coord.shape[0], coord.shape[1], order="F")
+        gamma = np.empty(0, dtype=np.float64)
     else:
         assembly = assemble_strain_operator(coord, elem, elem_type, dim=3, quadrature_rule=quadrature_rule)
         from slope_stability.fem.assembly import build_elastic_stiffness_matrix
@@ -877,6 +987,12 @@ def run_capture(
                 overlap_local_int_indices=tangent_pattern.local_int_indices,
             )
             const_builder.set_bddc_subdomain_pattern(bddc_pattern)
+        if B is None:
+            empty_material = np.empty(0, dtype=np.float64)
+            c0 = phi = psi = shear = bulk = lame = empty_material
+            material_identifier = np.empty(0, dtype=np.int64)
+        if use_lightweight_mpi_path:
+            elastic_rows = None
 
     preconditioner_options = {
         "threads": int(preconditioner_threads),
@@ -1204,6 +1320,7 @@ def run_capture(
             U_guess,
             U_solution,
         )
+    store_step_u_local = bool(store_step_u) and rank == 0
     if analysis_key == "ssr":
         U3, lambda_hist3, omega_hist3, Umax_hist3, stats = SSR_indirect_continuation(
             lambda_init,
@@ -1222,7 +1339,7 @@ def run_capture(
             const_builder,
             linear_system_solver,
             progress_callback=progress_callback,
-            store_step_u=bool(store_step_u),
+            store_step_u=store_step_u_local,
             continuation_predictor=str(continuation_predictor),
             omega_step_controller=str(omega_step_controller),
             step_guess_diagnostics=step_guess_diagnostics,
@@ -1314,6 +1431,7 @@ def run_capture(
             const_builder,
             linear_system_solver,
             progress_callback=progress_callback,
+            store_step_u=store_step_u_local,
         )
     runtime = perf_counter() - t0
     mpi_comm = PETSc.COMM_WORLD.tompi4py()
@@ -1458,7 +1576,12 @@ def run_capture(
         "step_lambda_initial_guess_abs_error_last": _nan_last(step_lambda_guess_abs_error),
     }
 
-    step_u = np.asarray(stats.pop("step_U"), dtype=np.float64) if isinstance(stats.get("step_U", None), list) else np.empty((0, 3, 0), dtype=np.float64)
+    raw_step_u = stats.pop("step_U", None)
+    step_u = (
+        np.asarray(raw_step_u, dtype=np.float64)
+        if rank == 0 and isinstance(raw_step_u, list)
+        else np.empty((0, 3, 0), dtype=np.float64)
+    )
 
     run_payload = {
         "run_info": {
@@ -1522,20 +1645,19 @@ def run_capture(
         (data_dir / "run_info.json").write_text(json.dumps(run_payload, indent=2))
 
         _ensure_dir(out_dir / "plots")
-        plot_B = B
-        if plot_B is None:
-            plot_B = assemble_strain_operator(coord, elem, elem_type, dim=3, quadrature_rule=quadrature_rule).B
         _save_plots(
             coord,
             surf,
             U3,
             lambda_hist3,
             omega_hist3,
-            plot_B,
+            B,
             out_dir / "plots",
             step_u=step_u,
             elem=elem,
             n_q=n_q,
+            elem_type=elem_type,
+            quadrature_rule=quadrature_rule,
             load_label=(r"$t$" if analysis_key == "ll" else r"$\lambda$"),
             title_prefix=(
                 r"Indirect continuation: $\omega$ vs $t$"

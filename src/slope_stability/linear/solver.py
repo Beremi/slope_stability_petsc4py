@@ -36,7 +36,12 @@ from ..utils import (
 from .collector import IterationCollector
 from .deflated_fgmres import dfgmres, dfgmres_matlab_exact, dfgmres_matlab_exact_distributed, dfgmres_matlab_exact_distributed_compiled
 from .elasticity import impose_zero_dirichlet_full_system
-from .orthogonalize import a_orthogonalize, a_orthogonalize_with_info, a_orthogonalize_with_local_metadata
+from .orthogonalize import (
+    a_orthogonalize,
+    a_orthogonalize_local_with_metadata,
+    a_orthogonalize_with_info,
+    a_orthogonalize_with_local_metadata,
+)
 from .preconditioners import attach_near_nullspace, build_preconditioner, make_near_nullspace_elasticity
 
 
@@ -591,6 +596,7 @@ class _ManualPMGShellPC:
             "manualmg_restriction_shapes": [
                 [int(v) for v in mat.getSize()] for mat in self.state.restrictions
             ],
+            "manualmg_restriction_mode": "explicit" if self.state.restrictions else "transpose_prolongation",
             "manualmg_coarse_ksp_type": str(self.coarse_ksp.getType()),
             "manualmg_coarse_pc_type": str(self.coarse_ksp.getPC().getType()),
             "manualmg_coarse_iterations": int(self.coarse_ksp.getIterationNumber()),
@@ -712,7 +718,10 @@ class _ManualPMGShellPC:
                 mid_resid_s += resid_s
 
             t = perf_counter()
-            restrictions[level_idx - 1].mult(residual, self._level_work[level_idx - 1]["rhs"])
+            if restrictions:
+                restrictions[level_idx - 1].mult(residual, self._level_work[level_idx - 1]["rhs"])
+            else:
+                prolongations[level_idx - 1].multTranspose(residual, self._level_work[level_idx - 1]["rhs"])
             restrict_s = perf_counter() - t
             if level_idx == fine_idx:
                 restrict_f2m_s += restrict_s
@@ -888,6 +897,46 @@ def _basis_diagnostics(basis: np.ndarray, A=None, *, basis_A: np.ndarray | None 
     offdiag = gram - np.diag(diag)
     return {
         "basis_rows": int(raw.shape[0]),
+        "basis_cols": int(raw.shape[1]),
+        "diag_min": float(diag.min()) if diag.size else np.nan,
+        "diag_max": float(diag.max()) if diag.size else np.nan,
+        "negative_diag_count": int(np.count_nonzero(diag < 0.0)),
+        "offdiag_max_abs": float(np.max(np.abs(offdiag))) if offdiag.size else 0.0,
+        "offdiag_fro": float(np.linalg.norm(offdiag)),
+        "signed_identity_fro": float(np.linalg.norm(gram - np.diag(signed))),
+    }
+
+
+def _basis_diagnostics_distributed_local(
+    basis_local: np.ndarray,
+    basis_A_local: np.ndarray,
+    comm,
+) -> dict[str, float | int]:
+    raw = np.asarray(basis_local, dtype=np.float64)
+    if raw.ndim == 1:
+        raw = raw[:, None]
+    rows_local = int(raw.shape[0]) if raw.ndim >= 1 else 0
+    rows = int(comm.allreduce(rows_local, op=MPI.SUM)) if comm is not None else rows_local
+    if raw.size == 0 or raw.shape[1] == 0:
+        return {
+            "basis_rows": rows,
+            "basis_cols": 0,
+            "diag_min": np.nan,
+            "diag_max": np.nan,
+            "negative_diag_count": 0,
+            "offdiag_max_abs": 0.0,
+            "offdiag_fro": 0.0,
+            "signed_identity_fro": 0.0,
+        }
+    basis_A = np.asarray(basis_A_local, dtype=np.float64)
+    gram_local = raw.T @ basis_A
+    gram = np.asarray(comm.allreduce(gram_local, op=MPI.SUM), dtype=np.float64) if comm is not None else gram_local
+    diag = np.diag(gram).astype(np.float64, copy=False)
+    signed = np.sign(diag)
+    signed[signed == 0.0] = 1.0
+    offdiag = gram - np.diag(diag)
+    return {
+        "basis_rows": rows,
         "basis_cols": int(raw.shape[1]),
         "diag_min": float(diag.min()) if diag.size else np.nan,
         "diag_max": float(diag.max()) if diag.size else np.nan,
@@ -1796,7 +1845,13 @@ class PetscKSPFGMRESSolver:
             raise ValueError("pmg hierarchy must provide at least two levels.")
         return tuple(levels)
 
-    def _validate_pmg_layout(self, *, matrix_ref, state: _PMGPetscHierarchyState) -> None:
+    def _validate_pmg_layout(
+        self,
+        *,
+        matrix_ref,
+        state: _PMGPetscHierarchyState,
+        require_restrictions: bool = True,
+    ) -> None:
         levels = self._pmg_levels()
         fine_level = levels[-1]
         if tuple(int(v) for v in matrix_ref.getSize()) != (int(fine_level.free_size), int(fine_level.free_size)):
@@ -1835,6 +1890,8 @@ class PetscKSPFGMRESSolver:
                     raise ValueError(
                         f"pmg {name} local column count mismatch: {local_cols} vs expected {expected_cols}"
                     )
+        if require_restrictions and len(state.restrictions) != len(state.prolongations):
+            raise ValueError("pmg backend requires explicit restriction matrices for every prolongation.")
         for transfer_idx, mat in enumerate(state.restrictions):
             source_level = levels[transfer_idx + 1]
             target_level = levels[transfer_idx]
@@ -1911,8 +1968,8 @@ class PetscKSPFGMRESSolver:
     def _configure_manualmg_pc(self, pc, *, matrix_ref) -> None:
         if matrix_ref is None:
             raise ValueError("pmg_shell backend requires a fine-level preconditioning matrix")
-        state = self._ensure_pmg_state()
-        self._validate_pmg_layout(matrix_ref=matrix_ref, state=state)
+        state = self._ensure_pmg_state(build_restrictions=False)
+        self._validate_pmg_layout(matrix_ref=matrix_ref, state=state, require_restrictions=False)
         if self._manualmg_context is None:
             self._manualmg_context = _ManualPMGShellPC(self)
         self._manualmg_context.configure(matrix_ref=matrix_ref, state=state, hierarchy=self._pmg_hierarchy_spec())
@@ -1973,8 +2030,15 @@ class PetscKSPFGMRESSolver:
             return False
         return self._matrix_compatible(A_petsc, self._A_petsc)
 
-    def _ensure_pmg_state(self) -> _PMGPetscHierarchyState:
+    def _ensure_pmg_state(self, *, build_restrictions: bool = True) -> _PMGPetscHierarchyState:
         if self._pmg_state is not None:
+            if build_restrictions and not self._pmg_state.restrictions:
+                restrictions = []
+                for prolongation in self._pmg_state.prolongations:
+                    restriction = prolongation.copy()
+                    restriction = restriction.transpose()
+                    restrictions.append(restriction)
+                self._pmg_state.restrictions = tuple(restrictions)
             return self._pmg_state
 
         hierarchy = self._pmg_hierarchy_spec()
@@ -1996,10 +2060,11 @@ class PetscKSPFGMRESSolver:
                 )
             )
         restrictions = []
-        for prolongation in petsc_prolongations:
-            restriction = prolongation.copy()
-            restriction = restriction.transpose()
-            restrictions.append(restriction)
+        if build_restrictions:
+            for prolongation in petsc_prolongations:
+                restriction = prolongation.copy()
+                restriction = restriction.transpose()
+                restrictions.append(restriction)
         self._pmg_state = _PMGPetscHierarchyState(
             hierarchy=hierarchy,
             prolongations=tuple(petsc_prolongations),
@@ -2013,8 +2078,8 @@ class PetscKSPFGMRESSolver:
     def _configure_pmg_pc(self, pc, *, matrix_ref) -> None:
         if matrix_ref is None:
             raise ValueError("pmg backend requires a fine-level preconditioning matrix")
-        state = self._ensure_pmg_state()
-        self._validate_pmg_layout(matrix_ref=matrix_ref, state=state)
+        state = self._ensure_pmg_state(build_restrictions=True)
+        self._validate_pmg_layout(matrix_ref=matrix_ref, state=state, require_restrictions=True)
         pc.setType(PETSc.PC.Type.MG)
         pc.setMGLevels(len(state.level_orders))
         pc.setMGType(PETSc.PC.MGType.MULTIPLICATIVE)
@@ -2763,6 +2828,7 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         self._mpi_comm = None
         self._last_basis_reorth_passes = 0
         self._projector_dirty = True
+        self._deflation_basis_is_local = False
 
     def _reset_petsc_objects(self) -> None:
         if self._inner_ksp is not None:
@@ -2778,6 +2844,71 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         self._projector_dirty = True
         super()._reset_petsc_objects()
 
+    def _distributed_local_projector_active(self, A_ref=None) -> bool:
+        matrix = self._A_petsc if A_ref is None else A_ref
+        return bool(
+            PETSc is not None
+            and matrix is not None
+            and isinstance(matrix, PETSc.Mat)
+            and int(matrix.getComm().getSize()) > 1
+        )
+
+    def _store_distributed_deflation_basis_locally(self) -> bool:
+        return bool(self.preconditioner_options.get("distributed_deflation_basis_local", True))
+
+    def _basis_column_count(self) -> int:
+        basis = self.deflation_basis
+        if basis is None:
+            return 0
+        arr = np.asarray(basis)
+        if arr.ndim == 2:
+            return int(arr.shape[1])
+        return int(bool(arr.size))
+
+    def _owned_rows_from_basis_candidate(self, vectors: np.ndarray) -> np.ndarray:
+        v = np.asarray(vectors, dtype=np.float64)
+        if v.ndim == 1:
+            v = v[:, None]
+        if self._ownership_range is None:
+            return self._expand_to_full_space(v)
+        r0, r1 = self._ownership_range
+        n_local = int(r1 - r0)
+
+        if v.shape[0] == n_local:
+            return v
+        operator_size = self._A_petsc.getSize()[1] if self._A_petsc is not None else None
+        if operator_size is not None and v.shape[0] == int(operator_size):
+            return np.asarray(v[r0:r1, :], dtype=np.float64)
+
+        if self._using_full_system and self.q_mask.size:
+            free_idx = self._active_free()
+            if free_idx.size and v.shape[0] == free_idx.size:
+                local = np.zeros((n_local, v.shape[1]), dtype=np.float64)
+                mask = (free_idx >= r0) & (free_idx < r1)
+                if np.any(mask):
+                    local[free_idx[mask] - r0, :] = v[mask, :]
+                return local
+
+        expanded = self._expand_to_full_space(v)
+        if expanded.shape[0] == n_local:
+            return expanded
+        if operator_size is not None and expanded.shape[0] == int(operator_size):
+            return np.asarray(expanded[r0:r1, :], dtype=np.float64)
+        return expanded
+
+    def _ensure_local_deflation_storage(self) -> None:
+        if self._deflation_basis_is_local:
+            return
+        basis = np.asarray(self.deflation_basis, dtype=np.float64)
+        if basis.ndim == 1:
+            basis = basis[:, None]
+        if basis.size == 0:
+            n_local = int(self._ownership_range[1] - self._ownership_range[0]) if self._ownership_range else 0
+            self.deflation_basis = np.empty((n_local, 0), dtype=np.float64)
+        else:
+            self.deflation_basis = self._owned_rows_from_basis_candidate(basis)
+        self._deflation_basis_is_local = True
+
     def _deflation_reorth_passes(self) -> int:
         try:
             passes = int(self.preconditioner_options.get("deflation_reorth_passes", 1))
@@ -2786,8 +2917,16 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         return max(1, passes)
 
     def _refresh_projector_data(self, A_ref) -> None:
-        basis = self.deflation_basis
-        if basis.size == 0:
+        basis = np.asarray(self.deflation_basis, dtype=np.float64)
+        if basis.ndim == 1:
+            basis = basis[:, None]
+        used_passes = 0
+        distributed_local = self._distributed_local_projector_active(A_ref)
+        if basis.size == 0 or (basis.ndim == 2 and basis.shape[1] == 0):
+            if distributed_local and self._store_distributed_deflation_basis_locally():
+                n_local = int(A_ref.getOwnershipRange()[1] - A_ref.getOwnershipRange()[0])
+                self.deflation_basis = np.empty((n_local, 0), dtype=np.float64)
+                self._deflation_basis_is_local = True
             self._basis_global = np.empty((0, 0), dtype=np.float64)
             self._basis_A_global = np.empty((0, 0), dtype=np.float64)
             self._basis_local = np.empty((0, 0), dtype=np.float64)
@@ -2796,25 +2935,42 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
             self._projector_dirty = False
             return
 
-        used_passes = 0
-        distributed_local = PETSc is not None and isinstance(A_ref, PETSc.Mat) and int(A_ref.getComm().getSize()) > 1
-
         if distributed_local:
             basis_local = None
             kept_source_idx = None
-            for _ in range(self._deflation_reorth_passes()):
-                basis_local, _basis_norms, kept_source_idx = a_orthogonalize_with_local_metadata(
-                    basis,
-                    A_ref,
-                    self.tolerance_deflation_basis,
-                )
-                used_passes += 1
-                if basis_local.size == 0 or kept_source_idx.size == 0:
-                    basis = np.empty((basis.shape[0], 0), dtype=np.float64)
-                    break
-                basis = np.asarray(basis[:, kept_source_idx], dtype=np.float64)
-            self.deflation_basis = basis
+            if self._store_distributed_deflation_basis_locally():
+                self._ensure_local_deflation_storage()
+                basis = np.asarray(self.deflation_basis, dtype=np.float64)
+                for _ in range(self._deflation_reorth_passes()):
+                    basis_local, _basis_norms, kept_source_idx = a_orthogonalize_local_with_metadata(
+                        basis,
+                        A_ref,
+                        self.tolerance_deflation_basis,
+                    )
+                    used_passes += 1
+                    if basis_local.size == 0 or kept_source_idx.size == 0:
+                        n_local = int(A_ref.getOwnershipRange()[1] - A_ref.getOwnershipRange()[0])
+                        basis = np.empty((n_local, 0), dtype=np.float64)
+                        break
+                    basis = np.asarray(basis_local, dtype=np.float64)
+                self.deflation_basis = basis
+                self._deflation_basis_is_local = True
+            else:
+                self._deflation_basis_is_local = False
+                for _ in range(self._deflation_reorth_passes()):
+                    basis_local, _basis_norms, kept_source_idx = a_orthogonalize_with_local_metadata(
+                        basis,
+                        A_ref,
+                        self.tolerance_deflation_basis,
+                    )
+                    used_passes += 1
+                    if basis_local.size == 0 or kept_source_idx.size == 0:
+                        basis = np.empty((basis.shape[0], 0), dtype=np.float64)
+                        break
+                    basis = np.asarray(basis[:, kept_source_idx], dtype=np.float64)
+                self.deflation_basis = basis
         else:
+            self._deflation_basis_is_local = False
             for _ in range(self._deflation_reorth_passes()):
                 basis, _basis_norms = a_orthogonalize_with_info(basis, A_ref, self.tolerance_deflation_basis)
                 used_passes += 1
@@ -2846,14 +3002,10 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
                 col_local = np.asarray(y_vec.getArray(readonly=True), dtype=np.float64).copy()
                 basis_A_local[:, j] = col_local
             self._basis_A_local = basis_A_local
-            if self._diagnostics_enabled:
-                gathered_basis = self._mpi_comm.allgather(self._basis_local)
-                gathered_basis_A = self._mpi_comm.allgather(self._basis_A_local)
-                self._basis_global = np.vstack(gathered_basis) if gathered_basis else np.empty((0, 0), dtype=np.float64)
-                self._basis_A_global = np.vstack(gathered_basis_A) if gathered_basis_A else np.empty((0, 0), dtype=np.float64)
-            else:
-                self._basis_global = np.empty((0, 0), dtype=np.float64)
-                self._basis_A_global = np.empty((0, 0), dtype=np.float64)
+            x_vec.destroy()
+            y_vec.destroy()
+            self._basis_global = np.empty((0, 0), dtype=np.float64)
+            self._basis_A_global = np.empty((0, 0), dtype=np.float64)
         else:
             self._basis_local = basis[r0:r1, :]
             basis_A = np.column_stack([_matvec(A_ref, basis[:, j]) for j in range(basis.shape[1])])
@@ -2891,7 +3043,85 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         return self._basis_local @ coeff
 
     def expand_deflation_basis(self, additional_vectors):
-        super().expand_deflation_basis(additional_vectors)
+        if additional_vectors is None:
+            return
+        v = np.asarray(additional_vectors, dtype=np.float64)
+        if v.size == 0:
+            return
+        if v.ndim == 1:
+            v = v[:, None]
+        if (
+            self._distributed_local_projector_active()
+            and self._store_distributed_deflation_basis_locally()
+            and self._ownership_range is not None
+        ):
+            self._ensure_local_deflation_storage()
+            v_local = self._owned_rows_from_basis_candidate(v)
+            if v_local.shape[0] != self.deflation_basis.shape[0]:
+                raise ValueError(
+                    "Local deflation vector row count does not match owned row count "
+                    f"({v_local.shape[0]} != {self.deflation_basis.shape[0]})"
+                )
+            if self._deflation_basis_disabled():
+                self.deflation_basis = np.empty((v_local.shape[0], 0), dtype=np.float64)
+                self._deflation_basis_is_local = True
+                self._projector_dirty = True
+                return
+            if self.deflation_basis.size == 0:
+                self.deflation_basis = np.asarray(v_local, dtype=np.float64)
+            else:
+                self.deflation_basis = np.hstack((self.deflation_basis, v_local))
+            max_cols = self._max_deflation_basis_vectors()
+            if max_cols is not None and self.deflation_basis.ndim == 2 and self.deflation_basis.shape[1] > max_cols:
+                self.deflation_basis = np.asarray(self.deflation_basis[:, -max_cols:], dtype=np.float64)
+            self._deflation_basis_is_local = True
+        else:
+            super().expand_deflation_basis(v)
+            self._deflation_basis_is_local = False
+        self._projector_dirty = True
+
+    def get_deflation_basis_snapshot(self):
+        return np.array(self.deflation_basis, dtype=np.float64, copy=True)
+
+    def restore_deflation_basis(self, snapshot) -> None:
+        if snapshot is None:
+            if (
+                self._distributed_local_projector_active()
+                and self._store_distributed_deflation_basis_locally()
+                and self._ownership_range is not None
+            ):
+                n_local = int(self._ownership_range[1] - self._ownership_range[0])
+                self.deflation_basis = np.empty((n_local, 0), dtype=np.float64)
+                self._deflation_basis_is_local = True
+            else:
+                self.deflation_basis = np.empty((0, 0), dtype=np.float64)
+                self._deflation_basis_is_local = False
+            self._projector_dirty = True
+            return
+
+        arr = np.array(snapshot, dtype=np.float64, copy=True)
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        if (
+            self._distributed_local_projector_active()
+            and self._store_distributed_deflation_basis_locally()
+            and self._ownership_range is not None
+        ):
+            r0, r1 = self._ownership_range
+            n_local = int(r1 - r0)
+            global_cols = int(self._A_petsc.getSize()[1]) if self._A_petsc is not None else None
+            if arr.size == 0:
+                arr = np.empty((n_local, 0), dtype=np.float64)
+            elif arr.shape[0] == n_local:
+                pass
+            elif global_cols is not None and arr.shape[0] == global_cols:
+                arr = np.asarray(arr[r0:r1, :], dtype=np.float64)
+            else:
+                arr = self._owned_rows_from_basis_candidate(arr)
+            self._deflation_basis_is_local = True
+        else:
+            self._deflation_basis_is_local = False
+        self.deflation_basis = arr
         self._projector_dirty = True
 
     def _configure_inner_pc(self) -> None:
@@ -3094,17 +3324,22 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
     def A_orthogonalize(self, A):
         t0 = perf_counter()
         A_ref = self._A_petsc if self._A_petsc is not None else A
-        before_cols = int(self.deflation_basis.shape[1]) if self.deflation_basis.ndim == 2 else int(bool(self.deflation_basis.size))
+        before_cols = self._basis_column_count()
         self._refresh_projector_data(A_ref)
         elapsed = perf_counter() - t0
         self.iteration_collector.store_orthogonalization_time(self.instance_id, elapsed)
         if self._diagnostics_enabled:
+            basis_diag = (
+                _basis_diagnostics_distributed_local(self._basis_local, self._basis_A_local, self._mpi_comm)
+                if self._distributed_local_projector_active(A_ref)
+                else _basis_diagnostics(self._basis_global, basis_A=self._basis_A_global)
+            )
             self._last_orthogonalization_info = {
                 "time_s": float(elapsed),
                 "basis_cols_before": int(before_cols),
-                "basis_cols_after": int(self._basis_global.shape[1]) if self._basis_global.ndim == 2 else 0,
+                "basis_cols_after": int(self._basis_column_count()),
                 "basis_reorth_passes": int(self._last_basis_reorth_passes),
-                **_basis_diagnostics(self._basis_global, basis_A=self._basis_A_global),
+                **basis_diag,
             }
 
     def solve(self, A, b, *, full_rhs=None, free_indices: np.ndarray | None = None):
@@ -3142,7 +3377,7 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
             self._last_solve_info = {
                 "iterations": int(nit),
                 "time_s": float(elapsed),
-                "basis_cols": int(self._basis_global.shape[1]) if self._basis_global.ndim == 2 else 0,
+                "basis_cols": int(self._basis_column_count()),
                 "rhs_norm": rhs_norm,
                 "coarse_initial_guess_norm": float(np.linalg.norm(self._coarse_initial_guess_local(np.asarray(rhs.getArray(readonly=True), dtype=np.float64)))),
                 "reported_residual_history": list(reported_history),
@@ -3171,6 +3406,7 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         )
         # Share the current basis until the clone appends/reorthogonalizes and rebinds it.
         clone.deflation_basis = self.deflation_basis
+        clone._deflation_basis_is_local = self._deflation_basis_is_local
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         clone._diagnostics_enabled = self._diagnostics_enabled
@@ -3559,6 +3795,7 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         try:
             use_distributed_local = bool(self._mpi_comm is not None and int(self._A_petsc.getComm().getSize()) > 1)
             rhs_arr = None
+            rhs_local_for_diagnostics = None
 
             def _timed_matvec(v: np.ndarray) -> np.ndarray:
                 t_mat = perf_counter()
@@ -3579,6 +3816,7 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
                 else:
                     rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
                     rhs_local = np.asarray(rhs_arr[r0:r1], dtype=np.float64)
+                rhs_local_for_diagnostics = rhs_local
                 basis_local = self._basis_local if self._basis_local.size else np.empty((rhs_local.size, 0), dtype=np.float64)
 
                 def _timed_matvec_local(v_local: np.ndarray) -> np.ndarray:
@@ -3619,8 +3857,6 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
                         stats=timing_stats,
                     )
                 x_total = np.concatenate(self._mpi_comm.allgather(np.asarray(x_local, dtype=np.float64)))
-                if self._diagnostics_enabled:
-                    rhs_arr = np.concatenate(self._mpi_comm.allgather(rhs_local))
             else:
                 rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
                 basis = self.deflation_basis if self.deflation_basis.size else np.empty((rhs_arr.size, 0), dtype=np.float64)
@@ -3637,28 +3873,37 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
             elapsed = perf_counter() - t0
             self.iteration_collector.store_iteration(self.instance_id, int(nit), elapsed)
             if self._diagnostics_enabled:
-                if rhs_arr is None:
-                    rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
-                basis = self.deflation_basis if self.deflation_basis.size else np.empty((rhs_arr.size, 0), dtype=np.float64)
                 res_hist_arr = np.asarray(res_hist, dtype=np.float64).reshape(-1)
-                rhs_norm = float(np.linalg.norm(rhs_arr))
-                if rhs_norm == 0.0:
-                    rhs_norm = 1.0
-                coarse_guess_norm = 0.0
-                if basis.size:
-                    coarse_guess_norm = float(np.linalg.norm(basis @ (basis.T @ rhs_arr)))
-                use_residual_history_as_true = bool(use_distributed_local and self._pc_backend == "pmg_shell")
-                if use_residual_history_as_true:
+                if use_distributed_local:
+                    rhs_local_diag = np.asarray(rhs_local_for_diagnostics, dtype=np.float64)
+                    rhs_norm = float(
+                        np.sqrt(max(float(self._mpi_comm.allreduce(float(np.dot(rhs_local_diag, rhs_local_diag)), op=MPI.SUM)), 0.0))
+                    )
+                    if rhs_norm == 0.0:
+                        rhs_norm = 1.0
+                    coarse_local = self._coarse_initial_guess_local(rhs_local_diag)
+                    coarse_guess_norm = float(
+                        np.sqrt(max(float(self._mpi_comm.allreduce(float(np.dot(coarse_local, coarse_local)), op=MPI.SUM)), 0.0))
+                    )
                     true_residual_history = res_hist_arr.tolist()
                     true_residual_final = float(res_hist_arr[-1]) if res_hist_arr.size else None
                 else:
+                    if rhs_arr is None:
+                        rhs_arr = self._prepare_rhs(b, full_rhs=full_rhs)
+                    basis = self.deflation_basis if self.deflation_basis.size else np.empty((rhs_arr.size, 0), dtype=np.float64)
+                    rhs_norm = float(np.linalg.norm(rhs_arr))
+                    if rhs_norm == 0.0:
+                        rhs_norm = 1.0
+                    coarse_guess_norm = 0.0
+                    if basis.size:
+                        coarse_guess_norm = float(np.linalg.norm(basis @ (basis.T @ rhs_arr)))
                     resid = rhs_arr - self._petsc_matvec(x_total)
                     true_residual_history = res_hist_arr.tolist()
                     true_residual_final = float(np.linalg.norm(resid) / rhs_norm)
                 self._last_solve_info = {
                     "iterations": int(nit),
                     "time_s": float(elapsed),
-                    "basis_cols": int(basis.shape[1]) if basis.ndim == 2 else 0,
+                    "basis_cols": int(self._basis_column_count()),
                     "rhs_norm": rhs_norm,
                     "coarse_initial_guess_norm": float(coarse_guess_norm),
                     "reported_residual_history": res_hist_arr.tolist(),
@@ -3698,6 +3943,7 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
         )
         # Share the current basis until the clone appends/reorthogonalizes and rebinds it.
         clone.deflation_basis = self.deflation_basis
+        clone._deflation_basis_is_local = self._deflation_basis_is_local
         clone.iteration_collector = self.iteration_collector
         clone.instance_id = self.iteration_collector.register_instance()
         clone._diagnostics_enabled = self._diagnostics_enabled
