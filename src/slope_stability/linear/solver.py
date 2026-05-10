@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - optional when PETSc is unavailable
     PETSc = None
 
 from ..core.run_config import LinearSolverConfig
-from ..fem.distributed_elastic import assemble_owned_elastic_rows_for_comm
+from ..fem.distributed_elastic import assemble_owned_elastic_rows
 from ..utils import (
     bddc_pc_coordinates_from_metadata,
     get_petsc_matrix_metadata,
@@ -431,13 +431,13 @@ class _ManualPMGShellPC:
         materials = tuple(getattr(hierarchy, "materials", ()))
         if not materials:
             raise ValueError("manualmg direct elastic coarse operator requires hierarchy materials.")
-        owned_rows = assemble_owned_elastic_rows_for_comm(
+        owned_rows = assemble_owned_elastic_rows(
             coarse_level.coord,
             coarse_level.elem,
             coarse_level.q_mask,
             coarse_level.material_identifier,
             list(materials),
-            comm,
+            tuple(int(v) for v in coarse_level.owned_node_range),
             elem_type=str(coarse_level.elem_type),
         )
         if tuple(int(v) for v in owned_rows.owned_row_range) != tuple(int(v) for v in coarse_level.owned_total_range):

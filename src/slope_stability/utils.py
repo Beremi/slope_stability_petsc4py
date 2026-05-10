@@ -87,13 +87,35 @@ def to_petsc_vector(vec: np.ndarray, comm=None):
     return v
 
 
-def owned_block_range(n_blocks: int, block_size: int, comm) -> tuple[int, int]:
-    """Return a contiguous row-ownership range aligned to node blocks."""
+def owned_block_range(
+    n_blocks: int,
+    block_size: int,
+    comm,
+    *,
+    partition_offsets: np.ndarray | None = None,
+) -> tuple[int, int]:
+    """Return a contiguous row-ownership range aligned to node blocks.
+
+    If ``partition_offsets`` is provided, it gives exact block ownership
+    boundaries for every rank, typically from graph/METIS mesh partitioning.
+    Otherwise the blocks are split evenly by rank.
+    """
 
     size = int(comm.getSize())
     rank = int(comm.getRank())
-    start_block = (rank * n_blocks) // size
-    end_block = ((rank + 1) * n_blocks) // size
+    if partition_offsets is not None:
+        offsets = np.asarray(partition_offsets, dtype=np.int64).reshape(-1)
+        if offsets.size != size + 1:
+            raise ValueError(f"partition_offsets must have size comm_size + 1 ({size + 1}), got {offsets.size}")
+        if int(offsets[0]) != 0 or int(offsets[-1]) != int(n_blocks):
+            raise ValueError("partition_offsets must start at 0 and end at n_blocks")
+        if np.any(offsets[:-1] > offsets[1:]):
+            raise ValueError("partition_offsets must be monotone nondecreasing")
+        start_block = int(offsets[rank])
+        end_block = int(offsets[rank + 1])
+    else:
+        start_block = (rank * n_blocks) // size
+        end_block = ((rank + 1) * n_blocks) // size
     return start_block * block_size, end_block * block_size
 
 

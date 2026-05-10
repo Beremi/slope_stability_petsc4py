@@ -27,7 +27,7 @@ from slope_stability.core.elements import normalize_elem_type, validate_supporte
 from slope_stability.cli.progress import make_progress_logger
 from slope_stability.mesh import heterogenous_materials, MaterialSpec, reorder_mesh_nodes
 from slope_stability.fem import (
-    assemble_owned_elastic_rows_for_comm,
+    assemble_owned_elastic_rows,
     assemble_strain_operator,
     available_tetra_quadrature_rules,
     prepare_owned_tangent_pattern,
@@ -951,6 +951,7 @@ def run_capture(
         surf = pmg_hierarchy.fine_level.surf.astype(np.int64, copy=False)
         q_mask = pmg_hierarchy.fine_level.q_mask.astype(bool, copy=False)
         material_identifier = pmg_hierarchy.fine_level.material_identifier.astype(np.int64, copy=False).ravel()
+        owned_node_range = tuple(int(v) for v in pmg_hierarchy.fine_level.owned_node_range)
         _stage_debug_log(
             rank,
             "build_pmg_hierarchy_done",
@@ -977,6 +978,14 @@ def run_capture(
         surf = reordered.surf.astype(np.int64, copy=False)
         q_mask = reordered.q_mask.astype(bool, copy=False)
         material_identifier = mesh.material_id.astype(np.int64, copy=False).ravel()
+        partition_offsets = getattr(reordered, "partition_offsets", None)
+        row0_tmp, row1_tmp = owned_block_range(
+            coord.shape[1],
+            coord.shape[0],
+            PETSc.COMM_WORLD,
+            partition_offsets=partition_offsets,
+        )
+        owned_node_range = (int(row0_tmp // coord.shape[0]), int(row1_tmp // coord.shape[0]))
         mesh = None
         reordered = None
         _stage_debug_log(
@@ -1026,13 +1035,13 @@ def run_capture(
 
     if use_lightweight_mpi_path:
         _stage_debug_log(rank, "assemble_owned_elastic_start", stage_t0)
-        elastic_rows = assemble_owned_elastic_rows_for_comm(
+        elastic_rows = assemble_owned_elastic_rows(
             coord,
             elem,
             q_mask,
             material_identifier,
             materials,
-            PETSc.COMM_WORLD,
+            owned_node_range,
             elem_type=elem_type,
             quadrature_rule=quadrature_rule,
         )
@@ -1096,7 +1105,8 @@ def run_capture(
     _stage_debug_log(rank, "constitutive_operator_ready", stage_t0)
 
     if use_owned_mpi_tangent_path:
-        row0, row1 = owned_block_range(coord.shape[1], coord.shape[0], PETSc.COMM_WORLD)
+        row0 = int(coord.shape[0] * int(owned_node_range[0]))
+        row1 = int(coord.shape[0] * int(owned_node_range[1]))
         _stage_debug_log(
             rank,
             "prepare_tangent_pattern_start",

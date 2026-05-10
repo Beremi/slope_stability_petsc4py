@@ -37,6 +37,7 @@ class PMGLevel:
     owned_free_range: tuple[int, int]
     dof_dim: int | None = None
     free_size_override: int | None = None
+    partition_offsets: np.ndarray | None = None
 
     @property
     def dim(self) -> int:
@@ -198,6 +199,9 @@ def _compact_level_for_runtime(level: PMGLevel, *, keep_geometry: bool) -> PMGLe
         owned_free_range=tuple(int(v) for v in level.owned_free_range),
         dof_dim=int(level.dof_per_node),
         free_size_override=int(level.free_size),
+        partition_offsets=None
+        if level.partition_offsets is None
+        else np.asarray(level.partition_offsets, dtype=np.int64).copy(),
     )
 
 
@@ -293,6 +297,9 @@ def _prune_level_to_active_free(level: PMGLevel, active_free_mask: np.ndarray) -
         owned_node_range=tuple(int(v) for v in level.owned_node_range),
         owned_total_range=tuple(int(v) for v in level.owned_total_range),
         owned_free_range=(lo, hi),
+        partition_offsets=None
+        if level.partition_offsets is None
+        else np.asarray(level.partition_offsets, dtype=np.int64).copy(),
     )
 
 
@@ -412,7 +419,13 @@ def _build_level(
     perm, iperm = _identity_free_permutation(freedofs_total.size)
     freedofs = np.asarray(freedofs_total[perm], dtype=np.int64)
 
-    owned_total_range = owned_block_range(coord.shape[1], dof_dim, comm)
+    partition_offsets = getattr(reordered, "partition_offsets", None)
+    owned_total_range = owned_block_range(
+        coord.shape[1],
+        dof_dim,
+        comm,
+        partition_offsets=partition_offsets,
+    )
     node0 = int(owned_total_range[0] // dof_dim)
     node1 = int(owned_total_range[1] // dof_dim)
     lo = int(np.searchsorted(freedofs_total, owned_total_range[0], side="left"))
@@ -434,6 +447,9 @@ def _build_level(
         owned_node_range=(node0, node1),
         owned_total_range=(int(owned_total_range[0]), int(owned_total_range[1])),
         owned_free_range=(lo, hi),
+        partition_offsets=None
+        if partition_offsets is None
+        else np.asarray(partition_offsets, dtype=np.int64).copy(),
     )
 
 
@@ -453,7 +469,12 @@ def _sorted_coo_arrays(entries: dict[tuple[int, int], float]) -> tuple[np.ndarra
 
 
 def _validate_level_layout(level: PMGLevel, *, comm) -> None:
-    expected_total_range = owned_block_range(level.n_nodes, level.dof_per_node, comm)
+    expected_total_range = owned_block_range(
+        level.n_nodes,
+        level.dof_per_node,
+        comm,
+        partition_offsets=level.partition_offsets,
+    )
     if tuple(int(v) for v in level.owned_total_range) != tuple(int(v) for v in expected_total_range):
         raise ValueError(
             "PMG level owned total range does not match communicator ownership: "

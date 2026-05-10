@@ -22,6 +22,7 @@ class ReorderedMesh:
     q_mask: np.ndarray
     permutation: np.ndarray
     inverse_permutation: np.ndarray
+    partition_offsets: np.ndarray | None = None
 
 
 def _part1by2_64(v: np.ndarray) -> np.ndarray:
@@ -82,9 +83,14 @@ def _rcm_order(elem: np.ndarray, n_nodes: int) -> np.ndarray:
     return reverse_cuthill_mckee(_nodal_adjacency(elem, n_nodes), symmetric_mode=True).astype(np.int64)
 
 
-def _block_metis_order(coord: np.ndarray, elem: np.ndarray, n_nodes: int, n_parts: int | None) -> np.ndarray:
+def _block_metis_order_and_offsets(
+    coord: np.ndarray,
+    elem: np.ndarray,
+    n_nodes: int,
+    n_parts: int | None,
+) -> tuple[np.ndarray, np.ndarray | None]:
     if n_parts is None or int(n_parts) <= 1:
-        return _xyz_order(coord)
+        return _xyz_order(coord), None
     if pymetis is None:
         raise RuntimeError("block_metis ordering requires the optional 'pymetis' dependency")
 
@@ -97,9 +103,22 @@ def _block_metis_order(coord: np.ndarray, elem: np.ndarray, n_nodes: int, n_part
         ),
     )
     membership_arr = np.asarray(membership, dtype=np.int64)
+    if membership_arr.size != int(n_nodes):
+        raise RuntimeError(f"METIS returned {membership_arr.size} memberships for {int(n_nodes)} nodes")
+    if np.any(membership_arr < 0) or np.any(membership_arr >= int(n_parts)):
+        raise RuntimeError("METIS returned a partition id outside the requested range")
     xyz_rank = np.empty(n_nodes, dtype=np.int64)
     xyz_rank[_xyz_order(coord)] = np.arange(n_nodes, dtype=np.int64)
-    return np.lexsort((xyz_rank, membership_arr)).astype(np.int64)
+    counts = np.bincount(membership_arr, minlength=int(n_parts)).astype(np.int64)
+    offsets = np.empty(int(n_parts) + 1, dtype=np.int64)
+    offsets[0] = 0
+    offsets[1:] = np.cumsum(counts, dtype=np.int64)
+    return np.lexsort((xyz_rank, membership_arr)).astype(np.int64), offsets
+
+
+def _block_metis_order(coord: np.ndarray, elem: np.ndarray, n_nodes: int, n_parts: int | None) -> np.ndarray:
+    order, _offsets = _block_metis_order_and_offsets(coord, elem, n_nodes, n_parts)
+    return order
 
 
 def compute_node_permutation(coord: np.ndarray, elem: np.ndarray, strategy: str, *, n_parts: int | None = None) -> np.ndarray:
@@ -127,7 +146,16 @@ def reorder_mesh_nodes(
     strategy: str = "original",
     n_parts: int | None = None,
 ) -> ReorderedMesh:
-    perm = compute_node_permutation(coord, elem, strategy, n_parts=n_parts)
+    partition_offsets = None
+    if str(strategy).lower() == "block_metis" and n_parts is not None and int(n_parts) > 1:
+        perm, partition_offsets = _block_metis_order_and_offsets(
+            coord,
+            elem,
+            int(coord.shape[1]),
+            int(n_parts),
+        )
+    else:
+        perm = compute_node_permutation(coord, elem, strategy, n_parts=n_parts)
     inv_perm = np.empty_like(perm)
     inv_perm[perm] = np.arange(perm.size, dtype=np.int64)
 
@@ -143,4 +171,5 @@ def reorder_mesh_nodes(
         q_mask=q_new,
         permutation=perm,
         inverse_permutation=inv_perm,
+        partition_offsets=None if partition_offsets is None else np.asarray(partition_offsets, dtype=np.int64),
     )
