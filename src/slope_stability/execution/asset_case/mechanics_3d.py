@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 from pathlib import Path
+import socket
 from time import perf_counter
 
 import numpy as np
@@ -68,6 +70,40 @@ def _ensure_dir(path: Path) -> Path:
 
 def _make_progress_logger(progress_dir: Path):
     return make_progress_logger(progress_dir)
+
+
+def _stage_debug_rss_kib() -> int | None:
+    try:
+        import resource
+
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except Exception:
+        return None
+
+
+def _stage_debug_log(rank: int, label: str, t0: float, **payload) -> None:
+    debug_dir_raw = os.environ.get("SLOPE_STABILITY_STAGE_DEBUG_DIR")
+    enabled = bool(debug_dir_raw or os.environ.get("SLOPE_STABILITY_STAGE_DEBUG"))
+    if not enabled:
+        return
+    rec = {
+        "t": perf_counter() - t0,
+        "label": str(label),
+        "rank": int(rank),
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "rss_kib": _stage_debug_rss_kib(),
+        **payload,
+    }
+    if rank == 0:
+        details = " ".join(f"{key}={value}" for key, value in payload.items())
+        suffix = f" | {details}" if details else ""
+        print(f"[stage] {label} | t={rec['t']:.2f}s | rss_kib={rec['rss_kib']}{suffix}", flush=True)
+    if debug_dir_raw:
+        rank_dir = Path(debug_dir_raw) / "mechanics_ranks"
+        rank_dir.mkdir(parents=True, exist_ok=True)
+        with (rank_dir / f"rank_{int(rank):04d}.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(rec, default=str, sort_keys=True) + "\n")
 
 
 def _parse_petsc_opt_entries(entries: list[str] | None) -> dict[str, str]:
@@ -768,12 +804,25 @@ def run_capture(
     store_step_u: bool = True,
 ) -> dict:
     rank = int(PETSc.COMM_WORLD.getRank())
+    stage_t0 = perf_counter()
+    _stage_debug_log(
+        rank,
+        "start",
+        stage_t0,
+        mpi_size=int(PETSc.COMM_WORLD.getSize()),
+        output_dir=str(output_dir),
+        asset_name=str(asset_name),
+        mesh_variant=None if mesh_variant is None else str(mesh_variant),
+        elem_type=str(elem_type),
+        pc_backend=None if pc_backend is None else str(pc_backend),
+    )
     out_dir = _ensure_dir(output_dir) if rank == 0 else output_dir
     data_dir = out_dir / "data"
     progress_callback = None
     if rank == 0:
         _ensure_dir(data_dir)
         progress_callback = _make_progress_logger(data_dir)
+    _stage_debug_log(rank, "output_ready", stage_t0)
 
     elem_type = validate_supported_elem_type(3, elem_type)
     resolved_asset = resolve_problem_asset(asset_name=str(asset_name), mesh_variant=mesh_variant, profile=profile)
@@ -783,6 +832,13 @@ def run_capture(
     mesh_path = resolved_asset.mesh_path
     profile = resolved_asset.resolved_variant.profile
     material_rows = mechanical_spec.material_rows
+    _stage_debug_log(
+        rank,
+        "resolved_asset",
+        stage_t0,
+        mesh_file=str(mesh_path),
+        material_rows=len(material_rows),
+    )
 
     solver_type_upper = str(solver_type).upper()
     effective_pc_backend = None
@@ -814,6 +870,14 @@ def run_capture(
             raise ValueError(
                 f"{effective_pc_backend} backend is currently supported only with PETSC_MATLAB_DFGMRES* or KSPFGMRES* solver types."
             )
+    _stage_debug_log(
+        rank,
+        "validated_backend",
+        stage_t0,
+        effective_pc_backend=None if effective_pc_backend is None else str(effective_pc_backend),
+        solver_type=str(solver_type),
+        pmg_coarse_mesh_variant=None if pmg_coarse_mesh_variant is None else str(pmg_coarse_mesh_variant),
+    )
 
     mat_props = np.asarray(material_rows, dtype=np.float64)
     materials = [
@@ -828,10 +892,19 @@ def run_capture(
         )
         for row in mat_props
     ]
+    _stage_debug_log(rank, "built_materials", stage_t0, material_count=len(materials))
 
     partition_count = int(PETSc.COMM_WORLD.getSize()) if str(node_ordering).lower() == "block_metis" else None
     pmg_hierarchy = None
     if effective_pc_backend in {"pmg", "pmg_shell"}:
+        _stage_debug_log(
+            rank,
+            "build_pmg_hierarchy_start",
+            stage_t0,
+            fine_hierarchy_mode=str(pmg_fine_hierarchy_mode),
+            pmg_coarse_mesh_variant=None if pmg_coarse_mesh_variant is None else str(pmg_coarse_mesh_variant),
+            partition_count=partition_count,
+        )
         fine_hierarchy_mode = str(pmg_fine_hierarchy_mode).strip().lower()
         if pmg_coarse_mesh_variant is None:
             if effective_pc_backend == "pmg_shell" and str(elem_type).upper() == "P2":
@@ -878,7 +951,17 @@ def run_capture(
         surf = pmg_hierarchy.fine_level.surf.astype(np.int64, copy=False)
         q_mask = pmg_hierarchy.fine_level.q_mask.astype(bool, copy=False)
         material_identifier = pmg_hierarchy.fine_level.material_identifier.astype(np.int64, copy=False).ravel()
+        _stage_debug_log(
+            rank,
+            "build_pmg_hierarchy_done",
+            stage_t0,
+            nodes=int(coord.shape[1]),
+            elements=int(elem.shape[1]),
+            free_unknowns=int(q_mask.sum()),
+            levels=len(getattr(pmg_hierarchy, "levels", ())),
+        )
     else:
+        _stage_debug_log(rank, "build_mesh_start", stage_t0, partition_count=partition_count)
         mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
         reordered = reorder_mesh_nodes(
             mesh.coord,
@@ -896,6 +979,14 @@ def run_capture(
         material_identifier = mesh.material_id.astype(np.int64, copy=False).ravel()
         mesh = None
         reordered = None
+        _stage_debug_log(
+            rank,
+            "build_mesh_done",
+            stage_t0,
+            nodes=int(coord.shape[1]),
+            elements=int(elem.shape[1]),
+            free_unknowns=int(q_mask.sum()),
+        )
 
     n_q = int(quadrature_volume_3d(elem_type, quadrature_rule)[0].shape[1])
     n_int = int(elem.shape[1] * n_q)
@@ -917,6 +1008,15 @@ def run_capture(
             n_q,
             materials,
         )
+    _stage_debug_log(
+        rank,
+        "material_arrays_ready",
+        stage_t0,
+        n_int=int(n_int),
+        n_q=int(n_q),
+        lightweight_mpi_path=bool(use_lightweight_mpi_path),
+        owned_tangent_path=bool(use_owned_mpi_tangent_path),
+    )
 
     B = None
     weight = np.empty(0, dtype=np.float64) if use_lightweight_mpi_path else np.zeros(n_int, dtype=np.float64)
@@ -925,6 +1025,7 @@ def run_capture(
     bddc_pattern = None
 
     if use_lightweight_mpi_path:
+        _stage_debug_log(rank, "assemble_owned_elastic_start", stage_t0)
         elastic_rows = assemble_owned_elastic_rows_for_comm(
             coord,
             elem,
@@ -952,7 +1053,14 @@ def run_capture(
             comm=MPI.COMM_WORLD,
         )
         gamma = np.empty(0, dtype=np.float64)
+        _stage_debug_log(
+            rank,
+            "assemble_owned_elastic_done",
+            stage_t0,
+            local_rows=int(elastic_rows.local_matrix.shape[0]) if elastic_rows is not None else 0,
+        )
     else:
+        _stage_debug_log(rank, "assemble_global_elastic_start", stage_t0)
         assembly = assemble_strain_operator(coord, elem, elem_type, dim=3, quadrature_rule=quadrature_rule)
         from slope_stability.fem.assembly import build_elastic_stiffness_matrix
 
@@ -965,6 +1073,7 @@ def run_capture(
             )
         )
         f_V = vector_volume(assembly, f_v_int, weight)
+        _stage_debug_log(rank, "assemble_global_elastic_done", stage_t0)
 
     const_builder = ConstitutiveOperator(
         B=B,
@@ -984,9 +1093,18 @@ def run_capture(
         material_specs=materials if use_lightweight_mpi_path else None,
         material_n_q=n_q if use_lightweight_mpi_path else None,
     )
+    _stage_debug_log(rank, "constitutive_operator_ready", stage_t0)
 
     if use_owned_mpi_tangent_path:
         row0, row1 = owned_block_range(coord.shape[1], coord.shape[0], PETSc.COMM_WORLD)
+        _stage_debug_log(
+            rank,
+            "prepare_tangent_pattern_start",
+            stage_t0,
+            owned_node_start=int(row0 // coord.shape[0]),
+            owned_node_end=int(row1 // coord.shape[0]),
+            constitutive_mode=str(constitutive_mode),
+        )
         tangent_pattern = prepare_owned_tangent_pattern(
             coord,
             elem,
@@ -1009,7 +1127,14 @@ def run_capture(
             constitutive_mode=constitutive_mode,
             use_compiled_constitutive=True,
         )
+        _stage_debug_log(
+            rank,
+            "prepare_tangent_pattern_done",
+            stage_t0,
+            stats=getattr(tangent_pattern, "stats", {}),
+        )
         if effective_pc_backend == "bddc":
+            _stage_debug_log(rank, "prepare_bddc_pattern_start", stage_t0)
             bddc_pattern = prepare_bddc_subdomain_pattern(
                 coord,
                 elem,
@@ -1021,6 +1146,7 @@ def run_capture(
                 overlap_local_int_indices=tangent_pattern.local_int_indices,
             )
             const_builder.set_bddc_subdomain_pattern(bddc_pattern)
+            _stage_debug_log(rank, "prepare_bddc_pattern_done", stage_t0)
         if B is None:
             empty_material = np.empty(0, dtype=np.float64)
             c0 = phi = psi = shear = bulk = lame = empty_material
@@ -1177,6 +1303,7 @@ def run_capture(
         coord=coord,
         preconditioner_options=preconditioner_options,
     )
+    _stage_debug_log(rank, "linear_solver_ready", stage_t0, solver_type=str(solver_type))
     analysis_key = str(analysis).lower()
     if analysis_key not in {"ssr", "ll"}:
         raise ValueError(f"Unsupported analysis {analysis!r}.")
@@ -1356,6 +1483,7 @@ def run_capture(
         )
     store_step_u_local = bool(store_step_u) and rank == 0
     if analysis_key == "ssr":
+        _stage_debug_log(rank, "continuation_start", stage_t0, analysis=analysis_key)
         U3, lambda_hist3, omega_hist3, Umax_hist3, stats = SSR_indirect_continuation(
             lambda_init,
             d_lambda_init,
@@ -1427,6 +1555,7 @@ def run_capture(
             streaming_basis_max_vectors=int(streaming_basis_max_vectors),
         )
     else:
+        _stage_debug_log(rank, "continuation_start", stage_t0, analysis=analysis_key)
         if hasattr(f_V, "materialize_full"):
             f_V = f_V.materialize_full()
         const_builder.reduction(float(lambda_ell))
@@ -1469,6 +1598,7 @@ def run_capture(
             progress_callback=progress_callback,
             store_step_u=store_step_u_local,
         )
+    _stage_debug_log(rank, "continuation_done", stage_t0)
     runtime = perf_counter() - t0
     mpi_comm = PETSc.COMM_WORLD.tompi4py()
 
@@ -1662,9 +1792,11 @@ def run_capture(
         const_builder=const_builder,
         mats=(K_elast,),
     )
+    _stage_debug_log(rank, "released_rank_local_resources", stage_t0)
     mpi_comm.Barrier()
 
     if rank == 0:
+        _stage_debug_log(rank, "write_outputs_start", stage_t0)
         np.savez_compressed(
             data_dir / "petsc_run.npz",
             U=U3,
@@ -1701,10 +1833,12 @@ def run_capture(
                 else r"Indirect continuation: $\omega$ vs $\lambda$"
             ),
         )
+        _stage_debug_log(rank, "write_outputs_done", stage_t0)
 
     mpi_comm.Barrier()
     _collect_petsc_garbage()
     mpi_comm.Barrier()
+    _stage_debug_log(rank, "finish", stage_t0)
 
     return {
         "output": str(out_dir),
