@@ -625,6 +625,22 @@ def _release_rank_local_resources(*, solvers: tuple[object, ...], const_builder,
         gc.collect()
 
 
+def _collect_petsc_garbage() -> None:
+    if PETSc is None:
+        gc.collect()
+        return
+    cleanup = getattr(PETSc, "garbage_cleanup", None)
+    gc.collect()
+    if callable(cleanup):
+        try:
+            cleanup(PETSc.COMM_WORLD)
+        except TypeError:
+            cleanup()
+        except Exception:
+            pass
+    gc.collect()
+
+
 def run_capture(
     output_dir: Path,
     *,
@@ -1686,6 +1702,8 @@ def run_capture(
             ),
         )
 
+    mpi_comm.Barrier()
+    _collect_petsc_garbage()
     mpi_comm.Barrier()
 
     return {
