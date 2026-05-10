@@ -590,6 +590,81 @@ def test_pmg_shell_backend_accepts_multilevel_p1_tail_hierarchy() -> None:
     solver._reset_petsc_objects()
 
 
+def test_pmg_shell_backend_configures_direct_lu_coarse_factor_solver() -> None:
+    hierarchy = _tiny_pmg_hierarchy()
+    fine = hierarchy.level_p4
+    solver = PetscMatlabExactDFGMRESSolver(
+        pc_type="GAMG",
+        q_mask=fine.q_mask,
+        coord=fine.coord,
+        preconditioner_options={
+            "pc_backend": "pmg_shell",
+            "preconditioner_matrix_source": "tangent",
+            "preconditioner_matrix_policy": "current",
+            "preconditioner_rebuild_policy": "every_newton",
+            "preconditioner_rebuild_interval": 1,
+            "mpi_distribute_by_nodes": False,
+            "full_system_preconditioner": False,
+            "pmg_hierarchy": hierarchy,
+            "mg_coarse_pc_type": "lu",
+            "mg_coarse_factor_solver_type": "petsc",
+        },
+    )
+    A = identity(fine.free_size, format="csr", dtype=np.float64)
+
+    solver.setup_preconditioner(A)
+    out = solver._apply_inner_preconditioner_local(np.ones(fine.free_size, dtype=np.float64))
+
+    diagnostics = solver.get_preconditioner_diagnostics()
+    assert out.shape == (fine.free_size,)
+    assert np.all(np.isfinite(out))
+    assert diagnostics["manualmg_coarse_pc_type"] == PETSc.PC.Type.LU
+    assert diagnostics["manualmg_coarse_factor_solver_type"] == "petsc"
+    solver._reset_petsc_objects()
+
+
+def test_pmg_shell_backend_configures_redundant_lu_coarse() -> None:
+    hierarchy = _tiny_pmg_hierarchy()
+    fine = hierarchy.level_p4
+    solver = PetscMatlabExactDFGMRESSolver(
+        pc_type="GAMG",
+        q_mask=fine.q_mask,
+        coord=fine.coord,
+        preconditioner_options={
+            "pc_backend": "pmg_shell",
+            "preconditioner_matrix_source": "tangent",
+            "preconditioner_matrix_policy": "current",
+            "preconditioner_rebuild_policy": "every_newton",
+            "preconditioner_rebuild_interval": 1,
+            "mpi_distribute_by_nodes": False,
+            "full_system_preconditioner": False,
+            "pmg_hierarchy": hierarchy,
+            "mg_coarse_pc_type": "redundant",
+            "mg_coarse_pc_redundant_number": 1,
+            "mg_coarse_psubcomm_type": "contiguous",
+            "mg_coarse_redundant_ksp_type": "preonly",
+            "mg_coarse_redundant_pc_type": "lu",
+            "mg_coarse_redundant_pc_factor_mat_solver_type": "petsc",
+        },
+    )
+    A = identity(fine.free_size, format="csr", dtype=np.float64)
+
+    solver.setup_preconditioner(A)
+    out = solver._apply_inner_preconditioner_local(np.ones(fine.free_size, dtype=np.float64))
+
+    diagnostics = solver.get_preconditioner_diagnostics()
+    assert out.shape == (fine.free_size,)
+    assert np.all(np.isfinite(out))
+    assert diagnostics["manualmg_coarse_pc_type"] == PETSc.PC.Type.REDUNDANT
+    assert diagnostics["manualmg_coarse_redundant_group_count"] == 1
+    assert diagnostics["manualmg_coarse_subcomm_size"] == 1
+    assert diagnostics["manualmg_coarse_psubcomm_type"] == "contiguous"
+    assert diagnostics["manualmg_coarse_redundant_ksp_type"] == "preonly"
+    assert diagnostics["manualmg_coarse_redundant_pc_type"] == "lu"
+    assert diagnostics["manualmg_coarse_redundant_pc_factor_mat_solver_type"] == "petsc"
+    solver._reset_petsc_objects()
+
+
 def test_pmg_backends_accept_mixed_p1_p1_p2_hierarchy() -> None:
     coarse = _dummy_level(1)
     mid = _dummy_level(1)

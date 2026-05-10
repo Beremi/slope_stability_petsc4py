@@ -492,6 +492,61 @@ class _ManualPMGShellPC:
                 continue
             self.solver._set_petsc_option(opts, f"{prefix}{key}", value)
 
+    def _coarse_factor_solver_type(self) -> object | None:
+        for key in (
+            "mg_coarse_pc_factor_mat_solver_type",
+            "mg_coarse_factor_solver_type",
+            "factor_solver_type",
+        ):
+            value = self.solver.preconditioner_options.get(key)
+            if value is not None:
+                return value
+        return None
+
+    def _coarse_redundant_factor_solver_type(self) -> object | None:
+        value = self.solver.preconditioner_options.get("mg_coarse_redundant_pc_factor_mat_solver_type")
+        if value is not None:
+            return value
+        return self._coarse_factor_solver_type()
+
+    def _coarse_redundant_number(self, *, comm_size: int) -> int:
+        raw = self.solver.preconditioner_options.get("mg_coarse_pc_redundant_number")
+        if raw is None:
+            return int(comm_size)
+        try:
+            value = int(raw)
+        except Exception:
+            value = int(comm_size)
+        return max(1, min(int(comm_size), value))
+
+    def _configure_coarse_lu_options(self, *, prefix: str) -> None:
+        factor = self._coarse_factor_solver_type()
+        if factor is None:
+            return
+        opts = PETSc.Options()
+        self.solver._set_petsc_option(opts, f"{prefix}pc_factor_mat_solver_type", factor)
+
+    def _configure_coarse_redundant_options(self, *, prefix: str, comm_size: int) -> None:
+        opts = PETSc.Options()
+        value = self._coarse_redundant_number(comm_size=comm_size)
+        self.solver._set_petsc_option(opts, f"{prefix}pc_redundant_number", value)
+        value = self.solver.preconditioner_options.get("mg_coarse_psubcomm_type", "contiguous")
+        self.solver._set_petsc_option(opts, f"{prefix}psubcomm_type", value)
+        for key, option in (
+            ("mg_coarse_redundant_ksp_type", "redundant_ksp_type"),
+            ("mg_coarse_redundant_pc_type", "redundant_pc_type"),
+            (
+                "mg_coarse_redundant_pc_factor_mat_solver_type",
+                "redundant_pc_factor_mat_solver_type",
+            ),
+        ):
+            value = self.solver.preconditioner_options.get(key)
+            if value is not None:
+                self.solver._set_petsc_option(opts, f"{prefix}{option}", value)
+        factor = self._coarse_redundant_factor_solver_type()
+        if factor is not None:
+            self.solver._set_petsc_option(opts, f"{prefix}redundant_pc_factor_mat_solver_type", factor)
+
     def _build_coarse_ksp(self, A, *, prefix: str):
         ksp = PETSc.KSP().create(comm=A.getComm())
         ksp.setOptionsPrefix(prefix)
@@ -523,6 +578,10 @@ class _ManualPMGShellPC:
         if coarse_pc_type.lower() == str(PETSc.PC.Type.HYPRE).lower():
             pc.setHYPREType(str(self.solver.preconditioner_options.get("mg_coarse_pc_hypre_type", "boomeramg")))
             self._configure_coarse_hypre_options(prefix=prefix)
+        elif coarse_pc_type.lower() in {str(PETSc.PC.Type.LU).lower(), str(PETSc.PC.Type.CHOLESKY).lower()}:
+            self._configure_coarse_lu_options(prefix=prefix)
+        elif coarse_pc_type.lower() == str(PETSc.PC.Type.REDUNDANT).lower():
+            self._configure_coarse_redundant_options(prefix=prefix, comm_size=int(A.getComm().getSize()))
         ksp.setFromOptions()
         ksp.setUp()
         return ksp
@@ -614,8 +673,36 @@ class _ManualPMGShellPC:
         payload.update({str(k): v for k, v in self._stats_total.items()})
         if self._stats_last:
             payload.update({str(k): v for k, v in self._stats_last.items()})
-        if str(self.coarse_ksp.getPC().getType()).lower() == str(PETSc.PC.Type.HYPRE).lower():
-            payload["manualmg_coarse_hypre_type"] = str(self.coarse_ksp.getPC().getHYPREType())
+        coarse_pc = self.coarse_ksp.getPC()
+        coarse_pc_type = str(coarse_pc.getType()).lower()
+        if coarse_pc_type in {str(PETSc.PC.Type.LU).lower(), str(PETSc.PC.Type.CHOLESKY).lower()}:
+            try:
+                payload["manualmg_coarse_factor_solver_type"] = str(coarse_pc.getFactorSolverType())
+            except Exception:
+                factor = self._coarse_factor_solver_type()
+                if factor is not None:
+                    payload["manualmg_coarse_factor_solver_type"] = str(factor)
+        if coarse_pc_type == str(PETSc.PC.Type.REDUNDANT).lower():
+            comm_size = int(self.coarse_ksp.getComm().getSize())
+            group_count = self._coarse_redundant_number(comm_size=comm_size)
+            payload["manualmg_coarse_redundant_group_count"] = int(group_count)
+            payload["manualmg_coarse_subcomm_size"] = int(max(1, comm_size // max(1, group_count)))
+            payload["manualmg_coarse_psubcomm_type"] = str(
+                self.solver.preconditioner_options.get("mg_coarse_psubcomm_type", "contiguous")
+            )
+            for key in (
+                "mg_coarse_redundant_ksp_type",
+                "mg_coarse_redundant_pc_type",
+                "mg_coarse_redundant_pc_factor_mat_solver_type",
+            ):
+                value = self.solver.preconditioner_options.get(key)
+                if value is not None:
+                    payload[f"manualmg_coarse_{key.removeprefix('mg_coarse_')}"] = str(value)
+            factor = self._coarse_redundant_factor_solver_type()
+            if factor is not None:
+                payload["manualmg_coarse_redundant_pc_factor_mat_solver_type"] = str(factor)
+        if coarse_pc_type == str(PETSc.PC.Type.HYPRE).lower():
+            payload["manualmg_coarse_hypre_type"] = str(coarse_pc.getHYPREType())
             coarse_prefix = f"{self.solver._options_prefix}manualmg_coarse_"
             opts = PETSc.Options()
             for key in (
