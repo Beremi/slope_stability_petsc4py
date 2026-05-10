@@ -18,6 +18,7 @@ from ..fem.distributed_tangent import (
     assemble_overlap_strain,
     assemble_owned_force_from_local_stress,
     assemble_owned_tangent_values,
+    assemble_unique_strain_from_overlap,
 )
 from ..utils import (
     IterationHistory,
@@ -31,6 +32,7 @@ from ..utils import (
     release_petsc_aij_matrix,
 )
 from ..linear.preconditioners import make_near_nullspace_elasticity
+from ..mesh.materials import heterogenous_materials_at_indices
 
 try:  # pragma: no cover - PETSc is optional in some tests
     from petsc4py import PETSc
@@ -1216,6 +1218,9 @@ class ConstitutiveOperator:
     n_int: int
     dim: int
     q_mask: np.ndarray | None = None
+    material_identifier: np.ndarray | None = None
+    material_specs: Any = None
+    material_n_q: int | None = None
 
     def __post_init__(self):
         self.c0 = np.asarray(self.c0, dtype=np.float64)
@@ -1226,6 +1231,10 @@ class ConstitutiveOperator:
         self.lame = np.asarray(self.lame, dtype=np.float64)
         self.WEIGHT = np.asarray(self.WEIGHT, dtype=np.float64)
         self.q_mask = None if self.q_mask is None else np.asarray(self.q_mask, dtype=bool)
+        self.material_identifier = (
+            None if self.material_identifier is None else np.asarray(self.material_identifier, dtype=np.int64).ravel()
+        )
+        self.material_n_q = None if self.material_n_q is None else int(self.material_n_q)
         self.S = None
         self.DS = None
         self.c_bar = None
@@ -1278,6 +1287,8 @@ class ConstitutiveOperator:
         self._owned_unique_sin_phi = None
         self._owned_overlap_materials = None
         self._owned_unique_materials = None
+        self._owned_overlap_weight = None
+        self._owned_unique_weight = None
 
         # Sparse assembly helpers for the legacy global B.T @ D @ B path.  Large
         # distributed runs attach an owned_tangent_pattern after construction and
@@ -1343,22 +1354,70 @@ class ConstitutiveOperator:
         self._owned_unique_c_bar = None
         self._owned_unique_sin_phi = None
 
+    def _owned_mode_uses_overlap_values(self) -> bool:
+        return str(self.owned_constitutive_mode).lower() == "overlap"
+
+    def _owned_mode_uses_unique_values(self) -> bool:
+        return str(self.owned_constitutive_mode).lower() in {
+            "unique",
+            "unique_gather",
+            "unique_exchange",
+            "no_overlap",
+            "partitioned",
+        }
+
+    def _material_arrays_for_indices(self, indices: np.ndarray) -> tuple[np.ndarray, ...]:
+        idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+        if self.c0.size:
+            material_arrays = (self.c0, self.phi, self.psi, self.shear, self.bulk, self.lame)
+            return tuple(np.asarray(arr[idx], dtype=np.float64) for arr in material_arrays)
+        if self.material_identifier is None or self.material_specs is None or self.material_n_q is None:
+            raise RuntimeError("Owned constitutive path needs either full material arrays or material metadata.")
+        c0, phi, psi, shear, bulk, lame, _gamma = heterogenous_materials_at_indices(
+            self.material_identifier,
+            True,
+            int(self.material_n_q),
+            self.material_specs,
+            idx,
+        )
+        return c0, phi, psi, shear, bulk, lame
+
     def _prepare_owned_material_arrays(self) -> None:
         pattern = self.owned_tangent_pattern
         if pattern is None or str(self.owned_constitutive_mode).lower() == "global":
             self._owned_overlap_materials = None
             self._owned_unique_materials = None
+            self._owned_overlap_weight = None
+            self._owned_unique_weight = None
             return
 
-        material_arrays = (self.c0, self.phi, self.psi, self.shear, self.bulk, self.lame)
-        overlap_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
-        self._owned_overlap_materials = tuple(np.asarray(arr[overlap_idx], dtype=np.float64) for arr in material_arrays)
-
-        unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
-        if unique_idx.size:
-            self._owned_unique_materials = tuple(np.asarray(arr[unique_idx], dtype=np.float64) for arr in material_arrays)
+        if self._owned_mode_uses_overlap_values():
+            overlap_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
+            self._owned_overlap_materials = self._material_arrays_for_indices(overlap_idx)
+            self._owned_overlap_weight = np.asarray(pattern.overlap_assembly_weight, dtype=np.float64)
         else:
-            self._owned_unique_materials = tuple(np.empty(0, dtype=np.float64) for _ in material_arrays)
+            self._owned_overlap_materials = None
+            self._owned_overlap_weight = None
+
+        if self._owned_mode_uses_unique_values():
+            unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
+            if unique_idx.size:
+                self._owned_unique_materials = self._material_arrays_for_indices(unique_idx)
+                owner_mask = np.asarray(pattern.local_overlap_owner_mask, dtype=bool)
+                owner_pos = np.asarray(pattern.local_overlap_to_unique_pos, dtype=np.int32)
+                if int(np.count_nonzero(owner_mask)) != int(unique_idx.size):
+                    raise RuntimeError("Unique owned-weight extraction expected one overlap owner per unique integration point")
+                self._owned_unique_weight = np.empty(int(unique_idx.size), dtype=np.float64)
+                self._owned_unique_weight[np.asarray(owner_pos[owner_mask], dtype=np.int64)] = np.asarray(
+                    pattern.overlap_assembly_weight,
+                    dtype=np.float64,
+                )[owner_mask]
+            else:
+                self._owned_unique_materials = tuple(np.empty(0, dtype=np.float64) for _ in range(6))
+                self._owned_unique_weight = np.empty(0, dtype=np.float64)
+        else:
+            self._owned_unique_materials = None
+            self._owned_unique_weight = None
 
         if self.B is None:
             empty = np.empty(0, dtype=np.float64)
@@ -1433,20 +1492,40 @@ class ConstitutiveOperator:
         self.S = None
         self.DS = None
 
-    def _evaluate_owned_unique_gather_constitutive(self, U, *, return_tangent: bool) -> None:
+    def _evaluate_owned_unique_strain(self, U) -> np.ndarray:
         pattern = self.owned_tangent_pattern
         if pattern is None:
             raise ValueError("Owned tangent pattern not configured")
 
         n_local = int(np.asarray(pattern.unique_local_int_indices, dtype=np.int64).size)
-        t0 = perf_counter()
-        if n_local:
+        if n_local == 0:
+            return np.empty((int(self.n_strain), 0), dtype=np.float64)
+
+        unique_B = getattr(pattern, "unique_B", None)
+        unique_global_dofs = np.asarray(pattern.unique_global_dofs, dtype=np.int64)
+        if (
+            unique_B is not None
+            and int(getattr(unique_B, "shape", (0, 0))[0]) == int(self.n_strain) * n_local
+            and unique_global_dofs.size > 0
+        ):
             u_flat = np.asarray(U, dtype=np.float64).reshape(-1, order="F")
-            u_unique = u_flat[np.asarray(pattern.unique_global_dofs, dtype=np.int64)]
-            E_unique = pattern.unique_B @ u_unique
-            E_unique = np.asarray(E_unique, dtype=np.float64).reshape(self.n_strain, -1, order="F")
-        else:
-            E_unique = np.empty((self.n_strain, 0), dtype=np.float64)
+            u_unique = u_flat[unique_global_dofs]
+            E_unique = unique_B @ u_unique
+            return np.asarray(E_unique, dtype=np.float64).reshape(self.n_strain, -1, order="F")
+
+        return assemble_unique_strain_from_overlap(
+            pattern,
+            U,
+            use_compiled=self.use_compiled_owned_constitutive,
+        )
+
+    def _evaluate_owned_unique_gather_constitutive(self, U, *, return_tangent: bool) -> None:
+        pattern = self.owned_tangent_pattern
+        if pattern is None:
+            raise ValueError("Owned tangent pattern not configured")
+
+        t0 = perf_counter()
+        E_unique = self._evaluate_owned_unique_strain(U)
         self.time_local_strain.append(perf_counter() - t0)
 
         unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
@@ -1526,15 +1605,8 @@ class ConstitutiveOperator:
         if pattern is None:
             raise ValueError("Owned tangent pattern not configured")
 
-        n_local = int(np.asarray(pattern.unique_local_int_indices, dtype=np.int64).size)
         t0 = perf_counter()
-        if n_local:
-            u_flat = np.asarray(U, dtype=np.float64).reshape(-1, order="F")
-            u_unique = u_flat[np.asarray(pattern.unique_global_dofs, dtype=np.int64)]
-            E_unique = pattern.unique_B @ u_unique
-            E_unique = np.asarray(E_unique, dtype=np.float64).reshape(self.n_strain, -1, order="F")
-        else:
-            E_unique = np.empty((self.n_strain, 0), dtype=np.float64)
+        E_unique = self._evaluate_owned_unique_strain(U)
         self.time_local_strain.append(perf_counter() - t0)
 
         unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
@@ -1943,40 +2015,50 @@ class ConstitutiveOperator:
             pattern = self.owned_tangent_pattern
             if pattern is None:
                 raise ValueError("Owned tangent pattern not configured")
-            local_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
-            overlap_materials = self._owned_overlap_materials
-            if overlap_materials is not None:
-                c0_overlap, phi_overlap, psi_overlap = overlap_materials[:3]
-            else:
-                c0_overlap = self.c0[local_idx]
-                phi_overlap = self.phi[local_idx]
-                psi_overlap = self.psi[local_idx]
-            self._owned_overlap_c_bar, self._owned_overlap_sin_phi = reduction(
-                c0_overlap,
-                phi_overlap,
-                psi_overlap,
-                lam,
-                self.Davis_type,
-            )
-            unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
-            if unique_idx.size:
-                unique_materials = self._owned_unique_materials
-                if unique_materials is not None:
-                    c0_unique, phi_unique, psi_unique = unique_materials[:3]
+
+            if self._owned_mode_uses_overlap_values():
+                local_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
+                overlap_materials = self._owned_overlap_materials
+                if overlap_materials is not None:
+                    c0_overlap, phi_overlap, psi_overlap = overlap_materials[:3]
                 else:
-                    c0_unique = self.c0[unique_idx]
-                    phi_unique = self.phi[unique_idx]
-                    psi_unique = self.psi[unique_idx]
-                self._owned_unique_c_bar, self._owned_unique_sin_phi = reduction(
-                    c0_unique,
-                    phi_unique,
-                    psi_unique,
+                    c0_overlap = self.c0[local_idx]
+                    phi_overlap = self.phi[local_idx]
+                    psi_overlap = self.psi[local_idx]
+                self._owned_overlap_c_bar, self._owned_overlap_sin_phi = reduction(
+                    c0_overlap,
+                    phi_overlap,
+                    psi_overlap,
                     lam,
                     self.Davis_type,
                 )
             else:
-                self._owned_unique_c_bar = np.empty(0, dtype=np.float64)
-                self._owned_unique_sin_phi = np.empty(0, dtype=np.float64)
+                self._owned_overlap_c_bar = None
+                self._owned_overlap_sin_phi = None
+
+            if self._owned_mode_uses_unique_values():
+                unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
+                if unique_idx.size:
+                    unique_materials = self._owned_unique_materials
+                    if unique_materials is not None:
+                        c0_unique, phi_unique, psi_unique = unique_materials[:3]
+                    else:
+                        c0_unique = self.c0[unique_idx]
+                        phi_unique = self.phi[unique_idx]
+                        psi_unique = self.psi[unique_idx]
+                    self._owned_unique_c_bar, self._owned_unique_sin_phi = reduction(
+                        c0_unique,
+                        phi_unique,
+                        psi_unique,
+                        lam,
+                        self.Davis_type,
+                    )
+                else:
+                    self._owned_unique_c_bar = np.empty(0, dtype=np.float64)
+                    self._owned_unique_sin_phi = np.empty(0, dtype=np.float64)
+            else:
+                self._owned_unique_c_bar = None
+                self._owned_unique_sin_phi = None
             self.c_bar = None
             self.sin_phi = None
         else:
@@ -2246,13 +2328,13 @@ class ConstitutiveOperator:
             if pattern is None:
                 raise RuntimeError("Owned tangent pattern is not available for local potential-energy evaluation")
 
-            unique_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
-            if unique_idx.size and getattr(pattern, "unique_B", None) is not None:
-                u_flat = np.asarray(U, dtype=np.float64).reshape(-1, order="F")
-                u_unique = u_flat[np.asarray(pattern.unique_global_dofs, dtype=np.int64)]
-                E_local = np.asarray(pattern.unique_B @ u_unique, dtype=np.float64).reshape(self.n_strain, -1, order="F")
+            if self._owned_mode_uses_unique_values():
+                local_idx = np.asarray(pattern.unique_local_int_indices, dtype=np.int64)
+                E_local = self._evaluate_owned_unique_strain(U)
                 c_bar_local = self._owned_unique_c_bar
                 sin_phi_local = self._owned_unique_sin_phi
+                material_arrays = self._owned_unique_materials
+                weight_local = self._owned_unique_weight
             else:
                 local_idx = np.asarray(pattern.local_int_indices, dtype=np.int64)
                 E_local = assemble_overlap_strain(
@@ -2260,35 +2342,45 @@ class ConstitutiveOperator:
                     U,
                     use_compiled=self.use_compiled_owned_constitutive,
                 )
-                unique_idx = local_idx
                 c_bar_local = self._owned_overlap_c_bar
                 sin_phi_local = self._owned_overlap_sin_phi
+                material_arrays = self._owned_overlap_materials
+                weight_local = self._owned_overlap_weight
 
             if c_bar_local is None or sin_phi_local is None:
                 if self.c_bar is None or self.sin_phi is None:
                     raise ValueError("Material reduction not set. Call reduction(lambda) first.")
-                c_bar_local = np.asarray(self.c_bar[unique_idx], dtype=np.float64)
-                sin_phi_local = np.asarray(self.sin_phi[unique_idx], dtype=np.float64)
+                c_bar_local = np.asarray(self.c_bar[local_idx], dtype=np.float64)
+                sin_phi_local = np.asarray(self.sin_phi[local_idx], dtype=np.float64)
+
+            if material_arrays is not None:
+                _c0_local, _phi_local, _psi_local, shear_local, bulk_local, lame_local = material_arrays
+            else:
+                shear_local = self.shear[local_idx]
+                bulk_local = self.bulk[local_idx]
+                lame_local = self.lame[local_idx]
+            if weight_local is None:
+                weight_local = self.WEIGHT[local_idx]
 
             if self.dim == 2:
                 Psi_local = potential_2D(
                     E_local,
                     np.asarray(c_bar_local, dtype=np.float64),
                     np.asarray(sin_phi_local, dtype=np.float64),
-                    self.shear[unique_idx],
-                    self.bulk[unique_idx],
-                    self.lame[unique_idx],
+                    np.asarray(shear_local, dtype=np.float64),
+                    np.asarray(bulk_local, dtype=np.float64),
+                    np.asarray(lame_local, dtype=np.float64),
                 )
             else:
                 Psi_local = potential_3D(
                     E_local,
                     np.asarray(c_bar_local, dtype=np.float64),
                     np.asarray(sin_phi_local, dtype=np.float64),
-                    self.shear[unique_idx],
-                    self.bulk[unique_idx],
-                    self.lame[unique_idx],
+                    np.asarray(shear_local, dtype=np.float64),
+                    np.asarray(bulk_local, dtype=np.float64),
+                    np.asarray(lame_local, dtype=np.float64),
                 )
-            local_energy = float(np.dot(np.asarray(self.WEIGHT[unique_idx], dtype=np.float64), np.asarray(Psi_local, dtype=np.float64)))
+            local_energy = float(np.dot(np.asarray(weight_local, dtype=np.float64), np.asarray(Psi_local, dtype=np.float64)))
             Psi_integrated = _sum_scalar_over_comm(local_energy, self._local_comm())
         else:
             raise RuntimeError("Global strain operator B is not available for this constitutive path")

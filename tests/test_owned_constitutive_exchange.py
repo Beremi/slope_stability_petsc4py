@@ -41,7 +41,7 @@ def _elevated_tetra_mesh(order: int, tet4: np.ndarray, vertices: np.ndarray) -> 
     return coord, elem
 
 
-def _build_chain_pattern(elem_type: str = "P2", *, n_elem: int = 4):
+def _build_chain_pattern(elem_type: str = "P2", *, n_elem: int = 4, include_unique_B: bool = True):
     order = {"P1": 1, "P2": 2, "P4": 4}[str(elem_type).upper()]
     n_vertices = int(n_elem) + 3
     t = np.arange(1, n_vertices + 1, dtype=np.float64)
@@ -59,6 +59,7 @@ def _build_chain_pattern(elem_type: str = "P2", *, n_elem: int = 4):
         (0, coord.shape[1]),
         elem_type=elem_type,
         include_unique=True,
+        include_unique_B=bool(include_unique_B),
         include_legacy_scatter=False,
         include_overlap_B=False,
     )
@@ -136,3 +137,17 @@ def test_owned_constitutive_modes_match_in_rank1() -> None:
         assert np.allclose(candidate["DS_local"], baseline["DS_local"], rtol=1.0e-11, atol=1.0e-11)
         assert np.allclose(candidate["F_local"], baseline["F_local"], rtol=1.0e-11, atol=1.0e-11)
         assert np.allclose(candidate["tangent_values"], baseline["tangent_values"], rtol=1.0e-11, atol=1.0e-11)
+
+
+def test_unique_exchange_matches_without_unique_B_in_rank1() -> None:
+    coord, elem, q_mask, _material_identifier, pattern = _build_chain_pattern("P2", n_elem=4, include_unique_B=False)
+    n_elem = int(elem.shape[1])
+    assert pattern.unique_B.shape == (0, 0)
+
+    baseline = _evaluate_mode(pattern, q_mask, n_elem, int(pattern.n_q), int(coord.shape[1]), "overlap")
+    candidate = _evaluate_mode(pattern, q_mask, n_elem, int(pattern.n_q), int(coord.shape[1]), "unique_exchange")
+
+    assert np.allclose(candidate["S_local"], baseline["S_local"], rtol=1.0e-11, atol=1.0e-11)
+    assert np.allclose(candidate["DS_local"], baseline["DS_local"], rtol=1.0e-11, atol=1.0e-11)
+    assert np.allclose(candidate["F_local"], baseline["F_local"], rtol=1.0e-11, atol=1.0e-11)
+    assert np.allclose(candidate["tangent_values"], baseline["tangent_values"], rtol=1.0e-11, atol=1.0e-11)

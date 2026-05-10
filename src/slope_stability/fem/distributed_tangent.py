@@ -907,6 +907,33 @@ def assemble_overlap_strain(
     return np.asarray(overlap_B @ u_overlap, dtype=np.float64).reshape(int(pattern.n_strain), -1, order="F")
 
 
+def assemble_unique_strain_from_overlap(
+    pattern: OwnedTangentPattern,
+    U: np.ndarray,
+    *,
+    use_compiled: bool = True,
+) -> np.ndarray:
+    """Compute owned-unique strains using the already-built overlap geometry."""
+
+    n_unique = int(np.asarray(pattern.unique_local_int_indices, dtype=np.int64).size)
+    if n_unique == 0:
+        return np.empty((int(pattern.n_strain), 0), dtype=np.float64)
+
+    owner_mask = np.asarray(pattern.local_overlap_owner_mask, dtype=bool)
+    owner_pos = np.asarray(pattern.local_overlap_to_unique_pos, dtype=np.int32)
+    if int(np.count_nonzero(owner_mask)) != n_unique:
+        raise RuntimeError("Unique strain extraction expected one owned overlap point per unique integration point")
+
+    unique_pos = np.asarray(owner_pos[owner_mask], dtype=np.int64)
+    if unique_pos.size and (int(unique_pos.min()) < 0 or int(unique_pos.max()) >= n_unique):
+        raise RuntimeError("Unique strain extraction metadata contains invalid owned positions")
+
+    E_overlap = assemble_overlap_strain(pattern, U, use_compiled=use_compiled)
+    E_unique = np.empty((int(pattern.n_strain), n_unique), dtype=np.float64)
+    E_unique[:, unique_pos] = E_overlap[:, owner_mask]
+    return E_unique
+
+
 def assemble_owned_force_from_local_stress(
     pattern: OwnedTangentPattern,
     stress_local: np.ndarray,
@@ -945,6 +972,7 @@ def prepare_owned_tangent_pattern(
     elem_type: str = "P2",
     quadrature_rule: int | str | None = None,
     include_unique: bool = True,
+    include_unique_B: bool = True,
     include_legacy_scatter: bool = True,
     include_overlap_B: bool = True,
     elastic_rows: OwnedElasticRows | None = None,
@@ -1020,22 +1048,26 @@ def prepare_owned_tangent_pattern(
     if include_unique:
         elem_owner_nodes = np.min(np.asarray(elem, dtype=np.int64), axis=0)
         unique_elements = np.flatnonzero((elem_owner_nodes >= node0) & (elem_owner_nodes < node1)).astype(np.int64)
+        unique_local_int_indices = (
+            unique_elements[:, None] * overlap_asm.n_q + np.arange(overlap_asm.n_q, dtype=np.int64)[None, :]
+        ).reshape(-1)
         if unique_elements.size:
-            unique_nodes = np.unique(np.asarray(elem, dtype=np.int64)[:, unique_elements].reshape(-1, order="F")).astype(np.int64)
-            unique_node_lids = np.full(int(np.asarray(coord).shape[1]), -1, dtype=np.int64)
-            unique_node_lids[unique_nodes] = np.arange(unique_nodes.size, dtype=np.int64)
-            coord_unique = np.asarray(coord, dtype=np.float64)[:, unique_nodes]
-            elem_unique = unique_node_lids[np.asarray(elem, dtype=np.int64)[:, unique_elements]]
-            unique_asm = assemble_strain_operator(coord_unique, elem_unique, elem_type, dim=dim, quadrature_rule=quadrature_rule)
-            unique_global_dofs = _global_dofs_for_nodes(unique_nodes, dim)
-            unique_local_int_indices = (
-                unique_elements[:, None] * overlap_asm.n_q + np.arange(overlap_asm.n_q, dtype=np.int64)[None, :]
-            ).reshape(-1)
-            unique_B = unique_asm.B.tocsr()
+            if include_unique_B:
+                unique_nodes = np.unique(np.asarray(elem, dtype=np.int64)[:, unique_elements].reshape(-1, order="F")).astype(np.int64)
+                unique_node_lids = np.full(int(np.asarray(coord).shape[1]), -1, dtype=np.int64)
+                unique_node_lids[unique_nodes] = np.arange(unique_nodes.size, dtype=np.int64)
+                coord_unique = np.asarray(coord, dtype=np.float64)[:, unique_nodes]
+                elem_unique = unique_node_lids[np.asarray(elem, dtype=np.int64)[:, unique_elements]]
+                unique_asm = assemble_strain_operator(coord_unique, elem_unique, elem_type, dim=dim, quadrature_rule=quadrature_rule)
+                unique_global_dofs = _global_dofs_for_nodes(unique_nodes, dim)
+                unique_B = unique_asm.B.tocsr()
+            else:
+                unique_nodes = np.empty(0, dtype=np.int64)
+                unique_global_dofs = np.empty(0, dtype=np.int64)
+                unique_B = csr_matrix((0, 0), dtype=np.float64)
         else:
             unique_nodes = np.empty(0, dtype=np.int64)
             unique_global_dofs = np.empty(0, dtype=np.int64)
-            unique_local_int_indices = np.empty(0, dtype=np.int64)
             unique_B = csr_matrix((0, 0), dtype=np.float64)
     else:
         unique_nodes = np.empty(0, dtype=np.int64)

@@ -8,6 +8,7 @@ from typing import Callable
 import numpy as np
 
 from ..nonlinear.damping import damping_alg5
+from ..nonlinear.local_rhs import is_owned_local_load
 from ..nonlinear.newton import _combine_matrices, _normalize_stopping_criterion, newton, newton_ind_ssr
 from ..utils import petsc_vec_to_global_array, q_to_free_indices, release_petsc_aij_matrix
 
@@ -29,10 +30,16 @@ def _free_indices(Q: np.ndarray) -> np.ndarray:
 
 
 def _free(v: np.ndarray, Q: np.ndarray) -> np.ndarray:
+    if is_owned_local_load(v):
+        return v.free_vector(Q)
     return np.asarray(v, dtype=np.float64).reshape(-1, order="F")[_free_indices(Q)]
 
 
 def _free_dot(a: np.ndarray, b: np.ndarray, Q: np.ndarray) -> float:
+    if is_owned_local_load(a):
+        return float(a.dot_field(b))
+    if is_owned_local_load(b):
+        return float(b.dot_field(a))
     return float(np.dot(_free(a, Q), _free(b, Q)))
 
 
@@ -2521,6 +2528,7 @@ def SSR_indirect_continuation(
     if continuation_mode_name not in {"classic", "streaming_microstep"}:
         raise ValueError(f"Unsupported continuation_mode {continuation_mode!r}.")
     if continuation_mode_name == "streaming_microstep":
+        f_stream = f.materialize_full() if is_owned_local_load(f) else f
         return _SSR_indirect_continuation_streaming_microstep(
             lambda_init=lambda_init,
             d_lambda_init=d_lambda_init,
@@ -2533,7 +2541,7 @@ def SSR_indirect_continuation(
             r_min=r_min,
             K_elast=K_elast,
             Q=Q,
-            f=f,
+            f=f_stream,
             constitutive_matrix_builder=constitutive_matrix_builder,
             linear_system_solver=linear_system_solver,
             progress_callback=progress_callback,
@@ -2602,6 +2610,12 @@ def SSR_indirect_continuation(
     configured_predictor_modes = {predictor_mode}
     if predictor_switch_to_mode is not None:
         configured_predictor_modes.add(predictor_switch_to_mode)
+    if is_owned_local_load(f) and (
+        configured_predictor_modes != {"secant"}
+        or secant_correction_mode != "none"
+        or bool(continuation_predictor_refine_lambda_for_fixed_u)
+    ):
+        f = f.materialize_full()
     keep_increment_history = bool(
         {"reduced_newton_all_prev", "reduced_newton_window"} & configured_predictor_modes
         or secant_correction_mode == "orthogonal_increment_ls"

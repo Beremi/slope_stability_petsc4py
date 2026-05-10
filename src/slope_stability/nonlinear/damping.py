@@ -42,6 +42,23 @@ def _dist_norm_local(x_local: np.ndarray, comm) -> float:
     return float(np.sqrt(max(_dist_dot_local(x_local, x_local, comm), 0.0)))
 
 
+def _is_local_rhs(value: object) -> bool:
+    return hasattr(value, "owned_free_rows") and hasattr(value, "dot_field")
+
+
+def _rhs_array(value) -> np.ndarray:
+    if _is_local_rhs(value):
+        return np.asarray(value.materialize_full(), dtype=np.float64)
+    return np.asarray(value, dtype=np.float64)
+
+
+def _rhs_dot_field(value, field: np.ndarray, q_mask: np.ndarray | None, constitutive_matrix_builder=None) -> float:
+    if _is_local_rhs(value):
+        pattern = getattr(constitutive_matrix_builder, "owned_tangent_pattern", None)
+        return float(value.dot_field(field, pattern=pattern))
+    return _dot(np.asarray(value, dtype=np.float64), field, q_mask=q_mask)
+
+
 def _line_search_result(alpha: float, iterations: int) -> dict[str, float | int]:
     return {
         "alpha": float(alpha),
@@ -72,7 +89,7 @@ def _indirect_trial_residual_norm(
         return np.inf
 
     if bool(rescale_trial_to_omega) and omega_target is not None:
-        denom = _dot(np.asarray(f, dtype=np.float64), U_alpha, q_mask=q_mask)
+        denom = _rhs_dot_field(f, U_alpha, q_mask=q_mask, constitutive_matrix_builder=constitutive_matrix_builder)
         if not np.isfinite(denom) or abs(float(denom)) <= 1.0e-30:
             return np.inf
         U_alpha = U_alpha * (float(omega_target) / float(denom))
@@ -90,7 +107,7 @@ def _indirect_trial_residual_norm(
             F_alpha_free = np.asarray(build_F_all_free(lambda_alpha, U_alpha), dtype=np.float64).reshape(-1)
             return float(np.linalg.norm(F_alpha_free - np.asarray(f_free, dtype=np.float64).reshape(-1)))
         F_alpha = constitutive_matrix_builder.build_F_all(lambda_alpha, U_alpha)
-        return _norm(F_alpha - np.asarray(f, dtype=np.float64), q_mask=q_mask)
+        return _norm(F_alpha - _rhs_array(f), q_mask=q_mask)
     except Exception as exc:  # pragma: no cover - defensive for constitutive backends
         if _is_invalid_lambda_trial(exc):
             return np.inf
@@ -193,7 +210,7 @@ def damping(
     U_it = np.asarray(U_it, dtype=np.float64)
     dU = np.asarray(dU, dtype=np.float64)
     F = None if F is None else np.asarray(F, dtype=np.float64)
-    f = np.asarray(f, dtype=np.float64)
+    f_array = None if _is_local_rhs(f) else np.asarray(f, dtype=np.float64)
     if q_mask is not None:
         q_mask = np.asarray(q_mask, dtype=bool)
 
@@ -210,7 +227,7 @@ def damping(
         else:
             if F is None:
                 raise ValueError("F must be provided when reduced residuals are unavailable")
-            residual_eval = _extract(F - f, q_mask)
+            residual_eval = _extract(F - (f_array if f_array is not None else _rhs_array(f)), q_mask)
         initial_decrease = float(np.dot(residual_eval, dU_eval))
     if (
         np.isnan(initial_decrease)
@@ -250,7 +267,7 @@ def damping(
             decrease = float(np.dot(F_alpha_free - np.asarray(f_free, dtype=np.float64).reshape(-1), dU_eval))
         else:
             F_alpha = constitutive_matrix_builder.build_F_reduced(U_alpha)
-            decrease = _dot(F_alpha - f, dU, q_mask=q_mask)
+            decrease = _dot(F_alpha - (f_array if f_array is not None else _rhs_array(f)), dU, q_mask=q_mask)
 
         if decrease < 0.0:
             if alpha == 1.0:
@@ -297,7 +314,6 @@ def damping_alg5(
 
     U_it = np.asarray(U_it, dtype=np.float64)
     d_U = np.asarray(d_U, dtype=np.float64)
-    f = np.asarray(f, dtype=np.float64)
     q_mask = np.asarray(q_mask, dtype=bool)
     mode_name = str(mode).strip().lower()
     if mode_name == "alg5":

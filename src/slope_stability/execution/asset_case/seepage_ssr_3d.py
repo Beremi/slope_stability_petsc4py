@@ -481,6 +481,7 @@ def run_capture(
         (row0 // coord.shape[0], row1 // coord.shape[0]),
         elem_type=elem_type,
         include_unique=(str(constitutive_mode).lower() != "overlap"),
+        include_unique_B=(str(constitutive_mode).lower() != "unique_exchange"),
         include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
         include_overlap_B=(str(tangent_kernel).lower() == "legacy"),
         elastic_rows=elastic_rows,

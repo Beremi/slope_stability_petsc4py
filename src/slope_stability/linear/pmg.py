@@ -36,9 +36,12 @@ class PMGLevel:
     owned_total_range: tuple[int, int]
     owned_free_range: tuple[int, int]
     dof_dim: int | None = None
+    free_size_override: int | None = None
 
     @property
     def dim(self) -> int:
+        if self.coord.size == 0 and self.dof_dim is not None:
+            return int(self.dof_dim)
         return int(self.coord.shape[0])
 
     @property
@@ -57,6 +60,8 @@ class PMGLevel:
 
     @property
     def free_size(self) -> int:
+        if self.free_size_override is not None:
+            return int(self.free_size_override)
         return int(self.freedofs.size)
 
     @property
@@ -158,6 +163,72 @@ class GeneralPMGHierarchy:
     @property
     def fine_level(self) -> PMGLevel:
         return self.levels_tuple[-1]
+
+
+def _empty_transfer_like(transfer: PMGTransfer) -> PMGTransfer:
+    return PMGTransfer(
+        coarse_order=int(transfer.coarse_order),
+        fine_order=int(transfer.fine_order),
+        local_matrix=csr_matrix((0, 0), dtype=np.float64),
+        global_shape=tuple(int(v) for v in transfer.global_shape),
+        owned_row_range=tuple(int(v) for v in transfer.owned_row_range),
+        coo_rows=np.empty(0, dtype=np.int64),
+        coo_cols=np.empty(0, dtype=np.int64),
+        coo_data=np.empty(0, dtype=np.float64),
+    )
+
+
+def _compact_level_for_runtime(level: PMGLevel, *, keep_geometry: bool) -> PMGLevel:
+    if keep_geometry:
+        return level
+    return PMGLevel(
+        order=int(level.order),
+        elem_type=str(level.elem_type),
+        coord=np.empty((0, 0), dtype=np.float64),
+        elem=np.empty((0, 0), dtype=np.int64),
+        surf=np.empty((0, 0), dtype=np.int64),
+        q_mask=np.empty((0, 0), dtype=bool),
+        material_identifier=np.empty(0, dtype=np.int64),
+        freedofs=np.empty(0, dtype=np.int64),
+        total_to_free_orig=np.empty(0, dtype=np.int64),
+        perm=np.empty(0, dtype=np.int64),
+        iperm=np.empty(0, dtype=np.int64),
+        owned_node_range=tuple(int(v) for v in level.owned_node_range),
+        owned_total_range=tuple(int(v) for v in level.owned_total_range),
+        owned_free_range=tuple(int(v) for v in level.owned_free_range),
+        dof_dim=int(level.dof_per_node),
+        free_size_override=int(level.free_size),
+    )
+
+
+def compact_pmg_hierarchy_for_runtime(hierarchy):
+    """Drop Python-side PMG arrays after PETSc transfer matrices are built."""
+
+    if isinstance(hierarchy, GeneralPMGHierarchy):
+        levels = tuple(
+            _compact_level_for_runtime(level, keep_geometry=(idx == 0))
+            for idx, level in enumerate(tuple(hierarchy.levels_tuple))
+        )
+        transfers = tuple(_empty_transfer_like(transfer) for transfer in tuple(hierarchy.prolongations_tuple))
+        return GeneralPMGHierarchy(
+            levels_tuple=levels,
+            prolongations_tuple=transfers,
+            materials=tuple(hierarchy.materials),
+            mesh_path=Path(hierarchy.mesh_path),
+            node_ordering=str(hierarchy.node_ordering),
+        )
+    if isinstance(hierarchy, ElasticPMGHierarchy):
+        return ElasticPMGHierarchy(
+            level_p1=hierarchy.level_p1,
+            level_p2=_compact_level_for_runtime(hierarchy.level_p2, keep_geometry=False),
+            level_p4=_compact_level_for_runtime(hierarchy.level_p4, keep_geometry=False),
+            prolongation_p21=_empty_transfer_like(hierarchy.prolongation_p21),
+            prolongation_p42=_empty_transfer_like(hierarchy.prolongation_p42),
+            materials=tuple(hierarchy.materials),
+            mesh_path=Path(hierarchy.mesh_path),
+            node_ordering=str(hierarchy.node_ordering),
+        )
+    return hierarchy
 
 
 def _materials_from_rows(material_rows: list[list[float]] | None, *, resolved_asset: ResolvedAsset) -> tuple[MaterialSpec, ...]:

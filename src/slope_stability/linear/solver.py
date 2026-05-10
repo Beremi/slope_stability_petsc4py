@@ -43,6 +43,7 @@ from .orthogonalize import (
     a_orthogonalize_with_local_metadata,
 )
 from .preconditioners import attach_near_nullspace, build_preconditioner, make_near_nullspace_elasticity
+from .pmg import compact_pmg_hierarchy_for_runtime
 
 
 PreconditionerFactory = Callable[[object], Callable[[np.ndarray], np.ndarray]]
@@ -2065,8 +2066,13 @@ class PetscKSPFGMRESSolver:
                 restriction = prolongation.copy()
                 restriction = restriction.transpose()
                 restrictions.append(restriction)
+        runtime_hierarchy = hierarchy
+        if bool(self.preconditioner_options.get("compact_pmg_python_hierarchy_after_setup", True)):
+            runtime_hierarchy = compact_pmg_hierarchy_for_runtime(hierarchy)
+            self.preconditioner_options["pmg_hierarchy"] = runtime_hierarchy
+            hierarchy = runtime_hierarchy
         self._pmg_state = _PMGPetscHierarchyState(
-            hierarchy=hierarchy,
+            hierarchy=runtime_hierarchy,
             prolongations=tuple(petsc_prolongations),
             restrictions=tuple(restrictions),
             level_orders=tuple(int(level.order) for level in levels),

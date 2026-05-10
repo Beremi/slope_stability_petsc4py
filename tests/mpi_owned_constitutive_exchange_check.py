@@ -59,7 +59,7 @@ def _owned_ranges_from_owner_nodes(elem: np.ndarray, n_nodes: int, size: int) ->
     return ranges
 
 
-def _build_chain_pattern(elem_type: str, *, size: int, rank: int, elems_per_rank: int):
+def _build_chain_pattern(elem_type: str, *, size: int, rank: int, elems_per_rank: int, include_unique_B: bool):
     order = {"P1": 1, "P2": 2, "P4": 4}[str(elem_type).upper()]
     n_elem = max(int(size) * int(elems_per_rank), 4)
     n_vertices = int(n_elem) + 3
@@ -78,6 +78,7 @@ def _build_chain_pattern(elem_type: str, *, size: int, rank: int, elems_per_rank
         owned_ranges[int(rank)],
         elem_type=elem_type,
         include_unique=True,
+        include_unique_B=bool(include_unique_B),
         include_legacy_scatter=False,
         include_overlap_B=False,
     )
@@ -150,6 +151,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="MPI equivalence check for overlap/unique constitutive modes.")
     parser.add_argument("--elem-type", type=str, default="P2", choices=["P1", "P2", "P4"])
     parser.add_argument("--elems-per-rank", type=int, default=3)
+    parser.add_argument("--no-unique-B", action="store_true", default=False)
     parser.add_argument("--rtol", type=float, default=1.0e-11)
     parser.add_argument("--atol", type=float, default=1.0e-11)
     args = parser.parse_args()
@@ -163,6 +165,7 @@ def main() -> int:
         size=size,
         rank=rank,
         elems_per_rank=int(args.elems_per_rank),
+        include_unique_B=not bool(args.no_unique_B),
     )
 
     remote_overlap_local = int(np.count_nonzero(~np.asarray(pattern.local_overlap_owner_mask, dtype=bool)))
@@ -208,6 +211,7 @@ def main() -> int:
         payload = {
             "elem_type": str(args.elem_type),
             "size": size,
+            "include_unique_B": not bool(args.no_unique_B),
             "owned_ranges": owned_ranges,
             "remote_overlap_global": remote_overlap_global,
             "results": global_summary,

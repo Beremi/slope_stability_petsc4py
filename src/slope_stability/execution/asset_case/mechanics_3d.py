@@ -40,6 +40,7 @@ from slope_stability.linear.pmg import (
     build_3d_pmg_hierarchy,
     build_3d_same_mesh_pmg_hierarchy,
 )
+from slope_stability.nonlinear.local_rhs import OwnedLocalLoadVector
 from slope_stability.constitutive import ConstitutiveOperator
 from slope_stability.continuation import indirect as indirect_module
 from slope_stability.continuation import LL_indirect_continuation, SSR_indirect_continuation
@@ -888,12 +889,15 @@ def run_capture(
         mpi_distribute_by_nodes=mpi_distribute_by_nodes,
         constitutive_mode=constitutive_mode,
     )
-    c0, phi, psi, shear, bulk, lame, gamma = heterogenous_materials(
-        material_identifier,
-        True,
-        n_q,
-        materials,
-    )
+    if use_lightweight_mpi_path:
+        c0 = phi = psi = shear = bulk = lame = gamma = np.empty(0, dtype=np.float64)
+    else:
+        c0, phi, psi, shear, bulk, lame, gamma = heterogenous_materials(
+            material_identifier,
+            True,
+            n_q,
+            materials,
+        )
 
     B = None
     weight = np.empty(0, dtype=np.float64) if use_lightweight_mpi_path else np.zeros(n_int, dtype=np.float64)
@@ -919,8 +923,15 @@ def run_capture(
             comm=PETSc.COMM_WORLD,
             block_size=coord.shape[0],
         )
-        rhs_parts = MPI.COMM_WORLD.allgather(np.asarray(elastic_rows.local_rhs, dtype=np.float64))
-        f_V = np.concatenate(rhs_parts).reshape(coord.shape[0], coord.shape[1], order="F")
+        f_V = OwnedLocalLoadVector(
+            np.asarray(elastic_rows.local_rhs, dtype=np.float64),
+            owned_row_range=tuple(int(v) for v in elastic_rows.owned_row_range),
+            owned_free_mask=q_mask.reshape(-1, order="F")[
+                int(elastic_rows.owned_row_range[0]) : int(elastic_rows.owned_row_range[1])
+            ],
+            global_shape=(int(coord.shape[0]), int(coord.shape[1])),
+            comm=MPI.COMM_WORLD,
+        )
         gamma = np.empty(0, dtype=np.float64)
     else:
         assembly = assemble_strain_operator(coord, elem, elem_type, dim=3, quadrature_rule=quadrature_rule)
@@ -950,6 +961,9 @@ def run_capture(
         n_int=n_int,
         dim=3,
         q_mask=q_mask,
+        material_identifier=material_identifier if use_lightweight_mpi_path else None,
+        material_specs=materials if use_lightweight_mpi_path else None,
+        material_n_q=n_q if use_lightweight_mpi_path else None,
     )
 
     if use_owned_mpi_tangent_path:
@@ -964,6 +978,7 @@ def run_capture(
             elem_type=elem_type,
             quadrature_rule=quadrature_rule,
             include_unique=(str(constitutive_mode).lower() != "overlap"),
+            include_unique_B=(str(constitutive_mode).lower() != "unique_exchange"),
             include_legacy_scatter=(str(tangent_kernel).lower() == "legacy"),
             include_overlap_B=(str(tangent_kernel).lower() == "legacy"),
             elastic_rows=elastic_rows if use_lightweight_mpi_path else None,
@@ -1311,7 +1326,7 @@ def run_capture(
         "init_linear_orthogonalization_time": 0.0,
     }
     step_guess_diagnostics = None
-    if analysis_key == "ssr":
+    if analysis_key == "ssr" and not (use_lightweight_mpi_path and int(PETSc.COMM_WORLD.getSize()) > 1):
         step_guess_diagnostics = lambda U_guess, U_solution: _newton_guess_difference_volume_integrals(  # noqa: E731
             coord,
             elem,
@@ -1393,6 +1408,8 @@ def run_capture(
             streaming_basis_max_vectors=int(streaming_basis_max_vectors),
         )
     else:
+        if hasattr(f_V, "materialize_full"):
+            f_V = f_V.materialize_full()
         const_builder.reduction(float(lambda_ell))
         init_guess = solve_elastic_initial_guess(
             solver_type=solver_type,

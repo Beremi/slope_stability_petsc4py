@@ -8,6 +8,7 @@ from typing import Callable
 import numpy as np
 
 from .damping import damping, damping_alg5
+from .local_rhs import is_owned_local_load
 from ..utils import q_to_free_indices
 from ..utils import extract_submatrix_free, release_petsc_aij_matrix, to_petsc_aij_matrix
 
@@ -22,6 +23,8 @@ def _to_float_matrix(U: np.ndarray) -> np.ndarray:
 
 
 def _to_free_vector(v: np.ndarray, Q: np.ndarray) -> np.ndarray:
+    if is_owned_local_load(v):
+        return v.free_vector(Q)
     arr = np.asarray(v, dtype=np.float64)
     return arr.reshape(-1, order="F")[q_to_free_indices(Q)]
 
@@ -31,6 +34,8 @@ def _free_dot(a: np.ndarray, b: np.ndarray, Q: np.ndarray) -> float:
 
 
 def _free_norm(v: np.ndarray, Q: np.ndarray) -> float:
+    if is_owned_local_load(v):
+        return float(v.free_norm())
     return float(np.linalg.norm(_to_free_vector(v, Q)))
 
 
@@ -257,14 +262,24 @@ def _cleanup_pre_solve_iteration_mats(*, K_tangent, K_r, use_full_operator: bool
 
 
 def _local_owned_rows_from_field(field: np.ndarray, pattern) -> np.ndarray:
+    if is_owned_local_load(field):
+        return np.asarray(field.owned_rows(pattern), dtype=np.float64)
     row0, row1 = pattern.owned_row_range
     flat = np.asarray(field, dtype=np.float64).reshape(-1, order="F")
     return np.asarray(flat[row0:row1], dtype=np.float64)
 
 
 def _local_owned_free_rows_from_field(field: np.ndarray, pattern) -> np.ndarray:
+    if is_owned_local_load(field):
+        return np.asarray(field.owned_free_rows(pattern), dtype=np.float64)
     local = _local_owned_rows_from_field(field, pattern)
     return np.asarray(local[np.asarray(pattern.owned_free_mask, dtype=bool)], dtype=np.float64)
+
+
+def _rhs_dot_field(rhs, field: np.ndarray, Q: np.ndarray, pattern=None) -> float:
+    if is_owned_local_load(rhs):
+        return float(rhs.dot_field(field, pattern=pattern))
+    return _free_dot(rhs, field, Q)
 
 
 def _dist_dot_local(x_local: np.ndarray, y_local: np.ndarray, comm) -> float:
@@ -830,7 +845,8 @@ def newton(
             )
             return U_it, 0, 0, empty_history
         return U_it, 0, 0
-    f_free = _to_free_vector(f, Q)
+    f_is_local = is_owned_local_load(f)
+    f_free = None if f_is_local else _to_free_vector(f, Q)
 
     norm_f = _free_norm(f, Q)
     if norm_f == 0.0:
@@ -899,6 +915,8 @@ def newton(
             f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
             criterion_abs = _dist_norm_local(F_free_local - f_free_local, comm)
         else:
+            if f_free is None:
+                f_free = _to_free_vector(f, Q)
             criterion_abs = float(np.linalg.norm(F_free - f_free))
         criterion = criterion_abs / norm_f
         energy_value = None
@@ -1001,6 +1019,8 @@ def newton(
         else:
             rhs_local = None
             F_free_local = None
+            if f_free is None:
+                f_free = _to_free_vector(f, Q)
             rhs = f_free - F_free
         retry_values = _regularization_retry_values(r, bool(inner_regularization_retry))
         basis_snapshot = _basis_snapshot(linear_system_solver) if len(retry_values) > 1 else None
@@ -1411,7 +1431,8 @@ def newton_ind_ssr(
             "line_search_mode": str(line_search_mode),
         }
         return U_it, float(lambda_it), 0, 0, history
-    f_free = _to_free_vector(f, Q)
+    f_is_local = is_owned_local_load(f)
+    f_free = None if f_is_local else _to_free_vector(f, Q)
     first_iteration_extra_basis_free = [
         np.asarray(v, dtype=np.float64).reshape(-1).copy()
         for v in (first_iteration_extra_basis_free or [])
@@ -1516,6 +1537,8 @@ def newton_ind_ssr(
             f_free_local = _local_owned_free_rows_from_field(f, constitutive_matrix_builder.owned_tangent_pattern)
             criterion = _dist_norm_local(F_free_local - f_free_local, comm)
         else:
+            if f_free is None:
+                f_free = _to_free_vector(f, Q)
             criterion = float(np.linalg.norm(F_free - f_free))
         rel_resid = criterion / norm_f
         criterion_hist[it - 1] = criterion
@@ -1654,7 +1677,7 @@ def newton_ind_ssr(
                     dV_free = _solve_linear_system(
                         linear_system_solver,
                         K_r,
-                        f_free - F_free,
+                        (_to_free_vector(f, Q) if f_free is None else f_free) - F_free,
                         free_idx=free_idx,
                     )
             else:
@@ -1677,7 +1700,7 @@ def newton_ind_ssr(
                 dV_free = _solve_linear_system(
                     linear_system_solver,
                     K_free,
-                    f_free - F_free,
+                    (_to_free_vector(f, Q) if f_free is None else f_free) - F_free,
                     free_idx=free_idx,
                 )
         finally:
@@ -1704,11 +1727,17 @@ def newton_ind_ssr(
         W = W.reshape(shape, order="F")
         V = V.reshape(shape, order="F")
 
-        fQ = _to_free_vector(f, Q)
-        WQ = _to_free_vector(W, Q)
-        VQ = _to_free_vector(V, Q)
-        denom = float(np.dot(fQ, WQ))
-        d_l = 0.0 if abs(denom) < 1e-30 else -float(np.dot(fQ, VQ)) / denom
+        pattern = getattr(constitutive_matrix_builder, "owned_tangent_pattern", None) if is_owned_local_load(f) else None
+        if is_owned_local_load(f):
+            denom = _rhs_dot_field(f, W, Q, pattern=pattern)
+            numer = _rhs_dot_field(f, V, Q, pattern=pattern)
+        else:
+            fQ = _to_free_vector(f, Q)
+            WQ = _to_free_vector(W, Q)
+            VQ = _to_free_vector(V, Q)
+            denom = float(np.dot(fQ, WQ))
+            numer = float(np.dot(fQ, VQ))
+        d_l = 0.0 if abs(denom) < 1e-30 else -float(numer) / denom
 
         d_U = V + d_l * W
         damping_info = damping_alg5(
@@ -1813,7 +1842,7 @@ def newton_ind_ssr(
 
         if converged_on_correction or converged_on_delta_lambda:
             U_it = U_it + alpha * d_U
-            denom = _free_dot(f, U_it, Q)
+            denom = _rhs_dot_field(f, U_it, Q, pattern=getattr(constitutive_matrix_builder, "owned_tangent_pattern", None))
             if denom != 0.0:
                 U_it = U_it * (omega / denom)
             lambda_it = lambda_it + alpha * d_l
@@ -1839,7 +1868,7 @@ def newton_ind_ssr(
             break
 
         U_it = U_it + alpha * d_U
-        denom = _free_dot(f, U_it, Q)
+        denom = _rhs_dot_field(f, U_it, Q, pattern=getattr(constitutive_matrix_builder, "owned_tangent_pattern", None))
         if denom != 0.0:
             U_it = U_it * (omega / denom)
 
