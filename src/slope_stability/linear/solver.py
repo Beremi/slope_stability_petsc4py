@@ -251,6 +251,38 @@ class _ManualPMGShellPC:
         right_arr = np.asarray(right.getArray(readonly=True), dtype=np.float64)
         out_arr[...] = left_arr + right_arr
 
+    @staticmethod
+    def _destroy_petsc_object(obj) -> None:
+        if obj is not None and hasattr(obj, "destroy"):
+            obj.destroy()
+
+    def _destroy_work_vectors(self) -> None:
+        seen: set[int] = set()
+        work_maps = [
+            *self._level_work,
+            self._fine_work,
+            self._mid_work,
+            self._coarse_work,
+        ]
+        for work in work_maps:
+            for vec in work.values():
+                if vec is None or not hasattr(vec, "destroy"):
+                    continue
+                marker = id(vec)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                vec.destroy()
+
+    def _destroy_coarse_near_nullspace(self) -> None:
+        nsp = self._coarse_nsp
+        vecs = tuple(self._coarse_nsp_vecs)
+        self._coarse_nsp = None
+        self._coarse_nsp_vecs = []
+        self._destroy_petsc_object(nsp)
+        for vec in vecs:
+            self._destroy_petsc_object(vec)
+
     def _destroy_dynamic(self) -> None:
         for ksp in (*self.smoothers, self.coarse_ksp):
             if ksp is not None:
@@ -259,6 +291,11 @@ class _ManualPMGShellPC:
         self.smoother_fine = None
         self.smoother_mid = None
         self.coarse_ksp = None
+        self._destroy_work_vectors()
+        self._level_work = []
+        self._fine_work = {}
+        self._mid_work = {}
+        self._coarse_work = {}
         seen_handles: set[int] = set()
         owned_level_mats = tuple(self.A_levels_free[:-1]) if self.A_levels_free else ()
         for mat in (*owned_level_mats, self.A_coarse):
@@ -274,14 +311,9 @@ class _ManualPMGShellPC:
         self.A_mid = None
         self.A_coarse = None
         self.A_coarse_free = None
-        self._coarse_nsp = None
-        self._coarse_nsp_vecs = []
+        self._destroy_coarse_near_nullspace()
         self._coarse_use_full_system = False
         self._coarse_operator_source = "galerkin_free"
-        self._level_work = []
-        self._fine_work = {}
-        self._mid_work = {}
-        self._coarse_work = {}
 
     def destroy(self, pc=None) -> None:
         self._destroy_dynamic()
@@ -1588,6 +1620,20 @@ class PetscKSPFGMRESSolver:
             release_petsc_aij_matrix(A)
             A.destroy()
 
+    @staticmethod
+    def _destroy_petsc_object(obj) -> None:
+        if obj is not None and hasattr(obj, "destroy"):
+            obj.destroy()
+
+    def _destroy_near_nullspace_refs(self) -> None:
+        nsp = self._near_nullspace
+        vecs = tuple(self._near_nullspace_vecs)
+        self._near_nullspace = None
+        self._near_nullspace_vecs = []
+        self._destroy_petsc_object(nsp)
+        for vec in vecs:
+            self._destroy_petsc_object(vec)
+
     def _materialize_petsc_matrix(self, matrix, *, comm, block_size=None, ownership_range=None):
         if PETSc is not None and isinstance(matrix, PETSc.Mat):
             if self._pc_backend in {"pmg", "pmg_shell"}:
@@ -1713,12 +1759,12 @@ class PetscKSPFGMRESSolver:
             self.deflation_basis = np.array(snapshot, dtype=np.float64, copy=True)
 
     def _reset_petsc_objects(self) -> None:
-        if self._ksp is not None:
-            self._ksp.destroy()
-            self._ksp = None
         if self._manualmg_context is not None:
             self._manualmg_context.destroy()
             self._manualmg_context = None
+        if self._ksp is not None:
+            self._ksp.destroy()
+            self._ksp = None
         if self._pmg_state is not None:
             self._pmg_state.destroy()
             self._pmg_state = None
@@ -1728,8 +1774,7 @@ class PetscKSPFGMRESSolver:
         self._P_petsc = None
         self._owns_A_petsc = False
         self._owns_P_petsc = False
-        self._near_nullspace = None
-        self._near_nullspace_vecs = []
+        self._destroy_near_nullspace_refs()
         self._ownership_range = None
         self._last_solve_info = {}
         self._last_orthogonalization_info = {}
@@ -1740,24 +1785,23 @@ class PetscKSPFGMRESSolver:
         self._manualmg_last_apply_info = {}
 
     def _reset_runtime_petsc_objects_keep_pmg_state(self) -> None:
-        if self._ksp is not None:
-            self._ksp.destroy()
-            self._ksp = None
+        if self._manualmg_context is not None:
+            self._manualmg_context.destroy()
+            self._manualmg_context = None
         inner_ksp = getattr(self, "_inner_ksp", None)
         if inner_ksp is not None:
             inner_ksp.destroy()
             self._inner_ksp = None
-        if self._manualmg_context is not None:
-            self._manualmg_context.destroy()
-            self._manualmg_context = None
+        if self._ksp is not None:
+            self._ksp.destroy()
+            self._ksp = None
         self._destroy_owned_petsc_matrix(self._P_petsc, self._owns_P_petsc and self._P_petsc is not self._A_petsc)
         self._destroy_owned_petsc_matrix(self._A_petsc, self._owns_A_petsc)
         self._A_petsc = None
         self._P_petsc = None
         self._owns_A_petsc = False
         self._owns_P_petsc = False
-        self._near_nullspace = None
-        self._near_nullspace_vecs = []
+        self._destroy_near_nullspace_refs()
         self._ownership_range = None
         self._last_solve_info = {}
         self._last_orthogonalization_info = {}
@@ -2924,6 +2968,9 @@ class PetscKSPMatlabDeflatedFGMRESSolver(PetscKSPFGMRESSolver):
         self._deflation_basis_is_local = False
 
     def _reset_petsc_objects(self) -> None:
+        if self._manualmg_context is not None:
+            self._manualmg_context.destroy()
+            self._manualmg_context = None
         if self._inner_ksp is not None:
             self._inner_ksp.destroy()
             self._inner_ksp = None

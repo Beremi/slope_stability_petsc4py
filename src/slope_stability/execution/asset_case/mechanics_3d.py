@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 from pathlib import Path
 from time import perf_counter
@@ -613,6 +614,7 @@ def _release_rank_local_resources(*, solvers: tuple[object, ...], const_builder,
                 except Exception:
                     pass
         cleanup = getattr(PETSc, "garbage_cleanup", None)
+        gc.collect()
         if callable(cleanup):
             try:
                 cleanup(PETSc.COMM_WORLD)
@@ -620,6 +622,7 @@ def _release_rank_local_resources(*, solvers: tuple[object, ...], const_builder,
                 cleanup()
             except Exception:
                 pass
+        gc.collect()
 
 
 def run_capture(
