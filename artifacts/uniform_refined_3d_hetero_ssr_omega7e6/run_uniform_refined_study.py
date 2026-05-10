@@ -174,15 +174,17 @@ def _case_text(
     *,
     omega_max: float,
     step_max: int,
+    elem_type: str = "P2",
     store_step_u: bool = True,
     constitutive_mode: str = "overlap",
     pmg_coarse_level: str | None = None,
+    pmg_fine_hierarchy_mode: str = "default",
     mg_coarse_pc_type: str | None = None,
     mg_coarse_factor_solver_type: str | None = None,
     petsc_opt: tuple[str, ...] = (),
 ) -> str:
     text = BASE_CASE.read_text(encoding="utf-8")
-    text = text.replace('elem_type = "P4"', 'elem_type = "P2"')
+    text = text.replace('elem_type = "P4"', f'elem_type = "{str(elem_type).upper()}"')
     text = text.replace('mesh_variant = "adaptive_family_a_l1.msh"', f'mesh_variant = "{level}.msh"')
     text = text.replace("omega_max = 6.7e6", f"omega_max = {float(omega_max):.16g}")
     text = text.replace("step_max = 100", f"step_max = {int(step_max)}")
@@ -190,10 +192,15 @@ def _case_text(
         "constitutive_mode = \"overlap\"",
         f"constitutive_mode = \"{str(constitutive_mode)}\"\nstore_step_u = {str(bool(store_step_u)).lower()}",
     )
+    linear_extra: list[str] = []
     if pmg_coarse_level is not None:
-        text = text.replace('pc_backend = "pmg_shell"', f'pc_backend = "pmg_shell"\npmg_coarse_mesh_variant = "{pmg_coarse_level}.msh"')
+        linear_extra.append(f'pmg_coarse_mesh_variant = "{pmg_coarse_level}.msh"')
+    if str(pmg_fine_hierarchy_mode).strip().lower() != "default":
+        linear_extra.append(f'pmg_fine_hierarchy_mode = "{str(pmg_fine_hierarchy_mode).strip().lower()}"')
     if mg_coarse_factor_solver_type is not None:
-        text = text.replace('pc_backend = "pmg_shell"', f'pc_backend = "pmg_shell"\nfactor_solver_type = "{mg_coarse_factor_solver_type}"')
+        linear_extra.append(f'factor_solver_type = "{mg_coarse_factor_solver_type}"')
+    if linear_extra:
+        text = text.replace('pc_backend = "pmg_shell"', 'pc_backend = "pmg_shell"\n' + "\n".join(linear_extra), 1)
     extra_opts: list[str] = []
     if mg_coarse_pc_type is not None:
         extra_opts.append(f"mg_coarse_pc_type={mg_coarse_pc_type}")
@@ -431,10 +438,12 @@ def run_level(
     *,
     omega_max: float,
     step_max: int,
+    elem_type: str = "P2",
     store_step_u: bool = True,
     constitutive_mode: str = "overlap",
     out_dir: Path,
     pmg_coarse_level: str | None = None,
+    pmg_fine_hierarchy_mode: str = "default",
     mg_coarse_pc_type: str | None = None,
     mg_coarse_factor_solver_type: str | None = None,
     petsc_opt: tuple[str, ...] = (),
@@ -471,21 +480,25 @@ def run_level(
         debug_dir,
         "run_level_start",
         level=str(level),
+        elem_type=str(elem_type).upper(),
         out_dir=str(out_dir),
         case_path=str(case_path),
         omega_max=float(omega_max),
         step_max=int(step_max),
+        pmg_fine_hierarchy_mode=str(pmg_fine_hierarchy_mode),
         pmg_chain_levels=list(pmg_chain_levels),
     )
 
     if rank == 0:
         case_text = _case_text(
             level,
+            elem_type=elem_type,
             omega_max=omega_max,
             step_max=step_max,
             store_step_u=store_step_u,
             constitutive_mode=constitutive_mode,
             pmg_coarse_level=pmg_coarse_level,
+            pmg_fine_hierarchy_mode=pmg_fine_hierarchy_mode,
             mg_coarse_pc_type=mg_coarse_pc_type,
             mg_coarse_factor_solver_type=mg_coarse_factor_solver_type,
             petsc_opt=tuple(petsc_opt),
@@ -548,7 +561,15 @@ def run_level(
         print(json.dumps(result, indent=2), flush=True)
 
 
-def launch(levels: list[str], *, ranks: int, omega_max: float, step_max: int) -> None:
+def launch(
+    levels: list[str],
+    *,
+    ranks: int,
+    omega_max: float,
+    step_max: int,
+    elem_type: str = "P2",
+    pmg_fine_hierarchy_mode: str = "default",
+) -> None:
     for level in levels:
         out_dir = RUN_DIR / level
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -562,10 +583,14 @@ def launch(levels: list[str], *, ranks: int, omega_max: float, step_max: int) ->
             "run-level",
             "--level",
             level,
+            "--elem-type",
+            str(elem_type).upper(),
             "--omega-max",
             str(float(omega_max)),
             "--step-max",
             str(int(step_max)),
+            "--pmg-fine-hierarchy-mode",
+            str(pmg_fine_hierarchy_mode),
             "--out-dir",
             str(out_dir / "run"),
         ]
@@ -601,6 +626,7 @@ def main() -> None:
     p_prepare.add_argument("--max-refinement", type=int, default=1)
     p_run = sub.add_parser("run-level")
     p_run.add_argument("--level", required=True)
+    p_run.add_argument("--elem-type", choices=["P1", "P2", "P4"], default="P2")
     p_run.add_argument("--omega-max", type=float, default=7_000_000.0)
     p_run.add_argument("--step-max", type=int, default=100)
     p_run.add_argument("--store-step-u", action=argparse.BooleanOptionalAction, default=True)
@@ -611,6 +637,11 @@ def main() -> None:
     )
     p_run.add_argument("--out-dir", type=Path, required=True)
     p_run.add_argument("--pmg-coarse-level", type=str, default=None)
+    p_run.add_argument(
+        "--pmg-fine-hierarchy-mode",
+        choices=["default", "p4_p2_intermediate"],
+        default="default",
+    )
     p_run.add_argument("--mg-coarse-pc-type", type=str, default=None)
     p_run.add_argument("--mg-coarse-factor-solver-type", type=str, default=None)
     p_run.add_argument("--petsc-opt", action="append", default=[])
@@ -620,13 +651,22 @@ def main() -> None:
         "--pmg-chain-levels",
         nargs="+",
         default=[],
-        help="P1 mesh levels from coarsest to finest, excluding the fine P2 level; e.g. l1 l1_r1.",
+        help=(
+            "P1 mesh levels from coarsest to finest, excluding the fine high-order level; "
+            "for P4 p4_p2_intermediate, pass the coarse level, e.g. l1 for fine l1_r1."
+        ),
     )
     p_launch = sub.add_parser("launch")
     p_launch.add_argument("--levels", nargs="+", required=True)
     p_launch.add_argument("--ranks", type=int, default=8)
+    p_launch.add_argument("--elem-type", choices=["P1", "P2", "P4"], default="P2")
     p_launch.add_argument("--omega-max", type=float, default=7_000_000.0)
     p_launch.add_argument("--step-max", type=int, default=100)
+    p_launch.add_argument(
+        "--pmg-fine-hierarchy-mode",
+        choices=["default", "p4_p2_intermediate"],
+        default="default",
+    )
     p_summary = sub.add_parser("summarize")
     p_summary.add_argument("--levels", nargs="+", required=True)
     args = parser.parse_args()
@@ -635,12 +675,14 @@ def main() -> None:
     elif args.cmd == "run-level":
         run_level(
             args.level,
+            elem_type=args.elem_type,
             omega_max=args.omega_max,
             step_max=args.step_max,
             store_step_u=bool(args.store_step_u),
             constitutive_mode=str(args.constitutive_mode),
             out_dir=args.out_dir,
             pmg_coarse_level=args.pmg_coarse_level,
+            pmg_fine_hierarchy_mode=args.pmg_fine_hierarchy_mode,
             mg_coarse_pc_type=args.mg_coarse_pc_type,
             mg_coarse_factor_solver_type=args.mg_coarse_factor_solver_type,
             petsc_opt=tuple(args.petsc_opt or ()),
@@ -649,7 +691,14 @@ def main() -> None:
             debug_dir=args.debug_dir,
         )
     elif args.cmd == "launch":
-        launch(args.levels, ranks=args.ranks, omega_max=args.omega_max, step_max=args.step_max)
+        launch(
+            args.levels,
+            ranks=args.ranks,
+            elem_type=args.elem_type,
+            omega_max=args.omega_max,
+            step_max=args.step_max,
+            pmg_fine_hierarchy_mode=args.pmg_fine_hierarchy_mode,
+        )
     elif args.cmd == "summarize":
         summarize(args.levels)
 

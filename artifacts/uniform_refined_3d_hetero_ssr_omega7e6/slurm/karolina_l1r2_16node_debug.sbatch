@@ -10,6 +10,9 @@
 #SBATCH --output=artifacts/uniform_refined_3d_hetero_ssr_omega7e6/slurm/%x-%j.out
 #SBATCH --error=artifacts/uniform_refined_3d_hetero_ssr_omega7e6/slurm/%x-%j.err
 
+# Defaults target the P2(L1^2) debug case. For P4(L1^1), submit with:
+#   --export=ALL,LEVEL=l1_r1,ELEM_TYPE=P4,PMG_FINE_HIERARCHY_MODE=p4_p2_intermediate,PMG_CHAIN_LEVELS=l1,PREPARE_MAX_REFINEMENT=1,RANKS_PER_NODE=16,COMMAND_TIMEOUT=59m
+
 set -euo pipefail
 
 ROOT="$HOME/slope_stability_petsc4py"
@@ -18,10 +21,17 @@ NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-16}}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-16}"
 TOTAL_RANKS="${SLURM_NTASKS:-$((NODES * RANKS_PER_NODE))}"
 COARSE_REDUNDANT_GROUPS="${COARSE_REDUNDANT_GROUPS:-$NODES}"
-RUN_NAME="${RUN_TAG:-karolina_debug_16node_l1r2_p2_unique_exchange_pmg_redundant_mumps_r${TOTAL_RANKS}_${RANKS_PER_NODE}ppn_${SLURM_JOB_ID:-manual}}"
+LEVEL="${LEVEL:-l1_r2}"
+ELEM_TYPE="${ELEM_TYPE:-P2}"
+PMG_FINE_HIERARCHY_MODE="${PMG_FINE_HIERARCHY_MODE:-default}"
+PMG_CHAIN_LEVELS="${PMG_CHAIN_LEVELS:-l1 l1_r1}"
+ELEM_TYPE="${ELEM_TYPE^^}"
+PMG_FINE_HIERARCHY_MODE="${PMG_FINE_HIERARCHY_MODE,,}"
+PREPARE_MAX_REFINEMENT="${PREPARE_MAX_REFINEMENT:-2}"
+RUN_NAME="${RUN_TAG:-karolina_debug_${NODES}node_${LEVEL}_${ELEM_TYPE}_unique_exchange_pmg_redundant_mumps_r${TOTAL_RANKS}_${RANKS_PER_NODE}ppn_${SLURM_JOB_ID:-manual}}"
 RUN_DIR="$STUDY/runs/$RUN_NAME"
 DEBUG_DIR="$RUN_DIR/debug"
-CASE_PATH="$RUN_DIR/generated_case_l1_r2_${SLURM_JOB_ID:-manual}.toml"
+CASE_PATH="$RUN_DIR/generated_case_${LEVEL}_${ELEM_TYPE}_${SLURM_JOB_ID:-manual}.toml"
 COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-25m}"
 MPI_TRANSPORT="${MPI_TRANSPORT:-ob1}"
 MPI_ARGS=()
@@ -40,6 +50,13 @@ case "$MPI_TRANSPORT" in
     exit 2
     ;;
 esac
+PMG_CHAIN_ARGS=()
+if [[ -n "${PMG_CHAIN_LEVELS// }" ]]; then
+  read -r -a PMG_CHAIN_ARRAY <<< "$PMG_CHAIN_LEVELS"
+  if [[ "${#PMG_CHAIN_ARRAY[@]}" -gt 0 ]]; then
+    PMG_CHAIN_ARGS=(--pmg-chain-levels "${PMG_CHAIN_ARRAY[@]}")
+  fi
+fi
 
 mkdir -p "$RUN_DIR" "$DEBUG_DIR" "$STUDY/slurm"
 cd "$ROOT"
@@ -76,6 +93,8 @@ export SLOPE_STABILITY_STAGE_DEBUG=1
 export SLOPE_STABILITY_STAGE_DEBUG_DIR="$DEBUG_DIR/stages"
 export PRTE_MCA_prte_base_help_aggregate=0
 
+./.venv/bin/python "$STUDY/run_uniform_refined_study.py" prepare --max-refinement "$PREPARE_MAX_REFINEMENT" > "$RUN_DIR/prepare_meshes.log" 2>&1
+
 module list > "$RUN_DIR/module_list.txt" 2>&1 || true
 scontrol show job "$SLURM_JOB_ID" > "$RUN_DIR/scontrol_job_${SLURM_JOB_ID}.txt" 2>/dev/null || true
 env | sort > "$RUN_DIR/env.txt"
@@ -89,9 +108,17 @@ env | sort > "$RUN_DIR/env.txt"
   echo "SLURM_TASKS_PER_NODE=${SLURM_TASKS_PER_NODE:-}"
   echo "RANKS_PER_NODE=$RANKS_PER_NODE"
   echo "COARSE_REDUNDANT_GROUPS=$COARSE_REDUNDANT_GROUPS"
+  echo "LEVEL=$LEVEL"
+  echo "ELEM_TYPE=$ELEM_TYPE"
+  echo "PMG_FINE_HIERARCHY_MODE=$PMG_FINE_HIERARCHY_MODE"
+  echo "PMG_CHAIN_LEVELS=$PMG_CHAIN_LEVELS"
+  echo "PREPARE_MAX_REFINEMENT=$PREPARE_MAX_REFINEMENT"
   echo "MPI_TRANSPORT=$MPI_TRANSPORT"
   printf 'MPI_ARGS='
   printf '%q ' "${MPI_ARGS[@]}"
+  printf '\n'
+  printf 'PMG_CHAIN_ARGS='
+  printf '%q ' "${PMG_CHAIN_ARGS[@]}"
   printf '\n'
   echo "RUN_NAME=$RUN_NAME"
   echo "RUN_DIR=$RUN_DIR"
@@ -124,7 +151,8 @@ CMD=(
   -u
   "$STUDY/run_uniform_refined_study.py"
   run-level
-  --level l1_r2
+  --level "$LEVEL"
+  --elem-type "$ELEM_TYPE"
   --omega-max 7000000
   --step-max 100
   --no-store-step-u
@@ -132,7 +160,8 @@ CMD=(
   --out-dir "$RUN_DIR/run"
   --case-path "$CASE_PATH"
   --debug-dir "$DEBUG_DIR/runner"
-  --pmg-chain-levels l1 l1_r1
+  --pmg-fine-hierarchy-mode "$PMG_FINE_HIERARCHY_MODE"
+  "${PMG_CHAIN_ARGS[@]}"
   --mg-coarse-pc-type redundant
   --mg-coarse-factor-solver-type mumps
   --petsc-opt "mg_coarse_pc_redundant_number=${COARSE_REDUNDANT_GROUPS}"
