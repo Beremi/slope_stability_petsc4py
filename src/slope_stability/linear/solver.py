@@ -190,6 +190,97 @@ class _ManualPMGShellPC:
             3,
         )
 
+    def _pmg_smoother_pc_type(self) -> str | None:
+        raw = self.solver.preconditioner_options.get("pmg_smoother_pc_type")
+        if raw is None:
+            return None
+        value = str(raw).strip().lower()
+        return value or None
+
+    def _gasm_smoother_config(self, *, comm_size: int) -> dict[str, object] | None:
+        pc_type = self._pmg_smoother_pc_type()
+        if pc_type is None:
+            return None
+        if pc_type != "gasm":
+            raise ValueError(f"Unsupported pmg_smoother_pc_type {pc_type!r}; v1 supports only 'gasm'.")
+
+        raw_total = self.solver.preconditioner_options.get("pmg_smoother_gasm_total_subdomains")
+        if raw_total is None:
+            raise ValueError("pmg_smoother_pc_type='gasm' requires pmg_smoother_gasm_total_subdomains.")
+        total_subdomains = int(raw_total)
+        if total_subdomains <= 0:
+            raise ValueError("pmg_smoother_gasm_total_subdomains must be positive.")
+        if total_subdomains > int(comm_size):
+            raise ValueError(
+                "pmg_smoother_gasm_total_subdomains must be no larger than the MPI communicator size "
+                f"({total_subdomains} > {int(comm_size)})."
+            )
+        if int(comm_size) % total_subdomains != 0:
+            raise ValueError(
+                "pmg_smoother_gasm_total_subdomains must divide the MPI communicator size for contiguous "
+                f"fake-socket grouping ({total_subdomains} does not divide {int(comm_size)})."
+            )
+
+        grouping = str(
+            self.solver.preconditioner_options.get("pmg_smoother_gasm_grouping", "contiguous")
+        ).strip().lower()
+        if grouping != "contiguous":
+            raise ValueError(f"Unsupported pmg_smoother_gasm_grouping {grouping!r}; v1 supports only 'contiguous'.")
+
+        overlap = int(self.solver.preconditioner_options.get("pmg_smoother_gasm_overlap", 1))
+        if overlap < 0:
+            raise ValueError("pmg_smoother_gasm_overlap must be nonnegative.")
+        gasm_type = str(
+            self.solver.preconditioner_options.get("pmg_smoother_gasm_type", "restrict")
+        ).strip().lower()
+        if gasm_type not in {"basic", "restrict", "interpolate", "none"}:
+            raise ValueError(
+                "pmg_smoother_gasm_type must be one of basic, restrict, interpolate, or none; "
+                f"got {gasm_type!r}."
+            )
+
+        sub_ksp_type = str(
+            self.solver.preconditioner_options.get("pmg_smoother_gasm_sub_ksp_type", "preonly")
+        ).strip().lower()
+        sub_ksp_max_it = int(self.solver.preconditioner_options.get("pmg_smoother_gasm_sub_ksp_max_it", 1))
+        if sub_ksp_max_it <= 0:
+            raise ValueError("pmg_smoother_gasm_sub_ksp_max_it must be positive.")
+        sub_pc_type = str(
+            self.solver.preconditioner_options.get("pmg_smoother_gasm_sub_pc_type", "jacobi")
+        ).strip().lower()
+        view_subdomains = bool(self.solver.preconditioner_options.get("pmg_smoother_gasm_view_subdomains", False))
+
+        return {
+            "pc_type": pc_type,
+            "total_subdomains": int(total_subdomains),
+            "grouping": grouping,
+            "ranks_per_subdomain": int(comm_size) // int(total_subdomains),
+            "overlap": int(overlap),
+            "gasm_type": gasm_type,
+            "sub_ksp_type": sub_ksp_type,
+            "sub_ksp_max_it": int(sub_ksp_max_it),
+            "sub_pc_type": sub_pc_type,
+            "view_subdomains": bool(view_subdomains),
+        }
+
+    def _configure_gasm_smoother_options(self, pc, *, prefix: str, comm_size: int) -> dict[str, object] | None:
+        config = self._gasm_smoother_config(comm_size=comm_size)
+        if config is None:
+            return None
+
+        pc.setType(PETSc.PC.Type.GASM)
+        opts = PETSc.Options()
+        self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_total_subdomains", config["total_subdomains"])
+        self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_overlap", config["overlap"])
+        self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_type", config["gasm_type"])
+        self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_type", config["sub_ksp_type"])
+        if str(config["sub_ksp_type"]).strip().lower() != str(PETSc.KSP.Type.PREONLY).lower():
+            self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_max_it", config["sub_ksp_max_it"])
+        self.solver._set_petsc_option(opts, f"{prefix}sub_pc_type", config["sub_pc_type"])
+        if bool(config["view_subdomains"]):
+            self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_view_subdomains", True)
+        return config
+
     def __init__(self, solver) -> None:
         self.solver = solver
         self.state: _PMGPetscHierarchyState | None = None
@@ -229,8 +320,23 @@ class _ManualPMGShellPC:
             "manualmg_mid_smoother_iterations_total": 0,
             "manualmg_coarse_ksp_iterations_total": 0,
             "manualmg_coarse_solve_count": 0,
+            "manualmg_setup_count": 0,
+            "manualmg_setup_full_count": 0,
+            "manualmg_setup_reuse_count": 0,
+            "manualmg_setup_destroy_time_total_s": 0.0,
+            "manualmg_setup_galerkin_ptap_time_total_s": 0.0,
+            "manualmg_setup_coarse_operator_time_total_s": 0.0,
+            "manualmg_setup_near_nullspace_time_total_s": 0.0,
+            "manualmg_setup_smoother_time_total_s": 0.0,
+            "manualmg_setup_fine_smoother_time_total_s": 0.0,
+            "manualmg_setup_mid_smoother_time_total_s": 0.0,
+            "manualmg_setup_other_smoother_time_total_s": 0.0,
+            "manualmg_setup_coarse_ksp_time_total_s": 0.0,
+            "manualmg_setup_work_vector_time_total_s": 0.0,
         }
         self._stats_last: dict[str, float | int | str] = {}
+        self._setup_stats_last: dict[str, float | int | str] = {}
+        self._setup_signature: tuple[object, ...] | None = None
 
     @staticmethod
     def _copy_vec(dst, src) -> None:
@@ -338,8 +444,23 @@ class _ManualPMGShellPC:
             "manualmg_mid_smoother_iterations_total": 0,
             "manualmg_coarse_ksp_iterations_total": 0,
             "manualmg_coarse_solve_count": 0,
+            "manualmg_setup_count": 0,
+            "manualmg_setup_full_count": 0,
+            "manualmg_setup_reuse_count": 0,
+            "manualmg_setup_destroy_time_total_s": 0.0,
+            "manualmg_setup_galerkin_ptap_time_total_s": 0.0,
+            "manualmg_setup_coarse_operator_time_total_s": 0.0,
+            "manualmg_setup_near_nullspace_time_total_s": 0.0,
+            "manualmg_setup_smoother_time_total_s": 0.0,
+            "manualmg_setup_fine_smoother_time_total_s": 0.0,
+            "manualmg_setup_mid_smoother_time_total_s": 0.0,
+            "manualmg_setup_other_smoother_time_total_s": 0.0,
+            "manualmg_setup_coarse_ksp_time_total_s": 0.0,
+            "manualmg_setup_work_vector_time_total_s": 0.0,
         }
         self._stats_last = {}
+        self._setup_stats_last = {}
+        self._setup_signature = None
 
     def _alloc_work_vectors(self) -> None:
         self._level_work = []
@@ -491,7 +612,9 @@ class _ManualPMGShellPC:
             max_it=int(self.solver.preconditioner_options.get("mg_levels_ksp_max_it", default_max_it)),
         )
         pc = ksp.getPC()
-        pc.setType(str(self.solver.preconditioner_options.get("mg_levels_pc_type", default_pc_type)))
+        gasm_config = self._configure_gasm_smoother_options(pc, prefix=prefix, comm_size=int(A.getComm().getSize()))
+        if gasm_config is None:
+            pc.setType(str(self.solver.preconditioner_options.get("mg_levels_pc_type", default_pc_type)))
         ksp.setFromOptions()
         ksp.setUp()
         return ksp
@@ -618,8 +741,148 @@ class _ManualPMGShellPC:
         ksp.setUp()
         return ksp
 
+    def _smoother_prefix_for_level(self, *, level_idx: int, level_count: int) -> str:
+        if level_idx == level_count - 1:
+            return f"{self.solver._options_prefix}manualmg_fine_"
+        if level_count == 3 and level_idx == 1:
+            return f"{self.solver._options_prefix}manualmg_mid_"
+        return f"{self.solver._options_prefix}manualmg_level{level_idx}_"
+
+    def _smoother_setup_stage_for_level(self, *, level_idx: int, level_count: int) -> str:
+        if level_idx == level_count - 1:
+            return "fine_smoother"
+        if level_count == 3 and level_idx == 1:
+            return "mid_smoother"
+        return "other_smoother"
+
+    def _setup_reuse_enabled(self) -> bool:
+        return bool(self.solver.preconditioner_options.get("pmg_shell_reuse_setup", True))
+
+    def _setup_signature_for(self, *, matrix_ref, state: _PMGPetscHierarchyState, hierarchy) -> tuple[object, ...]:
+        levels = tuple(getattr(hierarchy, "levels", ()))
+        comm_size = int(matrix_ref.getComm().getSize())
+        gasm_config = self._gasm_smoother_config(comm_size=comm_size)
+        if gasm_config is None:
+            gasm_sig = None
+        else:
+            gasm_sig = tuple((str(k), gasm_config[k]) for k in sorted(gasm_config))
+        option_keys = (
+            "mg_levels_ksp_type",
+            "mg_levels_ksp_max_it",
+            "mg_levels_pc_type",
+            "mg_coarse_ksp_type",
+            "mg_coarse_pc_type",
+            "mg_coarse_pc_hypre_type",
+            "mg_coarse_rtol",
+            "mg_coarse_atol",
+            "mg_coarse_max_it",
+            "manualmg_coarse_operator_source",
+            "mg_coarse_operator_source",
+            "mg_coarse_full_system",
+        )
+        options_sig = tuple((key, self.solver.preconditioner_options.get(key)) for key in option_keys)
+        direct_elastic = bool(self._use_direct_elastic_coarse_operator(hierarchy))
+        return (
+            int(len(levels)),
+            tuple(int(getattr(level, "order", -1)) for level in levels),
+            tuple(int(v) for v in state.level_global_sizes),
+            tuple(tuple(int(x) for x in owned) for owned in state.level_owned_ranges),
+            tuple(tuple(int(x) for x in mat.getSize()) for mat in state.prolongations),
+            tuple(tuple(int(x) for x in mat.getSize()) for mat in state.restrictions),
+            tuple(int(v) for v in matrix_ref.getSize()),
+            tuple(int(v) for v in matrix_ref.getOwnershipRange()),
+            int(matrix_ref.getBlockSize() or 1),
+            str(matrix_ref.getType()),
+            bool(self._use_full_system_hypre_coarse()),
+            direct_elastic,
+            gasm_sig,
+            options_sig,
+        )
+
+    def _can_reuse_setup(self, *, matrix_ref, state: _PMGPetscHierarchyState, hierarchy) -> bool:
+        if not self._setup_reuse_enabled():
+            return False
+        if self._setup_signature is None:
+            return False
+        if self.state is None or self.hierarchy is None:
+            return False
+        if not self.A_levels_free or self.A_fine is None or self.coarse_ksp is None:
+            return False
+        if not self.smoothers or any(ksp is None for ksp in self.smoothers[1:]):
+            return False
+        if len(self.A_levels_free) != len(tuple(getattr(hierarchy, "levels", ()))):
+            return False
+        if self._use_full_system_hypre_coarse():
+            return False
+        try:
+            signature = self._setup_signature_for(matrix_ref=matrix_ref, state=state, hierarchy=hierarchy)
+        except Exception:
+            return False
+        return signature == self._setup_signature
+
     def configure(self, *, matrix_ref, state: _PMGPetscHierarchyState, hierarchy) -> None:
+        setup_last: dict[str, float | int | str] = {}
+
+        def record_setup_stage(name: str, elapsed: float) -> None:
+            total_key = f"manualmg_setup_{name}_time_total_s"
+            self._stats_total[total_key] = float(self._stats_total.get(total_key, 0.0)) + float(elapsed)
+            setup_last[f"manualmg_last_setup_{name}_time_s"] = float(elapsed)
+            recorder = getattr(self.solver, "_record_manualmg_setup_stage", None)
+            if recorder is not None:
+                recorder(name, float(elapsed))
+
+        if self._can_reuse_setup(matrix_ref=matrix_ref, state=state, hierarchy=hierarchy):
+            self.state = state
+            self.hierarchy = hierarchy
+            self.A_levels_free[-1] = matrix_ref
+            self.A_fine = matrix_ref
+            levels = tuple(getattr(hierarchy, "levels", ()))
+            t = perf_counter()
+            for level_idx in range(len(levels) - 2, -1, -1):
+                self.A_levels_free[level_idx + 1].PtAP(
+                    state.prolongations[level_idx],
+                    result=self.A_levels_free[level_idx],
+                )
+                self.A_levels_free[level_idx].assemble()
+            record_setup_stage("galerkin_ptap", perf_counter() - t)
+            self.A_mid = self.A_levels_free[-2] if len(self.A_levels_free) >= 2 else None
+            self.A_coarse_free = self.A_levels_free[0]
+            self.A_coarse = self.A_coarse_free
+            self._coarse_use_full_system = False
+            self._coarse_operator_source = "galerkin_free"
+            record_setup_stage("coarse_operator", 0.0)
+            record_setup_stage("near_nullspace", 0.0)
+            for level_idx in range(1, len(levels)):
+                smoother = self.smoothers[level_idx]
+                stage = self._smoother_setup_stage_for_level(level_idx=level_idx, level_count=len(levels))
+                t = perf_counter()
+                smoother.setOperators(self.A_levels_free[level_idx])
+                smoother.setUp()
+                elapsed = perf_counter() - t
+                record_setup_stage("smoother", elapsed)
+                record_setup_stage(stage, elapsed)
+            self.smoother_fine = self.smoothers[-1]
+            self.smoother_mid = self.smoothers[-2] if len(self.smoothers) >= 3 else None
+            t = perf_counter()
+            self.coarse_ksp.setOperators(self.A_coarse)
+            self.coarse_ksp.setUp()
+            record_setup_stage("coarse_ksp", perf_counter() - t)
+            record_setup_stage("work_vector", 0.0)
+            self._stats_total["manualmg_setup_count"] = int(self._stats_total.get("manualmg_setup_count", 0)) + 1
+            self._stats_total["manualmg_setup_reuse_count"] = int(
+                self._stats_total.get("manualmg_setup_reuse_count", 0)
+            ) + 1
+            setup_last["manualmg_last_setup_count"] = int(self._stats_total["manualmg_setup_count"])
+            setup_last["manualmg_last_setup_reused"] = True
+            complete_recorder = getattr(self.solver, "_record_manualmg_setup_complete", None)
+            if complete_recorder is not None:
+                complete_recorder()
+            self._setup_stats_last = setup_last
+            return
+
+        t = perf_counter()
         self._destroy_dynamic()
+        record_setup_stage("destroy", perf_counter() - t)
         self.state = state
         self.hierarchy = hierarchy
         levels = tuple(getattr(hierarchy, "levels", ()))
@@ -627,15 +890,18 @@ class _ManualPMGShellPC:
             raise ValueError("manualmg backend requires at least two levels.")
         self.A_levels_free = [None] * len(levels)
         self.A_levels_free[-1] = matrix_ref
+        t = perf_counter()
         for level_idx in range(len(levels) - 2, -1, -1):
             galerkin = self.A_levels_free[level_idx + 1].PtAP(state.prolongations[level_idx])
             galerkin.assemble()
             self.A_levels_free[level_idx] = galerkin
+        record_setup_stage("galerkin_ptap", perf_counter() - t)
         self.A_fine = self.A_levels_free[-1]
         self.A_mid = self.A_levels_free[-2] if len(self.A_levels_free) >= 2 else None
         self.A_coarse_free = self.A_levels_free[0]
         coarse_level = hierarchy.coarse_level if hasattr(hierarchy, "coarse_level") else levels[0]
         self._coarse_use_full_system = self._use_full_system_hypre_coarse()
+        t = perf_counter()
         if self._coarse_use_full_system and self._use_direct_elastic_coarse_operator(hierarchy):
             self.A_coarse = self._build_direct_elastic_coarse_matrix(comm=matrix_ref.getComm(), hierarchy=hierarchy)
             self._coarse_operator_source = "direct_elastic_full_system"
@@ -645,6 +911,8 @@ class _ManualPMGShellPC:
         else:
             self.A_coarse = self.A_coarse_free
             self._coarse_operator_source = "galerkin_free"
+        record_setup_stage("coarse_operator", perf_counter() - t)
+        t = perf_counter()
         if int(getattr(coarse_level, "dof_per_node", 0) or 0) == 1:
             coarse_basis = None
         else:
@@ -655,23 +923,37 @@ class _ManualPMGShellPC:
                 return_full=bool(self._coarse_use_full_system),
             )
         self.A_coarse, self._coarse_nsp, self._coarse_nsp_vecs = attach_near_nullspace(self.A_coarse, coarse_basis)
+        record_setup_stage("near_nullspace", perf_counter() - t)
         self.smoothers = [None] * len(levels)
         for level_idx in range(1, len(levels)):
-            if level_idx == len(levels) - 1:
-                prefix = f"{self.solver._options_prefix}manualmg_fine_"
-            elif len(levels) == 3 and level_idx == 1:
-                prefix = f"{self.solver._options_prefix}manualmg_mid_"
-            else:
-                prefix = f"{self.solver._options_prefix}manualmg_level{level_idx}_"
+            prefix = self._smoother_prefix_for_level(level_idx=level_idx, level_count=len(levels))
+            smoother_stage = self._smoother_setup_stage_for_level(level_idx=level_idx, level_count=len(levels))
+            t = perf_counter()
             self.smoothers[level_idx] = self._build_smoother(
                 self.A_levels_free[level_idx],
                 prefix=prefix,
                 hierarchy=hierarchy,
             )
+            elapsed = perf_counter() - t
+            record_setup_stage("smoother", elapsed)
+            record_setup_stage(smoother_stage, elapsed)
         self.smoother_fine = self.smoothers[-1]
         self.smoother_mid = self.smoothers[-2] if len(self.smoothers) >= 3 else None
+        t = perf_counter()
         self.coarse_ksp = self._build_coarse_ksp(self.A_coarse, prefix=f"{self.solver._options_prefix}manualmg_coarse_")
+        record_setup_stage("coarse_ksp", perf_counter() - t)
+        t = perf_counter()
         self._alloc_work_vectors()
+        record_setup_stage("work_vector", perf_counter() - t)
+        self._stats_total["manualmg_setup_count"] = int(self._stats_total.get("manualmg_setup_count", 0)) + 1
+        self._stats_total["manualmg_setup_full_count"] = int(self._stats_total.get("manualmg_setup_full_count", 0)) + 1
+        setup_last["manualmg_last_setup_count"] = int(self._stats_total["manualmg_setup_count"])
+        setup_last["manualmg_last_setup_reused"] = False
+        self._setup_signature = self._setup_signature_for(matrix_ref=matrix_ref, state=state, hierarchy=hierarchy)
+        complete_recorder = getattr(self.solver, "_record_manualmg_setup_complete", None)
+        if complete_recorder is not None:
+            complete_recorder()
+        self._setup_stats_last = setup_last
 
     def diagnostics(self, *, phase: str | None = None, apply_elapsed_s: float | None = None) -> dict[str, object]:
         if self.state is None or self.coarse_ksp is None:
@@ -705,6 +987,8 @@ class _ManualPMGShellPC:
         payload.update({str(k): v for k, v in self._stats_total.items()})
         if self._stats_last:
             payload.update({str(k): v for k, v in self._stats_last.items()})
+        if self._setup_stats_last:
+            payload.update({str(k): v for k, v in self._setup_stats_last.items()})
         coarse_pc = self.coarse_ksp.getPC()
         coarse_pc_type = str(coarse_pc.getType()).lower()
         if coarse_pc_type in {str(PETSc.PC.Type.LU).lower(), str(PETSc.PC.Type.CHOLESKY).lower()}:
@@ -765,6 +1049,18 @@ class _ManualPMGShellPC:
                 payload["manualmg_coarse_iteration_count_mode"] = "hypre_inner_v_cycles_via_pcapplyrichardson"
             else:
                 payload["manualmg_coarse_iteration_count_mode"] = "coarse_ksp_iterations_only"
+        gasm_config = self._gasm_smoother_config(comm_size=int(self.A_fine.getComm().getSize()))
+        if gasm_config is not None:
+            payload["manualmg_smoother_pc_type"] = str(gasm_config["pc_type"])
+            payload["manualmg_smoother_gasm_total_subdomains"] = int(gasm_config["total_subdomains"])
+            payload["manualmg_smoother_gasm_grouping"] = str(gasm_config["grouping"])
+            payload["manualmg_smoother_gasm_ranks_per_subdomain"] = int(gasm_config["ranks_per_subdomain"])
+            payload["manualmg_smoother_gasm_overlap"] = int(gasm_config["overlap"])
+            payload["manualmg_smoother_gasm_type"] = str(gasm_config["gasm_type"])
+            payload["manualmg_smoother_gasm_sub_ksp_type"] = str(gasm_config["sub_ksp_type"])
+            payload["manualmg_smoother_gasm_sub_ksp_max_it"] = int(gasm_config["sub_ksp_max_it"])
+            payload["manualmg_smoother_gasm_sub_pc_type"] = str(gasm_config["sub_pc_type"])
+            payload["manualmg_smoother_gasm_view_subdomains"] = bool(gasm_config["view_subdomains"])
         for level_idx in range(1, level_count):
             smoother = self.smoothers[level_idx]
             if smoother is None:
@@ -1492,6 +1788,8 @@ class PetscKSPFGMRESSolver:
         self._manualmg_context: _ManualPMGShellPC | None = None
         self._manualmg_last_setup_info: dict[str, object] = {}
         self._manualmg_last_apply_info: dict[str, object] = {}
+        self._manualmg_setup_stage_totals: dict[str, float | int] = {}
+        self._manualmg_setup_stage_last: dict[str, float | int] = {}
         self._pc_backend = self._normalize_pc_backend()
         if self._pc_backend in {"pmg", "pmg_shell"}:
             self.preconditioner_options.setdefault("full_system_preconditioner", False)
@@ -1600,6 +1898,16 @@ class PetscKSPFGMRESSolver:
                 "manualmg_setup_time_s": float(elapsed),
                 **self._manualmg_context.diagnostics(phase="setup"),
             }
+
+    def _record_manualmg_setup_stage(self, name: str, elapsed: float) -> None:
+        key = f"manualmg_setup_{name}_time_total_s"
+        self._manualmg_setup_stage_totals[key] = float(self._manualmg_setup_stage_totals.get(key, 0.0)) + float(elapsed)
+        self._manualmg_setup_stage_last[f"manualmg_last_setup_{name}_time_s"] = float(elapsed)
+
+    def _record_manualmg_setup_complete(self) -> None:
+        count = int(self._manualmg_setup_stage_totals.get("manualmg_setup_count", 0)) + 1
+        self._manualmg_setup_stage_totals["manualmg_setup_count"] = count
+        self._manualmg_setup_stage_last["manualmg_last_setup_count"] = count
 
     def _record_preconditioner_apply_time(self, elapsed: float) -> None:
         self._preconditioner_diagnostics.preconditioner_apply_time_last = float(elapsed)
@@ -1744,6 +2052,8 @@ class PetscKSPFGMRESSolver:
             diagnostics.update({str(k): v for k, v in self._manualmg_last_setup_info.items()})
             diagnostics.update({str(k): v for k, v in self._manualmg_last_apply_info.items()})
             diagnostics.update(self._manualmg_context.diagnostics())
+            diagnostics.update({str(k): v for k, v in self._manualmg_setup_stage_totals.items()})
+            diagnostics.update({str(k): v for k, v in self._manualmg_setup_stage_last.items()})
         return diagnostics
 
     def get_preconditioner_matrix_source(self) -> str:
@@ -2381,6 +2691,24 @@ class PetscKSPFGMRESSolver:
             old_A_owned = self._owns_A_petsc
             old_P_petsc = self._P_petsc
             old_P_owned = self._owns_P_petsc
+            reuse_manualmg_storage = (
+                self._pc_backend == "pmg_shell"
+                and bool(self.preconditioner_options.get("pmg_shell_reuse_setup", True))
+                and old_A_petsc is not None
+                and self._matrix_compatible(old_A_petsc, new_A_petsc)
+            )
+            if reuse_manualmg_storage:
+                try:
+                    new_A_petsc.copy(result=old_A_petsc, structure=PETSc.Mat.Structure.SAME_NONZERO_PATTERN)
+                    old_A_petsc.assemble()
+                    if new_A_petsc is not old_A_petsc:
+                        self._destroy_owned_petsc_matrix(new_A_petsc, new_A_owned)
+                    new_A_petsc = old_A_petsc
+                    new_A_owned = old_A_owned
+                    new_ownership_range = new_A_petsc.getOwnershipRange()
+                    reuse_ksp = self._can_reuse_pmg_ksp(new_A_petsc)
+                except Exception:
+                    reuse_manualmg_storage = False
             if not reuse_ksp and self._ksp is not None:
                 self._ksp.destroy()
                 self._ksp = None
@@ -4246,6 +4574,24 @@ class SolverFactory:
         }
         if config.factor_solver_type is not None:
             preconditioner_options["factor_solver_type"] = config.factor_solver_type
+        if getattr(config, "pmg_smoother_pc_type", None) is not None:
+            preconditioner_options["pmg_smoother_pc_type"] = config.pmg_smoother_pc_type
+            preconditioner_options["pmg_smoother_gasm_total_subdomains"] = (
+                None
+                if getattr(config, "pmg_smoother_gasm_total_subdomains", None) is None
+                else int(config.pmg_smoother_gasm_total_subdomains)
+            )
+            preconditioner_options["pmg_smoother_gasm_grouping"] = config.pmg_smoother_gasm_grouping
+            preconditioner_options["pmg_smoother_gasm_overlap"] = int(config.pmg_smoother_gasm_overlap)
+            preconditioner_options["pmg_smoother_gasm_type"] = config.pmg_smoother_gasm_type
+            preconditioner_options["pmg_smoother_gasm_sub_ksp_type"] = config.pmg_smoother_gasm_sub_ksp_type
+            preconditioner_options["pmg_smoother_gasm_sub_ksp_max_it"] = int(
+                config.pmg_smoother_gasm_sub_ksp_max_it
+            )
+            preconditioner_options["pmg_smoother_gasm_sub_pc_type"] = config.pmg_smoother_gasm_sub_pc_type
+            preconditioner_options["pmg_smoother_gasm_view_subdomains"] = bool(
+                config.pmg_smoother_gasm_view_subdomains
+            )
         if config.pc_gamg_process_eq_limit is not None:
             preconditioner_options["pc_gamg_process_eq_limit"] = config.pc_gamg_process_eq_limit
         if config.pc_gamg_threshold is not None:

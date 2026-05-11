@@ -105,6 +105,15 @@ class LinearSolverConfig:
     pc_backend: str | None = "hypre"
     pmg_coarse_mesh_variant: str | None = None
     pmg_fine_hierarchy_mode: str = "default"
+    pmg_smoother_pc_type: str | None = None
+    pmg_smoother_gasm_total_subdomains: int | None = None
+    pmg_smoother_gasm_grouping: str = "contiguous"
+    pmg_smoother_gasm_overlap: int = 1
+    pmg_smoother_gasm_type: str = "restrict"
+    pmg_smoother_gasm_sub_ksp_type: str = "preonly"
+    pmg_smoother_gasm_sub_ksp_max_it: int = 1
+    pmg_smoother_gasm_sub_pc_type: str = "jacobi"
+    pmg_smoother_gasm_view_subdomains: bool = False
     max_deflation_basis_vectors: int = 48
     preconditioner_matrix_source: str = "tangent"
     preconditioner_matrix_policy: str = "current"
@@ -208,6 +217,31 @@ class RunCaseConfig:
                 raise ValueError(
                     f"The continuation {field_name} must be relative_residual, relative_correction, or absolute_delta_lambda."
                 )
+        smoother_pc_type = self.linear_solver.pmg_smoother_pc_type
+        if smoother_pc_type is not None:
+            if str(smoother_pc_type).strip().lower() != "gasm":
+                raise ValueError("The linear_solver pmg_smoother_pc_type must be 'gasm' when set.")
+            if self.linear_solver.pmg_smoother_gasm_total_subdomains is None:
+                raise ValueError(
+                    "The linear_solver pmg_smoother_gasm_total_subdomains must be set when pmg_smoother_pc_type='gasm'."
+                )
+            if int(self.linear_solver.pmg_smoother_gasm_total_subdomains) <= 0:
+                raise ValueError("The linear_solver pmg_smoother_gasm_total_subdomains must be positive.")
+            if str(self.linear_solver.pmg_smoother_gasm_grouping).strip().lower() != "contiguous":
+                raise ValueError("The linear_solver pmg_smoother_gasm_grouping must be 'contiguous'.")
+            if int(self.linear_solver.pmg_smoother_gasm_overlap) < 0:
+                raise ValueError("The linear_solver pmg_smoother_gasm_overlap must be nonnegative.")
+            if str(self.linear_solver.pmg_smoother_gasm_type).strip().lower() not in {
+                "basic",
+                "restrict",
+                "interpolate",
+                "none",
+            }:
+                raise ValueError(
+                    "The linear_solver pmg_smoother_gasm_type must be basic, restrict, interpolate, or none."
+                )
+            if int(self.linear_solver.pmg_smoother_gasm_sub_ksp_max_it) <= 0:
+                raise ValueError("The linear_solver pmg_smoother_gasm_sub_ksp_max_it must be positive.")
         validate_supported_elem_type(self.problem.dimension, self.problem.elem_type)
         if self.problem.analysis.lower() != "seepage" and not self.material_rows():
             raise ValueError("At least one asset material row is required for non-seepage cases.")
@@ -447,6 +481,25 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
             None if linear_data.get("pmg_coarse_mesh_variant") is None else str(linear_data.get("pmg_coarse_mesh_variant"))
         ),
         pmg_fine_hierarchy_mode=str(linear_data.get("pmg_fine_hierarchy_mode", "default")),
+        pmg_smoother_pc_type=(
+            None if linear_data.get("pmg_smoother_pc_type") is None else str(linear_data.get("pmg_smoother_pc_type"))
+        ),
+        pmg_smoother_gasm_total_subdomains=(
+            None
+            if linear_data.get("pmg_smoother_gasm_total_subdomains") is None
+            else int(linear_data.get("pmg_smoother_gasm_total_subdomains"))
+        ),
+        pmg_smoother_gasm_grouping=str(linear_data.get("pmg_smoother_gasm_grouping", "contiguous")),
+        pmg_smoother_gasm_overlap=int(linear_data.get("pmg_smoother_gasm_overlap", 1)),
+        pmg_smoother_gasm_type=str(linear_data.get("pmg_smoother_gasm_type", "restrict")),
+        pmg_smoother_gasm_sub_ksp_type=str(
+            linear_data.get("pmg_smoother_gasm_sub_ksp_type", "preonly")
+        ),
+        pmg_smoother_gasm_sub_ksp_max_it=int(linear_data.get("pmg_smoother_gasm_sub_ksp_max_it", 1)),
+        pmg_smoother_gasm_sub_pc_type=str(linear_data.get("pmg_smoother_gasm_sub_pc_type", "jacobi")),
+        pmg_smoother_gasm_view_subdomains=bool(
+            linear_data.get("pmg_smoother_gasm_view_subdomains", False)
+        ),
         max_deflation_basis_vectors=int(linear_data.get("max_deflation_basis_vectors", 48)),
         preconditioner_matrix_source=str(linear_data.get("preconditioner_matrix_source", "tangent")),
         preconditioner_matrix_policy=str(linear_data.get("preconditioner_matrix_policy", "current")),

@@ -759,6 +759,15 @@ def run_capture(
     pc_backend: str | None = "hypre",
     pmg_coarse_mesh_variant: str | None = None,
     pmg_fine_hierarchy_mode: str = "default",
+    pmg_smoother_pc_type: str | None = None,
+    pmg_smoother_gasm_total_subdomains: int | None = None,
+    pmg_smoother_gasm_grouping: str = "contiguous",
+    pmg_smoother_gasm_overlap: int = 1,
+    pmg_smoother_gasm_type: str = "restrict",
+    pmg_smoother_gasm_sub_ksp_type: str = "preonly",
+    pmg_smoother_gasm_sub_ksp_max_it: int = 1,
+    pmg_smoother_gasm_sub_pc_type: str = "jacobi",
+    pmg_smoother_gasm_view_subdomains: bool = False,
     preconditioner_matrix_source: str = "tangent",
     preconditioner_matrix_policy: str = "current",
     preconditioner_rebuild_policy: str = "every_newton",
@@ -815,6 +824,10 @@ def run_capture(
         mesh_variant=None if mesh_variant is None else str(mesh_variant),
         elem_type=str(elem_type),
         pc_backend=None if pc_backend is None else str(pc_backend),
+        pmg_smoother_pc_type=None if pmg_smoother_pc_type is None else str(pmg_smoother_pc_type),
+        pmg_smoother_gasm_total_subdomains=(
+            None if pmg_smoother_gasm_total_subdomains is None else int(pmg_smoother_gasm_total_subdomains)
+        ),
     )
     out_dir = _ensure_dir(output_dir) if rank == 0 else output_dir
     data_dir = out_dir / "data"
@@ -1185,6 +1198,18 @@ def run_capture(
         preconditioner_options["compiled_outer"] = True
     if recycle_preconditioner:
         preconditioner_options["recycle_preconditioner"] = True
+    if pmg_smoother_pc_type is not None:
+        preconditioner_options["pmg_smoother_pc_type"] = str(pmg_smoother_pc_type)
+        preconditioner_options["pmg_smoother_gasm_total_subdomains"] = (
+            None if pmg_smoother_gasm_total_subdomains is None else int(pmg_smoother_gasm_total_subdomains)
+        )
+        preconditioner_options["pmg_smoother_gasm_grouping"] = str(pmg_smoother_gasm_grouping)
+        preconditioner_options["pmg_smoother_gasm_overlap"] = int(pmg_smoother_gasm_overlap)
+        preconditioner_options["pmg_smoother_gasm_type"] = str(pmg_smoother_gasm_type)
+        preconditioner_options["pmg_smoother_gasm_sub_ksp_type"] = str(pmg_smoother_gasm_sub_ksp_type)
+        preconditioner_options["pmg_smoother_gasm_sub_ksp_max_it"] = int(pmg_smoother_gasm_sub_ksp_max_it)
+        preconditioner_options["pmg_smoother_gasm_sub_pc_type"] = str(pmg_smoother_gasm_sub_pc_type)
+        preconditioner_options["pmg_smoother_gasm_view_subdomains"] = bool(pmg_smoother_gasm_view_subdomains)
     pmg_level_orders = tuple(int(getattr(level, "order", -1)) for level in getattr(pmg_hierarchy, "levels", ()))
     robust_parallel_shell = (
         pmg_hierarchy is not None
@@ -1426,6 +1451,17 @@ def run_capture(
         "factor_solver_type": factor_solver_type,
         "pc_backend": effective_pc_backend,
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
+        "pmg_smoother_pc_type": None if pmg_smoother_pc_type is None else str(pmg_smoother_pc_type),
+        "pmg_smoother_gasm_total_subdomains": (
+            None if pmg_smoother_gasm_total_subdomains is None else int(pmg_smoother_gasm_total_subdomains)
+        ),
+        "pmg_smoother_gasm_grouping": str(pmg_smoother_gasm_grouping),
+        "pmg_smoother_gasm_overlap": int(pmg_smoother_gasm_overlap),
+        "pmg_smoother_gasm_type": str(pmg_smoother_gasm_type),
+        "pmg_smoother_gasm_sub_ksp_type": str(pmg_smoother_gasm_sub_ksp_type),
+        "pmg_smoother_gasm_sub_ksp_max_it": int(pmg_smoother_gasm_sub_ksp_max_it),
+        "pmg_smoother_gasm_sub_pc_type": str(pmg_smoother_gasm_sub_pc_type),
+        "pmg_smoother_gasm_view_subdomains": bool(pmg_smoother_gasm_view_subdomains),
         "preconditioner_matrix_source": str(preconditioner_matrix_source),
         "preconditioner_matrix_policy": str(preconditioner_matrix_policy),
         "preconditioner_rebuild_policy": str(preconditioner_rebuild_policy),
@@ -2043,6 +2079,20 @@ def main() -> None:
         default="default",
         choices=["default", "p4_p2_intermediate"],
     )
+    parser.add_argument("--pmg_smoother_pc_type", type=str, default=None, choices=["gasm"])
+    parser.add_argument("--pmg_smoother_gasm_total_subdomains", type=int, default=None)
+    parser.add_argument("--pmg_smoother_gasm_grouping", type=str, default="contiguous", choices=["contiguous"])
+    parser.add_argument("--pmg_smoother_gasm_overlap", type=int, default=1)
+    parser.add_argument(
+        "--pmg_smoother_gasm_type",
+        type=str,
+        default="restrict",
+        choices=["basic", "restrict", "interpolate", "none"],
+    )
+    parser.add_argument("--pmg_smoother_gasm_sub_ksp_type", type=str, default="preonly")
+    parser.add_argument("--pmg_smoother_gasm_sub_ksp_max_it", type=int, default=1)
+    parser.add_argument("--pmg_smoother_gasm_sub_pc_type", type=str, default="jacobi")
+    parser.add_argument("--pmg_smoother_gasm_view_subdomains", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--preconditioner_matrix_source",
         type=str,
@@ -2188,6 +2238,15 @@ def main() -> None:
         pc_backend=args.pc_backend,
         pmg_coarse_mesh_variant=args.pmg_coarse_mesh_variant,
         pmg_fine_hierarchy_mode=args.pmg_fine_hierarchy_mode,
+        pmg_smoother_pc_type=args.pmg_smoother_pc_type,
+        pmg_smoother_gasm_total_subdomains=args.pmg_smoother_gasm_total_subdomains,
+        pmg_smoother_gasm_grouping=args.pmg_smoother_gasm_grouping,
+        pmg_smoother_gasm_overlap=args.pmg_smoother_gasm_overlap,
+        pmg_smoother_gasm_type=args.pmg_smoother_gasm_type,
+        pmg_smoother_gasm_sub_ksp_type=args.pmg_smoother_gasm_sub_ksp_type,
+        pmg_smoother_gasm_sub_ksp_max_it=args.pmg_smoother_gasm_sub_ksp_max_it,
+        pmg_smoother_gasm_sub_pc_type=args.pmg_smoother_gasm_sub_pc_type,
+        pmg_smoother_gasm_view_subdomains=args.pmg_smoother_gasm_view_subdomains,
         preconditioner_matrix_source=args.preconditioner_matrix_source,
         preconditioner_matrix_policy=args.preconditioner_matrix_policy,
         preconditioner_rebuild_policy=args.preconditioner_rebuild_policy,
