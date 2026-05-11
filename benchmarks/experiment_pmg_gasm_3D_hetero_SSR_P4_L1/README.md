@@ -50,3 +50,32 @@ After the array finishes, refresh the comparison table with:
 ```
 
 The generated tables are `summary.md` and `summary.tsv` in the output directory.
+
+## Karolina multi-node full-occupancy grid
+
+The multi-node script tests full node occupancy on `2`, `4`, `8`, and `16` nodes with a 10 minute Slurm limit per case:
+
+- baseline ranks: `nodes * 128`;
+- GASM ranks: `nodes * 128`, with `8` fake socket aggregates per node and `16` ranks per aggregate.
+
+Submit from the repository root on Karolina:
+
+```bash
+benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/submit_karolina_multinode_full_occupancy.sh
+```
+
+This submits to `qcpu` by default because `qcpu_exp` is limited to two nodes on Karolina. Use `PARTITION=qcpu_exp NODE_COUNTS="2"` only for the two-node experimental queue check.
+
+Outputs are written under:
+
+```text
+artifacts/experiments/pmg_gasm_karolina_multinode_full_occupancy_p4_l1_omega7/
+```
+
+Refresh the summary and log-log scaling plot with:
+
+```bash
+./.venv/bin/python benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/summarize_karolina_multinode_full_occupancy.py
+```
+
+The plot files are `multinode_full_occupancy_scaling_loglog.png` and `.svg`.
