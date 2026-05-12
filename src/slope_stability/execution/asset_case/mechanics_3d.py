@@ -1042,6 +1042,13 @@ def run_capture(
         q_mask = reordered.q_mask.astype(bool, copy=False)
         material_identifier = mesh.material_id.astype(np.int64, copy=False).ravel()
         partition_offsets = getattr(reordered, "partition_offsets", None)
+        if (
+            numa_layout is not None
+            and str(node_ordering).lower() == "block_metis"
+            and partition_offsets is None
+            and int(numa_layout.total_numa_domains) == 1
+        ):
+            partition_offsets = np.asarray([0, int(coord.shape[1])], dtype=np.int64)
         if numa_layout is not None and partition_offsets is not None:
             partition_offsets = split_domain_offsets_to_rank_offsets(
                 n_blocks=int(coord.shape[1]),

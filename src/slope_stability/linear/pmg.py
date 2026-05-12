@@ -431,6 +431,13 @@ def _build_level(
     freedofs = np.asarray(freedofs_total[perm], dtype=np.int64)
 
     domain_partition_offsets = getattr(reordered, "partition_offsets", None)
+    if (
+        numa_layout is not None
+        and use_block_metis
+        and domain_partition_offsets is None
+        and int(numa_layout.total_numa_domains) == 1
+    ):
+        domain_partition_offsets = np.asarray([0, int(coord.shape[1])], dtype=np.int64)
     partition_offsets = domain_partition_offsets
     if numa_layout is not None and domain_partition_offsets is not None:
         partition_offsets = split_domain_offsets_to_rank_offsets(
