@@ -263,6 +263,7 @@ def case_runner_kwargs(cfg: RunCaseConfig) -> tuple[Callable[..., dict], dict]:
             "pc_backend": linear.pc_backend,
             "pmg_coarse_mesh_variant": linear.pmg_coarse_mesh_variant,
             "pmg_fine_hierarchy_mode": linear.pmg_fine_hierarchy_mode,
+            "numa_domains_per_node": linear.numa_domains_per_node,
             "pmg_smoother_pc_type": linear.pmg_smoother_pc_type,
             "pmg_smoother_gasm_total_subdomains": linear.pmg_smoother_gasm_total_subdomains,
             "pmg_smoother_gasm_grouping": linear.pmg_smoother_gasm_grouping,

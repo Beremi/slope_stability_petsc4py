@@ -12,6 +12,7 @@ from scipy.sparse import coo_matrix, csr_matrix
 from ..core.simplex_lagrange import tetra_reference_nodes
 from ..fem.basis import local_basis_volume_3d
 from ..fem.distributed_elastic import find_overlap_partition
+from ..hpc.numa_layout import NumaMPILayout, split_domain_offsets_to_rank_offsets
 from ..mesh import MaterialSpec, reorder_mesh_nodes
 from ..problem_asset_runtime import ResolvedAsset, build_mesh_for_resolved_asset, resolve_problem_asset
 from ..utils import owned_block_range, q_to_free_indices
@@ -38,6 +39,7 @@ class PMGLevel:
     dof_dim: int | None = None
     free_size_override: int | None = None
     partition_offsets: np.ndarray | None = None
+    domain_partition_offsets: np.ndarray | None = None
 
     @property
     def dim(self) -> int:
@@ -202,6 +204,9 @@ def _compact_level_for_runtime(level: PMGLevel, *, keep_geometry: bool) -> PMGLe
         partition_offsets=None
         if level.partition_offsets is None
         else np.asarray(level.partition_offsets, dtype=np.int64).copy(),
+        domain_partition_offsets=None
+        if level.domain_partition_offsets is None
+        else np.asarray(level.domain_partition_offsets, dtype=np.int64).copy(),
     )
 
 
@@ -300,6 +305,9 @@ def _prune_level_to_active_free(level: PMGLevel, active_free_mask: np.ndarray) -
         partition_offsets=None
         if level.partition_offsets is None
         else np.asarray(level.partition_offsets, dtype=np.int64).copy(),
+        domain_partition_offsets=None
+        if level.domain_partition_offsets is None
+        else np.asarray(level.domain_partition_offsets, dtype=np.int64).copy(),
     )
 
 
@@ -388,15 +396,18 @@ def _build_level(
     comm,
     scalar_dofs: bool = False,
     q_mask_override=None,
+    numa_layout: NumaMPILayout | None = None,
 ) -> PMGLevel:
     mesh = build_mesh_for_resolved_asset(resolved_asset, elem_type=elem_type)
+    use_block_metis = str(node_ordering).lower() == "block_metis"
+    metis_parts = int(numa_layout.total_numa_domains) if use_block_metis and numa_layout is not None else reorder_parts
     reordered = reorder_mesh_nodes(
         mesh.coord,
         mesh.elem,
         mesh.surf,
         mesh.q_mask,
         strategy=node_ordering,
-        n_parts=reorder_parts if str(node_ordering).lower() == "block_metis" else None,
+        n_parts=metis_parts if use_block_metis else None,
     )
     coord = np.asarray(reordered.coord, dtype=np.float64)
     elem = np.asarray(reordered.elem, dtype=np.int64)
@@ -419,7 +430,14 @@ def _build_level(
     perm, iperm = _identity_free_permutation(freedofs_total.size)
     freedofs = np.asarray(freedofs_total[perm], dtype=np.int64)
 
-    partition_offsets = getattr(reordered, "partition_offsets", None)
+    domain_partition_offsets = getattr(reordered, "partition_offsets", None)
+    partition_offsets = domain_partition_offsets
+    if numa_layout is not None and domain_partition_offsets is not None:
+        partition_offsets = split_domain_offsets_to_rank_offsets(
+            n_blocks=int(coord.shape[1]),
+            domain_offsets=np.asarray(domain_partition_offsets, dtype=np.int64),
+            layout=numa_layout,
+        )
     owned_total_range = owned_block_range(
         coord.shape[1],
         dof_dim,
@@ -431,7 +449,7 @@ def _build_level(
     lo = int(np.searchsorted(freedofs_total, owned_total_range[0], side="left"))
     hi = int(np.searchsorted(freedofs_total, owned_total_range[1], side="left"))
 
-    return PMGLevel(
+    level = PMGLevel(
         order=int(elem_type[1:]),
         elem_type=str(elem_type),
         coord=coord,
@@ -450,7 +468,12 @@ def _build_level(
         partition_offsets=None
         if partition_offsets is None
         else np.asarray(partition_offsets, dtype=np.int64).copy(),
+        domain_partition_offsets=None
+        if domain_partition_offsets is None
+        else np.asarray(domain_partition_offsets, dtype=np.int64).copy(),
     )
+    _validate_level_layout(level, comm=comm, numa_layout=numa_layout)
+    return level
 
 
 def _sorted_coo_arrays(entries: dict[tuple[int, int], float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -468,7 +491,7 @@ def _sorted_coo_arrays(entries: dict[tuple[int, int], float]) -> tuple[np.ndarra
     return rows, cols, data
 
 
-def _validate_level_layout(level: PMGLevel, *, comm) -> None:
+def _validate_level_layout(level: PMGLevel, *, comm, numa_layout: NumaMPILayout | None = None) -> None:
     expected_total_range = owned_block_range(
         level.n_nodes,
         level.dof_per_node,
@@ -492,6 +515,35 @@ def _validate_level_layout(level: PMGLevel, *, comm) -> None:
     free_count = int(np.count_nonzero(level.total_to_free_orig >= 0))
     if free_count != int(level.free_size):
         raise ValueError(f"PMG level free-size mismatch: {free_count} vs {int(level.free_size)}")
+    if numa_layout is not None:
+        if level.partition_offsets is None:
+            raise ValueError("NUMA-coalesced PMG levels require rank partition offsets.")
+        if level.domain_partition_offsets is None:
+            raise ValueError("NUMA-coalesced PMG levels require domain partition offsets.")
+        rank_offsets = np.asarray(level.partition_offsets, dtype=np.int64)
+        domain_offsets = np.asarray(level.domain_partition_offsets, dtype=np.int64)
+        if rank_offsets.size != int(numa_layout.size) + 1:
+            raise ValueError(
+                "PMG rank partition offsets must have size comm_size + 1 in NUMA mode: "
+                f"{rank_offsets.size} vs {int(numa_layout.size) + 1}"
+            )
+        if domain_offsets.size != int(numa_layout.total_numa_domains) + 1:
+            raise ValueError(
+                "PMG domain partition offsets must have size total_numa_domains + 1: "
+                f"{domain_offsets.size} vs {int(numa_layout.total_numa_domains) + 1}"
+            )
+        rank = int(comm.getRank() if hasattr(comm, "getRank") else comm.Get_rank())
+        domain_id = int(numa_layout.rank_global_numa[rank])
+        rank_node0 = int(rank_offsets[rank])
+        rank_node1 = int(rank_offsets[rank + 1])
+        domain_node0 = int(domain_offsets[domain_id])
+        domain_node1 = int(domain_offsets[domain_id + 1])
+        if not (domain_node0 <= rank_node0 <= rank_node1 <= domain_node1):
+            raise ValueError(
+                "PMG rank ownership must stay inside its NUMA-domain METIS block: "
+                f"rank {rank} nodes {rank_node0}:{rank_node1}, "
+                f"domain {domain_id} nodes {domain_node0}:{domain_node1}"
+            )
 
 
 def validate_pmg_fine_level_alignment(
@@ -762,6 +814,7 @@ def build_3d_pmg_hierarchy(
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
+    numa_layout: NumaMPILayout | None = None,
     comm,
 ) -> ElasticPMGHierarchy:
     """Build the static same-mesh `P1 -> P2 -> P4` PMG hierarchy."""
@@ -773,6 +826,7 @@ def build_3d_pmg_hierarchy(
         elem_type="P1",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     level_p2 = _build_level(
@@ -780,6 +834,7 @@ def build_3d_pmg_hierarchy(
         elem_type="P2",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     level_p4 = _build_level(
@@ -787,6 +842,7 @@ def build_3d_pmg_hierarchy(
         elem_type="P4",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     prolongation_p21 = _adjacent_level_prolongation(
@@ -820,6 +876,7 @@ def build_3d_same_mesh_pmg_hierarchy(
     node_ordering: str = "block_metis",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
+    numa_layout: NumaMPILayout | None = None,
     comm,
 ) -> GeneralPMGHierarchy:
     """Build a same-mesh hierarchy such as `P1 -> P2` or `P1 -> P2 -> P4`."""
@@ -835,6 +892,7 @@ def build_3d_same_mesh_pmg_hierarchy(
         elem_type="P1",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     level_p2 = _build_level(
@@ -842,6 +900,7 @@ def build_3d_same_mesh_pmg_hierarchy(
         elem_type="P2",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     prolongation_p21 = _adjacent_level_prolongation(
@@ -864,6 +923,7 @@ def build_3d_same_mesh_pmg_hierarchy(
         elem_type="P4",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     prolongation_p42 = _adjacent_level_prolongation(
@@ -889,6 +949,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
     q_mask_builder=None,
+    numa_layout: NumaMPILayout | None = None,
     comm,
 ) -> GeneralPMGHierarchy:
     """Build a scalar same-mesh hierarchy such as `P1 -> P2` or `P1 -> P2 -> P4`."""
@@ -904,6 +965,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
         elem_type="P1",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
         scalar_dofs=True,
         q_mask_override=q_mask_builder,
@@ -913,6 +975,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
         elem_type="P2",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
         scalar_dofs=True,
         q_mask_override=q_mask_builder,
@@ -939,6 +1002,7 @@ def build_3d_same_mesh_scalar_pmg_hierarchy(
         elem_type="P4",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
         scalar_dofs=True,
         q_mask_override=q_mask_builder,
@@ -973,6 +1037,7 @@ def build_3d_mixed_pmg_hierarchy(
     node_ordering: str = "original",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
+    numa_layout: NumaMPILayout | None = None,
     comm,
 ) -> ElasticPMGHierarchy:
     """Build a mixed three-level hierarchy such as `P1(L1) -> P1(L2) -> P2(L2)`."""
@@ -985,6 +1050,7 @@ def build_3d_mixed_pmg_hierarchy(
         elem_type="P1",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     level_mid = _build_level(
@@ -992,6 +1058,7 @@ def build_3d_mixed_pmg_hierarchy(
         elem_type="P1",
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     level_fine = _build_level(
@@ -999,6 +1066,7 @@ def build_3d_mixed_pmg_hierarchy(
         elem_type=str(fine_elem_type),
         node_ordering=node_ordering,
         reorder_parts=reorder_parts,
+        numa_layout=numa_layout,
         comm=comm,
     )
     prolongation_h = _cross_mesh_p1_to_p1_prolongation(level_coarse, level_mid)
@@ -1088,6 +1156,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
     node_ordering: str = "original",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
+    numa_layout: NumaMPILayout | None = None,
     comm,
 ) -> GeneralPMGHierarchy:
     """Build `P1(L1) -> P1(L2) -> P2(L2) -> P4(L2)` for mixed-shell PMG."""
@@ -1102,6 +1171,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
             elem_type="P1",
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
+            numa_layout=numa_layout,
             comm=comm,
         ),
         _build_level(
@@ -1109,6 +1179,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
             elem_type="P1",
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
+            numa_layout=numa_layout,
             comm=comm,
         ),
         _build_level(
@@ -1116,6 +1187,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
             elem_type="P2",
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
+            numa_layout=numa_layout,
             comm=comm,
         ),
         _build_level(
@@ -1123,6 +1195,7 @@ def build_3d_mixed_pmg_hierarchy_with_intermediate_p2(
             elem_type="P4",
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
+            numa_layout=numa_layout,
             comm=comm,
         ),
     ]
@@ -1150,6 +1223,7 @@ def build_3d_mixed_pmg_chain_hierarchy(
     node_ordering: str = "original",
     reorder_parts: int | None = None,
     material_rows: list[list[float]] | None = None,
+    numa_layout: NumaMPILayout | None = None,
     comm,
 ) -> GeneralPMGHierarchy:
     """Build a mixed multi-level hierarchy such as `P1(L1)->...->P1(L5)->P2(L5)`."""
@@ -1169,6 +1243,7 @@ def build_3d_mixed_pmg_chain_hierarchy(
                 elem_type="P1",
                 node_ordering=node_ordering,
                 reorder_parts=reorder_parts,
+                numa_layout=numa_layout,
                 comm=comm,
             )
         )
@@ -1178,6 +1253,7 @@ def build_3d_mixed_pmg_chain_hierarchy(
             elem_type=str(fine_elem_type),
             node_ordering=node_ordering,
             reorder_parts=reorder_parts,
+            numa_layout=numa_layout,
             comm=comm,
         )
     )

@@ -105,6 +105,7 @@ class LinearSolverConfig:
     pc_backend: str | None = "hypre"
     pmg_coarse_mesh_variant: str | None = None
     pmg_fine_hierarchy_mode: str = "default"
+    numa_domains_per_node: int = 8
     pmg_smoother_pc_type: str | None = None
     pmg_smoother_gasm_total_subdomains: int | None = None
     pmg_smoother_gasm_grouping: str = "contiguous"
@@ -218,17 +219,25 @@ class RunCaseConfig:
                     f"The continuation {field_name} must be relative_residual, relative_correction, or absolute_delta_lambda."
                 )
         smoother_pc_type = self.linear_solver.pmg_smoother_pc_type
+        gasm_grouping = str(self.linear_solver.pmg_smoother_gasm_grouping).strip().lower()
+        if gasm_grouping not in {"contiguous", "numa_coalesced"}:
+            raise ValueError(
+                "The linear_solver pmg_smoother_gasm_grouping must be 'contiguous' or 'numa_coalesced'."
+            )
+        if int(self.linear_solver.numa_domains_per_node) <= 0:
+            raise ValueError("The linear_solver numa_domains_per_node must be positive.")
         if smoother_pc_type is not None:
             if str(smoother_pc_type).strip().lower() != "gasm":
                 raise ValueError("The linear_solver pmg_smoother_pc_type must be 'gasm' when set.")
-            if self.linear_solver.pmg_smoother_gasm_total_subdomains is None:
+            if gasm_grouping == "contiguous" and self.linear_solver.pmg_smoother_gasm_total_subdomains is None:
                 raise ValueError(
                     "The linear_solver pmg_smoother_gasm_total_subdomains must be set when pmg_smoother_pc_type='gasm'."
                 )
-            if int(self.linear_solver.pmg_smoother_gasm_total_subdomains) <= 0:
+            if (
+                self.linear_solver.pmg_smoother_gasm_total_subdomains is not None
+                and int(self.linear_solver.pmg_smoother_gasm_total_subdomains) <= 0
+            ):
                 raise ValueError("The linear_solver pmg_smoother_gasm_total_subdomains must be positive.")
-            if str(self.linear_solver.pmg_smoother_gasm_grouping).strip().lower() != "contiguous":
-                raise ValueError("The linear_solver pmg_smoother_gasm_grouping must be 'contiguous'.")
             if int(self.linear_solver.pmg_smoother_gasm_overlap) < 0:
                 raise ValueError("The linear_solver pmg_smoother_gasm_overlap must be nonnegative.")
             if str(self.linear_solver.pmg_smoother_gasm_type).strip().lower() not in {
@@ -481,6 +490,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
             None if linear_data.get("pmg_coarse_mesh_variant") is None else str(linear_data.get("pmg_coarse_mesh_variant"))
         ),
         pmg_fine_hierarchy_mode=str(linear_data.get("pmg_fine_hierarchy_mode", "default")),
+        numa_domains_per_node=int(linear_data.get("numa_domains_per_node", 8)),
         pmg_smoother_pc_type=(
             None if linear_data.get("pmg_smoother_pc_type") is None else str(linear_data.get("pmg_smoother_pc_type"))
         ),

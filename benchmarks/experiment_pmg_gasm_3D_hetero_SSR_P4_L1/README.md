@@ -51,6 +51,24 @@ After the array finishes, refresh the comparison table with:
 
 The generated tables are `summary.md` and `summary.tsv` in the output directory.
 
+## Karolina NUMA-coalesced PMG run
+
+The opt-in NUMA-coalesced implementation uses all 128 MPI ranks per CPU node, discovers the hardware NUMA layout at runtime, partitions `block_metis` into 8 domains per node, and lets PETSc coalesce each 16-rank NUMA group into one GASM smoother block:
+
+```bash
+sbatch benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/karolina_numa_coalesced_p4l1.sbatch
+```
+
+The config is `gasm_numa_coalesced.toml`. It runs the full P4(L1) SSR target to `omega_max = 7.0e6`, with `OMP_NUM_THREADS=1` and strict rank-layout validation. If Slurm/MPI does not bind ranks as contiguous NUMA groups, the run fails before mesh construction.
+
+For the Qexp socket-scaling grid, submit five independent jobs:
+
+```bash
+benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/submit_karolina_numa_socket_scaling_qexp.sh
+```
+
+This creates one full `omega_max = 7.0e6` P4(L1) run per logical NUMA-domain count: `1x16`, `2x16`, `4x16`, `8x16` on one node and `16x16` on two nodes. Each logical domain uses 16 MPI ranks, and every job verifies that Slurm placed ranks contiguously by hardware NUMA domain before mesh construction.
+
 ## Karolina multi-node full-occupancy grid
 
 The multi-node script tests full node occupancy on `2`, `4`, `8`, and `16` nodes with a 10 minute Slurm limit per case:

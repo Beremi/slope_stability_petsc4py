@@ -182,6 +182,8 @@ class _ManualPMGShellPC:
         return orders[-1] == 2 and all(order == 1 for order in orders[:-1])
 
     def _default_smoother_options(self, hierarchy, *, comm_size: int) -> tuple[str, str, int]:
+        if self._pmg_smoother_pc_type() == "gasm":
+            return (str(PETSc.KSP.Type.RICHARDSON), str(PETSc.PC.Type.GASM), 1)
         if comm_size > 1 and self._is_mixed_p1_tail_to_p2_hierarchy(hierarchy):
             return (str(PETSc.KSP.Type.CHEBYSHEV), str(PETSc.PC.Type.JACOBI), 3)
         return (
@@ -202,34 +204,55 @@ class _ManualPMGShellPC:
         if pc_type is None:
             return None
         if pc_type != "gasm":
-            raise ValueError(f"Unsupported pmg_smoother_pc_type {pc_type!r}; v1 supports only 'gasm'.")
-
-        raw_total = self.solver.preconditioner_options.get("pmg_smoother_gasm_total_subdomains")
-        if raw_total is None:
-            raise ValueError("pmg_smoother_pc_type='gasm' requires pmg_smoother_gasm_total_subdomains.")
-        total_subdomains = int(raw_total)
-        if total_subdomains <= 0:
-            raise ValueError("pmg_smoother_gasm_total_subdomains must be positive.")
-        if total_subdomains > int(comm_size):
-            raise ValueError(
-                "pmg_smoother_gasm_total_subdomains must be no larger than the MPI communicator size "
-                f"({total_subdomains} > {int(comm_size)})."
-            )
-        if int(comm_size) % total_subdomains != 0:
-            raise ValueError(
-                "pmg_smoother_gasm_total_subdomains must divide the MPI communicator size for contiguous "
-                f"fake-socket grouping ({total_subdomains} does not divide {int(comm_size)})."
-            )
+            raise ValueError(f"Unsupported pmg_smoother_pc_type {pc_type!r}; expected 'gasm'.")
 
         grouping = str(
             self.solver.preconditioner_options.get("pmg_smoother_gasm_grouping", "contiguous")
         ).strip().lower()
-        if grouping != "contiguous":
-            raise ValueError(f"Unsupported pmg_smoother_gasm_grouping {grouping!r}; v1 supports only 'contiguous'.")
+        layout = getattr(self.solver, "numa_layout", None)
+        if layout is None:
+            layout = self.solver.preconditioner_options.get("numa_layout")
 
-        overlap = int(self.solver.preconditioner_options.get("pmg_smoother_gasm_overlap", 1))
+        if grouping == "numa_coalesced":
+            if layout is None:
+                raise ValueError("pmg_smoother_gasm_grouping='numa_coalesced' requires solver.numa_layout.")
+            total_subdomains = int(layout.total_numa_domains)
+            ranks_per_subdomain = int(layout.ranks_per_numa)
+        elif grouping == "contiguous":
+            raw_total = self.solver.preconditioner_options.get("pmg_smoother_gasm_total_subdomains")
+            if raw_total is None:
+                raise ValueError(
+                    "pmg_smoother_gasm_grouping='contiguous' requires pmg_smoother_gasm_total_subdomains."
+                )
+            total_subdomains = int(raw_total)
+            ranks_per_subdomain = 0
+        else:
+            raise ValueError("pmg_smoother_gasm_grouping must be 'contiguous' or 'numa_coalesced'.")
+
+        if total_subdomains <= 0:
+            raise ValueError("GASM total_subdomains must be positive.")
+        if total_subdomains > int(comm_size):
+            raise ValueError(
+                "GASM total_subdomains must be no larger than the MPI communicator size "
+                f"({total_subdomains} > {int(comm_size)})."
+            )
+        if grouping == "contiguous":
+            if int(comm_size) % total_subdomains != 0:
+                raise ValueError(
+                    "pmg_smoother_gasm_total_subdomains must divide the MPI communicator size for contiguous "
+                    f"fake-socket grouping ({total_subdomains} does not divide {int(comm_size)})."
+                )
+            ranks_per_subdomain = int(comm_size) // int(total_subdomains)
+
+        overlap = int(self.solver.preconditioner_options.get("pmg_smoother_gasm_overlap", 0 if grouping == "numa_coalesced" else 1))
         if overlap < 0:
             raise ValueError("pmg_smoother_gasm_overlap must be nonnegative.")
+        if grouping == "numa_coalesced" and overlap != 0:
+            raise ValueError(
+                "Use pmg_smoother_gasm_overlap=0 for numa_coalesced. "
+                "PETSc's automatic straddling subdomains are coalesced rank ranges; "
+                "automatic overlap is not the safe production path for this variant."
+            )
         gasm_type = str(
             self.solver.preconditioner_options.get("pmg_smoother_gasm_type", "restrict")
         ).strip().lower()
@@ -240,13 +263,24 @@ class _ManualPMGShellPC:
             )
 
         sub_ksp_type = str(
-            self.solver.preconditioner_options.get("pmg_smoother_gasm_sub_ksp_type", "preonly")
+            self.solver.preconditioner_options.get(
+                "pmg_smoother_gasm_sub_ksp_type",
+                "gmres" if grouping == "numa_coalesced" else "preonly",
+            )
         ).strip().lower()
-        sub_ksp_max_it = int(self.solver.preconditioner_options.get("pmg_smoother_gasm_sub_ksp_max_it", 1))
+        sub_ksp_max_it = int(
+            self.solver.preconditioner_options.get(
+                "pmg_smoother_gasm_sub_ksp_max_it",
+                4 if grouping == "numa_coalesced" else 1,
+            )
+        )
         if sub_ksp_max_it <= 0:
             raise ValueError("pmg_smoother_gasm_sub_ksp_max_it must be positive.")
         sub_pc_type = str(
-            self.solver.preconditioner_options.get("pmg_smoother_gasm_sub_pc_type", "jacobi")
+            self.solver.preconditioner_options.get(
+                "pmg_smoother_gasm_sub_pc_type",
+                "bjacobi" if grouping == "numa_coalesced" else "jacobi",
+            )
         ).strip().lower()
         view_subdomains = bool(self.solver.preconditioner_options.get("pmg_smoother_gasm_view_subdomains", False))
 
@@ -254,7 +288,7 @@ class _ManualPMGShellPC:
             "pc_type": pc_type,
             "total_subdomains": int(total_subdomains),
             "grouping": grouping,
-            "ranks_per_subdomain": int(comm_size) // int(total_subdomains),
+            "ranks_per_subdomain": int(ranks_per_subdomain),
             "overlap": int(overlap),
             "gasm_type": gasm_type,
             "sub_ksp_type": sub_ksp_type,
@@ -274,9 +308,13 @@ class _ManualPMGShellPC:
         self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_overlap", config["overlap"])
         self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_type", config["gasm_type"])
         self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_type", config["sub_ksp_type"])
-        if str(config["sub_ksp_type"]).strip().lower() != str(PETSc.KSP.Type.PREONLY).lower():
-            self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_max_it", config["sub_ksp_max_it"])
+        self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_max_it", config["sub_ksp_max_it"])
+        self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_rtol", 0.0)
+        self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_atol", 0.0)
         self.solver._set_petsc_option(opts, f"{prefix}sub_pc_type", config["sub_pc_type"])
+        if str(config["sub_pc_type"]).strip().lower() == "bjacobi":
+            self.solver._set_petsc_option(opts, f"{prefix}sub_sub_pc_type", "ilu")
+            self.solver._set_petsc_option(opts, f"{prefix}sub_sub_pc_factor_levels", 1)
         if bool(config["view_subdomains"]):
             self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_view_subdomains", True)
         return config
@@ -667,6 +705,15 @@ class _ManualPMGShellPC:
     def _coarse_redundant_number(self, *, comm_size: int) -> int:
         raw = self.solver.preconditioner_options.get("mg_coarse_pc_redundant_number")
         if raw is None:
+            layout = getattr(self.solver, "numa_layout", None)
+            if layout is None:
+                layout = self.solver.preconditioner_options.get("numa_layout")
+            grouping = str(self.solver.preconditioner_options.get("pmg_smoother_gasm_grouping", "")).strip().lower()
+            if grouping == "numa_coalesced" and layout is not None:
+                raw = int(layout.total_numa_domains)
+            else:
+                return int(comm_size)
+        if raw is None:
             return int(comm_size)
         try:
             value = int(raw)
@@ -984,6 +1031,29 @@ class _ManualPMGShellPC:
         }
         if self.A_coarse_free is not None and self.A_coarse_free is not self.A_coarse:
             payload["manualmg_coarse_free_global_size"] = int(self.A_coarse_free.getSize()[0])
+        layout = getattr(self.solver, "numa_layout", None)
+        if layout is None:
+            layout = self.solver.preconditioner_options.get("numa_layout")
+        if layout is not None:
+            payload["numa_layout_node_count"] = int(layout.node_count)
+            payload["numa_layout_ranks_per_node"] = int(layout.node_size)
+            payload["numa_layout_domains_per_node"] = int(layout.numa_domains_per_node)
+            payload["numa_layout_ranks_per_numa"] = int(layout.ranks_per_numa)
+            payload["numa_layout_total_domains"] = int(layout.total_numa_domains)
+        hierarchy_levels = tuple(getattr(self.hierarchy, "levels", ()))
+        if hierarchy_levels:
+            payload["manualmg_level_rank_partition_offset_sizes"] = [
+                None
+                if getattr(level, "partition_offsets", None) is None
+                else int(np.asarray(level.partition_offsets).size)
+                for level in hierarchy_levels
+            ]
+            payload["manualmg_level_domain_partition_offset_sizes"] = [
+                None
+                if getattr(level, "domain_partition_offsets", None) is None
+                else int(np.asarray(level.domain_partition_offsets).size)
+                for level in hierarchy_levels
+            ]
         payload.update({str(k): v for k, v in self._stats_total.items()})
         if self._stats_last:
             payload.update({str(k): v for k, v in self._stats_last.items()})
@@ -2207,6 +2277,8 @@ class PetscKSPFGMRESSolver:
             "compiled_outer",
             "max_deflation_basis_vectors",
             "pmg_hierarchy",
+            "numa_layout",
+            "numa_domains_per_node",
         }
 
         for key, value in defaults.items():
