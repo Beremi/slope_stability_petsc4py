@@ -761,6 +761,7 @@ def run_capture(
     pmg_coarse_mesh_variant: str | None = None,
     pmg_fine_hierarchy_mode: str = "default",
     numa_domains_per_node: int = 8,
+    pmg_numa_partition_mode: str = "rank_metis",
     pmg_smoother_pc_type: str | None = None,
     pmg_smoother_gasm_total_subdomains: int | None = None,
     pmg_smoother_gasm_grouping: str = "contiguous",
@@ -826,6 +827,7 @@ def run_capture(
         mesh_variant=None if mesh_variant is None else str(mesh_variant),
         elem_type=str(elem_type),
         pc_backend=None if pc_backend is None else str(pc_backend),
+        pmg_numa_partition_mode=str(pmg_numa_partition_mode),
         pmg_smoother_pc_type=None if pmg_smoother_pc_type is None else str(pmg_smoother_pc_type),
         pmg_smoother_gasm_total_subdomains=(
             None if pmg_smoother_gasm_total_subdomains is None else int(pmg_smoother_gasm_total_subdomains)
@@ -897,6 +899,9 @@ def run_capture(
     gasm_grouping_norm = str(pmg_smoother_gasm_grouping).strip().lower()
     smoother_pc_norm = None if pmg_smoother_pc_type is None else str(pmg_smoother_pc_type).strip().lower()
     numa_coalesced_pmg = gasm_grouping_norm == "numa_coalesced"
+    pmg_numa_partition_mode_norm = str(pmg_numa_partition_mode).strip().lower()
+    if pmg_numa_partition_mode_norm not in {"rank_metis", "domain_metis_split"}:
+        raise ValueError("pmg_numa_partition_mode must be 'rank_metis' or 'domain_metis_split'.")
     if numa_coalesced_pmg:
         if effective_pc_backend not in {"pmg", "pmg_shell"}:
             raise ValueError("pmg_smoother_gasm_grouping='numa_coalesced' requires pc_backend='pmg' or 'pmg_shell'.")
@@ -950,8 +955,15 @@ def run_capture(
     ]
     _stage_debug_log(rank, "built_materials", stage_t0, material_count=len(materials))
 
+    pmg_partition_layout = (
+        numa_layout if numa_layout is not None and pmg_numa_partition_mode_norm == "domain_metis_split" else None
+    )
     if str(node_ordering).lower() == "block_metis":
-        partition_count = int(numa_layout.total_numa_domains) if numa_layout is not None else int(PETSc.COMM_WORLD.getSize())
+        partition_count = (
+            int(pmg_partition_layout.total_numa_domains)
+            if pmg_partition_layout is not None
+            else int(PETSc.COMM_WORLD.getSize())
+        )
     else:
         partition_count = None
     pmg_hierarchy = None
@@ -973,7 +985,7 @@ def run_capture(
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
-                    numa_layout=numa_layout,
+                    numa_layout=pmg_partition_layout,
                     comm=PETSc.COMM_WORLD,
                 )
             else:
@@ -982,7 +994,7 @@ def run_capture(
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
-                    numa_layout=numa_layout,
+                    numa_layout=pmg_partition_layout,
                     comm=PETSc.COMM_WORLD,
                 )
         else:
@@ -995,7 +1007,7 @@ def run_capture(
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
-                    numa_layout=numa_layout,
+                    numa_layout=pmg_partition_layout,
                     comm=PETSc.COMM_WORLD,
                 )
             else:
@@ -1006,7 +1018,7 @@ def run_capture(
                     node_ordering=node_ordering,
                     reorder_parts=partition_count,
                     material_rows=np.asarray(mat_props, dtype=np.float64).tolist(),
-                    numa_layout=numa_layout,
+                    numa_layout=pmg_partition_layout,
                     comm=PETSc.COMM_WORLD,
                 )
         coord = pmg_hierarchy.fine_level.coord.astype(np.float64, copy=False)
@@ -1043,17 +1055,17 @@ def run_capture(
         material_identifier = mesh.material_id.astype(np.int64, copy=False).ravel()
         partition_offsets = getattr(reordered, "partition_offsets", None)
         if (
-            numa_layout is not None
+            pmg_partition_layout is not None
             and str(node_ordering).lower() == "block_metis"
             and partition_offsets is None
-            and int(numa_layout.total_numa_domains) == 1
+            and int(pmg_partition_layout.total_numa_domains) == 1
         ):
             partition_offsets = np.asarray([0, int(coord.shape[1])], dtype=np.int64)
-        if numa_layout is not None and partition_offsets is not None:
+        if pmg_partition_layout is not None and partition_offsets is not None:
             partition_offsets = split_domain_offsets_to_rank_offsets(
                 n_blocks=int(coord.shape[1]),
                 domain_offsets=np.asarray(partition_offsets, dtype=np.int64),
-                layout=numa_layout,
+                layout=pmg_partition_layout,
             )
         row0_tmp, row1_tmp = owned_block_range(
             coord.shape[1],
@@ -1249,6 +1261,7 @@ def run_capture(
         "pmg_coarse_mesh_variant": None if pmg_coarse_mesh_variant is None else str(pmg_coarse_mesh_variant),
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "numa_domains_per_node": int(numa_domains_per_node),
+        "pmg_numa_partition_mode": str(pmg_numa_partition_mode),
         "preconditioner_matrix_source": str(preconditioner_matrix_source),
         "preconditioner_matrix_policy": preconditioner_matrix_policy,
         "preconditioner_rebuild_policy": preconditioner_rebuild_policy,
@@ -1396,12 +1409,6 @@ def run_capture(
         preconditioner_options["pmg_smoother_gasm_total_subdomains"] = int(numa_layout.total_numa_domains)
         preconditioner_options["pmg_smoother_gasm_grouping"] = "numa_coalesced"
         preconditioner_options["pmg_smoother_gasm_overlap"] = 0
-        if str(preconditioner_options.get("pmg_smoother_gasm_sub_ksp_type", "preonly")).strip().lower() == "preonly":
-            preconditioner_options["pmg_smoother_gasm_sub_ksp_type"] = "gmres"
-        if int(preconditioner_options.get("pmg_smoother_gasm_sub_ksp_max_it", 1)) == 1:
-            preconditioner_options["pmg_smoother_gasm_sub_ksp_max_it"] = 4
-        if str(preconditioner_options.get("pmg_smoother_gasm_sub_pc_type", "jacobi")).strip().lower() == "jacobi":
-            preconditioner_options["pmg_smoother_gasm_sub_pc_type"] = "bjacobi"
         preconditioner_options["mg_levels_ksp_type"] = "richardson"
         preconditioner_options["mg_levels_ksp_max_it"] = 1
         preconditioner_options["mg_levels_pc_type"] = "gasm"
@@ -1538,6 +1545,7 @@ def run_capture(
         "pc_backend": effective_pc_backend,
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "numa_domains_per_node": int(numa_domains_per_node),
+        "pmg_numa_partition_mode": str(pmg_numa_partition_mode),
         "numa_layout_node_count": None if numa_layout is None else int(numa_layout.node_count),
         "numa_layout_ranks_per_node": None if numa_layout is None else int(numa_layout.node_size),
         "numa_layout_domains_per_node": None if numa_layout is None else int(numa_layout.numa_domains_per_node),
@@ -2177,6 +2185,12 @@ def main() -> None:
         choices=["default", "p4_p2_intermediate"],
     )
     parser.add_argument("--numa_domains_per_node", type=int, default=8)
+    parser.add_argument(
+        "--pmg_numa_partition_mode",
+        type=str,
+        default="rank_metis",
+        choices=["rank_metis", "domain_metis_split"],
+    )
     parser.add_argument("--pmg_smoother_pc_type", type=str, default=None, choices=["gasm"])
     parser.add_argument("--pmg_smoother_gasm_total_subdomains", type=int, default=None)
     parser.add_argument(
@@ -2342,6 +2356,7 @@ def main() -> None:
         pmg_coarse_mesh_variant=args.pmg_coarse_mesh_variant,
         pmg_fine_hierarchy_mode=args.pmg_fine_hierarchy_mode,
         numa_domains_per_node=args.numa_domains_per_node,
+        pmg_numa_partition_mode=args.pmg_numa_partition_mode,
         pmg_smoother_pc_type=args.pmg_smoother_pc_type,
         pmg_smoother_gasm_total_subdomains=args.pmg_smoother_gasm_total_subdomains,
         pmg_smoother_gasm_grouping=args.pmg_smoother_gasm_grouping,

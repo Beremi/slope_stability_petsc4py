@@ -53,17 +53,17 @@ preconditioner_matrix_source = "tangent"
 preconditioner_matrix_policy = "current"
 preconditioner_rebuild_policy = "every_newton"
 numa_domains_per_node = 8
+pmg_numa_partition_mode = "rank_metis"
 pmg_smoother_pc_type = "gasm"
 pmg_smoother_gasm_grouping = "numa_coalesced"
 pmg_smoother_gasm_overlap = 0
 pmg_smoother_gasm_type = "restrict"
-pmg_smoother_gasm_sub_ksp_type = "gmres"
-pmg_smoother_gasm_sub_ksp_max_it = 4
-pmg_smoother_gasm_sub_pc_type = "bjacobi"
+pmg_smoother_gasm_sub_ksp_type = "preonly"
+pmg_smoother_gasm_sub_ksp_max_it = 1
+pmg_smoother_gasm_sub_pc_type = "jacobi"
 pmg_smoother_gasm_view_subdomains = false
 
 [export]
 write_custom_debug_bundle = false
 write_history_json = true
 write_solution_vtu = false
-

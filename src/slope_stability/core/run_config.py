@@ -106,6 +106,7 @@ class LinearSolverConfig:
     pmg_coarse_mesh_variant: str | None = None
     pmg_fine_hierarchy_mode: str = "default"
     numa_domains_per_node: int = 8
+    pmg_numa_partition_mode: str = "rank_metis"
     pmg_smoother_pc_type: str | None = None
     pmg_smoother_gasm_total_subdomains: int | None = None
     pmg_smoother_gasm_grouping: str = "contiguous"
@@ -226,6 +227,13 @@ class RunCaseConfig:
             )
         if int(self.linear_solver.numa_domains_per_node) <= 0:
             raise ValueError("The linear_solver numa_domains_per_node must be positive.")
+        if str(self.linear_solver.pmg_numa_partition_mode).strip().lower() not in {
+            "rank_metis",
+            "domain_metis_split",
+        }:
+            raise ValueError(
+                "The linear_solver pmg_numa_partition_mode must be 'rank_metis' or 'domain_metis_split'."
+            )
         if smoother_pc_type is not None:
             if str(smoother_pc_type).strip().lower() != "gasm":
                 raise ValueError("The linear_solver pmg_smoother_pc_type must be 'gasm' when set.")
@@ -491,6 +499,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         ),
         pmg_fine_hierarchy_mode=str(linear_data.get("pmg_fine_hierarchy_mode", "default")),
         numa_domains_per_node=int(linear_data.get("numa_domains_per_node", 8)),
+        pmg_numa_partition_mode=str(linear_data.get("pmg_numa_partition_mode", "rank_metis")),
         pmg_smoother_pc_type=(
             None if linear_data.get("pmg_smoother_pc_type") is None else str(linear_data.get("pmg_smoother_pc_type"))
         ),

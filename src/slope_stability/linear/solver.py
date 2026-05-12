@@ -265,13 +265,13 @@ class _ManualPMGShellPC:
         sub_ksp_type = str(
             self.solver.preconditioner_options.get(
                 "pmg_smoother_gasm_sub_ksp_type",
-                "gmres" if grouping == "numa_coalesced" else "preonly",
+                "preonly",
             )
         ).strip().lower()
         sub_ksp_max_it = int(
             self.solver.preconditioner_options.get(
                 "pmg_smoother_gasm_sub_ksp_max_it",
-                4 if grouping == "numa_coalesced" else 1,
+                1,
             )
         )
         if sub_ksp_max_it <= 0:
@@ -279,7 +279,7 @@ class _ManualPMGShellPC:
         sub_pc_type = str(
             self.solver.preconditioner_options.get(
                 "pmg_smoother_gasm_sub_pc_type",
-                "bjacobi" if grouping == "numa_coalesced" else "jacobi",
+                "jacobi",
             )
         ).strip().lower()
         view_subdomains = bool(self.solver.preconditioner_options.get("pmg_smoother_gasm_view_subdomains", False))
@@ -308,9 +308,10 @@ class _ManualPMGShellPC:
         self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_overlap", config["overlap"])
         self.solver._set_petsc_option(opts, f"{prefix}pc_gasm_type", config["gasm_type"])
         self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_type", config["sub_ksp_type"])
-        self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_max_it", config["sub_ksp_max_it"])
-        self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_rtol", 0.0)
-        self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_atol", 0.0)
+        if str(config["sub_ksp_type"]).strip().lower() != "preonly":
+            self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_max_it", config["sub_ksp_max_it"])
+            self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_rtol", 0.0)
+            self.solver._set_petsc_option(opts, f"{prefix}sub_ksp_atol", 0.0)
         self.solver._set_petsc_option(opts, f"{prefix}sub_pc_type", config["sub_pc_type"])
         if str(config["sub_pc_type"]).strip().lower() == "bjacobi":
             self.solver._set_petsc_option(opts, f"{prefix}sub_sub_pc_type", "ilu")

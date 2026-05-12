@@ -31,6 +31,7 @@ def test_pmg_gasm_config_defaults_preserve_current_behavior(tmp_path) -> None:
 
     assert cfg.linear_solver.pmg_smoother_pc_type is None
     assert cfg.linear_solver.numa_domains_per_node == 8
+    assert cfg.linear_solver.pmg_numa_partition_mode == "rank_metis"
     assert cfg.linear_solver.pmg_smoother_gasm_total_subdomains is None
     assert cfg.linear_solver.pmg_smoother_gasm_grouping == "contiguous"
     assert cfg.linear_solver.pmg_smoother_gasm_overlap == 1
@@ -73,6 +74,7 @@ def test_pmg_gasm_config_parses_numa_coalesced(tmp_path) -> None:
             """
 pc_backend = "pmg_shell"
 numa_domains_per_node = 4
+pmg_numa_partition_mode = "domain_metis_split"
 pmg_smoother_pc_type = "gasm"
 pmg_smoother_gasm_grouping = "numa_coalesced"
 pmg_smoother_gasm_overlap = 0
@@ -84,6 +86,7 @@ pmg_smoother_gasm_overlap = 0
     cfg = load_run_case_config(path)
 
     assert cfg.linear_solver.numa_domains_per_node == 4
+    assert cfg.linear_solver.pmg_numa_partition_mode == "domain_metis_split"
     assert cfg.linear_solver.pmg_smoother_gasm_grouping == "numa_coalesced"
     assert cfg.linear_solver.pmg_smoother_gasm_total_subdomains is None
 
@@ -153,9 +156,9 @@ def test_pmg_gasm_smoother_numa_coalesced_uses_layout() -> None:
     assert config is not None
     assert config["total_subdomains"] == 2
     assert config["ranks_per_subdomain"] == 2
-    assert config["sub_ksp_type"] == "gmres"
-    assert config["sub_ksp_max_it"] == 4
-    assert config["sub_pc_type"] == "bjacobi"
+    assert config["sub_ksp_type"] == "preonly"
+    assert config["sub_ksp_max_it"] == 1
+    assert config["sub_pc_type"] == "jacobi"
 
 
 def test_pmg_gasm_smoother_numa_coalesced_rejects_missing_layout() -> None:
@@ -189,7 +192,7 @@ def test_pmg_gasm_smoother_numa_coalesced_rejects_overlap() -> None:
         context._gasm_smoother_config(comm_size=4)
 
 
-def test_pmg_gasm_smoother_sets_sub_gmres_bjacobi_ilu_options() -> None:
+def test_pmg_gasm_smoother_numa_coalesced_defaults_to_legacy_jacobi_subsolve() -> None:
     recorded: dict[str, object] = {}
 
     def record_option(_opts, key: str, value) -> None:
@@ -217,6 +220,43 @@ def test_pmg_gasm_smoother_sets_sub_gmres_bjacobi_ilu_options() -> None:
 
     assert recorded["manualmg_fine_pc_gasm_total_subdomains"] == 2
     assert recorded["manualmg_fine_pc_gasm_overlap"] == 0
+    assert recorded["manualmg_fine_sub_ksp_type"] == "preonly"
+    assert "manualmg_fine_sub_ksp_max_it" not in recorded
+    assert "manualmg_fine_sub_ksp_rtol" not in recorded
+    assert "manualmg_fine_sub_ksp_atol" not in recorded
+    assert recorded["manualmg_fine_sub_pc_type"] == "jacobi"
+    assert "manualmg_fine_sub_sub_pc_type" not in recorded
+
+
+def test_pmg_gasm_smoother_still_accepts_explicit_sub_gmres_bjacobi_ilu_options() -> None:
+    recorded: dict[str, object] = {}
+
+    def record_option(_opts, key: str, value) -> None:
+        recorded[key] = value
+
+    class FakePC:
+        def __init__(self) -> None:
+            self.pc_type = None
+
+        def setType(self, pc_type) -> None:
+            self.pc_type = pc_type
+
+    solver = SimpleNamespace(
+        preconditioner_options={
+            "pmg_smoother_pc_type": "gasm",
+            "pmg_smoother_gasm_grouping": "numa_coalesced",
+            "pmg_smoother_gasm_overlap": 0,
+            "pmg_smoother_gasm_sub_ksp_type": "gmres",
+            "pmg_smoother_gasm_sub_ksp_max_it": 4,
+            "pmg_smoother_gasm_sub_pc_type": "bjacobi",
+            "numa_layout": _fake_numa_layout(),
+        },
+        _set_petsc_option=record_option,
+    )
+    context = _ManualPMGShellPC(solver)
+
+    context._configure_gasm_smoother_options(FakePC(), prefix="manualmg_fine_", comm_size=4)
+
     assert recorded["manualmg_fine_sub_ksp_type"] == "gmres"
     assert recorded["manualmg_fine_sub_ksp_max_it"] == 4
     assert recorded["manualmg_fine_sub_ksp_rtol"] == 0.0
