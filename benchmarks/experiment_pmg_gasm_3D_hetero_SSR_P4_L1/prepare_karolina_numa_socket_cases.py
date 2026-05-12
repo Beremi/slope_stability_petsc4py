@@ -83,6 +83,13 @@ def _case_with_derived_fields(case: dict[str, object]) -> dict[str, object]:
     row = dict(case)
     row["ranks_per_numa"] = RANKS_PER_NUMA
     row["ranks"] = int(row["nodes"]) * int(row["ntasks_per_node"])
+    expected_per_node = int(row["numa_domains_per_node"]) * RANKS_PER_NUMA
+    if int(row["ntasks_per_node"]) != expected_per_node:
+        raise ValueError(
+            f"{row['name']} has ntasks_per_node={row['ntasks_per_node']}, "
+            f"expected {expected_per_node} from "
+            f"{row['numa_domains_per_node']} NUMA domains * {RANKS_PER_NUMA} ranks/domain."
+        )
     return row
 
 

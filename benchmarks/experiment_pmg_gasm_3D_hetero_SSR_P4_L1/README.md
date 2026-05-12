@@ -61,13 +61,30 @@ sbatch benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/karolina_numa_coalesce
 
 The config is `gasm_numa_coalesced.toml`. It runs the full P4(L1) SSR target to `omega_max = 7.0e6`, with `OMP_NUM_THREADS=1` and strict rank-layout validation. If Slurm/MPI does not bind ranks as contiguous NUMA groups, the run fails before mesh construction.
 
-For the Qexp socket-scaling grid, submit five independent jobs:
+For the Qexp socket-scaling grid, submit five independent full-omega jobs:
 
 ```bash
 benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/submit_karolina_numa_socket_scaling_qexp.sh
 ```
 
-This creates one full `omega_max = 7.0e6` P4(L1) run per logical NUMA-domain count: `1x16`, `2x16`, `4x16`, `8x16` on one node and `16x16` on two nodes. Each logical domain uses 16 MPI ranks, and every job verifies that Slurm placed ranks contiguously by hardware NUMA domain before mesh construction.
+This creates one full `omega_max = 7.0e6` P4(L1) run per logical NUMA-domain count:
+
+| case | nodes | MPI ranks | logical NUMA/GASM domains | ranks/domain |
+| --- | ---: | ---: | ---: | ---: |
+| `numa_1x16` | 1 | 16 | 1 | 16 |
+| `numa_2x16` | 1 | 32 | 2 | 16 |
+| `numa_4x16` | 1 | 64 | 4 | 16 |
+| `numa_8x16` | 1 | 128 | 8 | 16 |
+| `numa_16x16` | 2 | 256 | 16 | 16 |
+
+The submit helper now enforces `16` MPI ranks per logical NUMA domain before submitting. Each job also verifies that Slurm placed ranks contiguously by hardware NUMA domain before mesh construction. The default qexp wall limit is `01:00:00`, with an internal command timeout of `59m`; override `TIME_LIMIT` and `COMMAND_TIMEOUT` if you want a shorter gate.
+
+After the jobs finish, refresh tables and log-log timing plots with:
+
+```bash
+./.venv/bin/python benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/summarize_karolina_numa_socket_scaling.py \
+  --out-root artifacts/experiments/pmg_numa_coalesced_karolina_socket_scaling_p4_l1_omega7
+```
 
 ## Karolina multi-node full-occupancy grid
 

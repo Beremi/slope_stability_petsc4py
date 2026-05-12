@@ -4,7 +4,7 @@
 #SBATCH --qos=3571_6328
 #SBATCH --partition=qcpu_exp
 #SBATCH --cpus-per-task=1
-#SBATCH --time=00:20:00
+#SBATCH --time=01:00:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
@@ -19,12 +19,27 @@ ROOT="${ROOT:-$HOME/slope_stability_petsc4py}"
 OUT_ROOT="${OUT_ROOT:-$ROOT/artifacts/experiments/pmg_numa_coalesced_karolina_socket_scaling_p4_l1_omega7}"
 OMEGA_MAX="${OMEGA_MAX:-7000000}"
 STEP_MAX="${STEP_MAX:-100}"
-COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-19m}"
+RANKS_PER_NUMA="${RANKS_PER_NUMA:-16}"
+COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-59m}"
 
 RUN_DIR="$OUT_ROOT/runs/$CASE_NAME/${SLURM_JOB_ID:-manual}"
 RUN_OUT="$RUN_DIR/run"
 CASE_CONFIG="$RUN_DIR/configs/$CASE_NAME.toml"
 TOTAL_RANKS=$((CASE_NODES * CASE_NTASKS_PER_NODE))
+EXPECTED_NTASKS_PER_NODE=$((CASE_NUMA_DOMAINS_PER_NODE * RANKS_PER_NUMA))
+EXPECTED_TOTAL_RANKS=$((CASE_NODES * EXPECTED_NTASKS_PER_NODE))
+
+if [[ "$CASE_NTASKS_PER_NODE" -ne "$EXPECTED_NTASKS_PER_NODE" ]]; then
+  echo "Invalid case shape for $CASE_NAME" >&2
+  echo "Expected CASE_NTASKS_PER_NODE=$EXPECTED_NTASKS_PER_NODE from $CASE_NUMA_DOMAINS_PER_NODE NUMA domains * $RANKS_PER_NUMA ranks/domain." >&2
+  echo "Got CASE_NTASKS_PER_NODE=$CASE_NTASKS_PER_NODE." >&2
+  exit 2
+fi
+
+if [[ "$TOTAL_RANKS" -ne "$EXPECTED_TOTAL_RANKS" ]]; then
+  echo "Invalid total rank count for $CASE_NAME: expected $EXPECTED_TOTAL_RANKS, got $TOTAL_RANKS." >&2
+  exit 2
+fi
 
 cd "$ROOT"
 
@@ -62,8 +77,12 @@ cat > "$RUN_DIR/job_metadata.json" <<EOF
   "ntasks_per_node": $CASE_NTASKS_PER_NODE,
   "total_ranks": $TOTAL_RANKS,
   "numa_domains_per_node": $CASE_NUMA_DOMAINS_PER_NODE,
+  "ranks_per_numa": $RANKS_PER_NUMA,
   "omega_max": $OMEGA_MAX,
-  "step_max": $STEP_MAX
+  "step_max": $STEP_MAX,
+  "command_timeout": "$COMMAND_TIMEOUT",
+  "slurm_job_partition": "${SLURM_JOB_PARTITION:-}",
+  "slurm_job_qos": "${SLURM_JOB_QOS:-}"
 }
 EOF
 
@@ -74,6 +93,7 @@ echo "Nodes: $CASE_NODES"
 echo "Tasks per node: $CASE_NTASKS_PER_NODE"
 echo "Total ranks: $TOTAL_RANKS"
 echo "NUMA domains per node in config: $CASE_NUMA_DOMAINS_PER_NODE"
+echo "Ranks per NUMA domain: $RANKS_PER_NUMA"
 echo "Config: $CASE_CONFIG"
 echo "Run output: $RUN_OUT"
 echo "Command timeout: $COMMAND_TIMEOUT"
@@ -87,6 +107,7 @@ timeout --signal=TERM --kill-after=60s "$COMMAND_TIMEOUT" \
     --cpus-per-task=1 \
     --distribution=block:block \
     --cpu-bind=cores \
+    --hint=nomultithread \
     ./.venv/bin/python -u -m slope_stability.cli.run_case_from_config "$CASE_CONFIG" --out_dir "$RUN_OUT" \
     2>&1 | tee "$RUN_DIR/stdout.log"
 exit_code=${PIPESTATUS[0]}
