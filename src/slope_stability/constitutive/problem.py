@@ -26,13 +26,39 @@ from ..utils import (
     get_petsc_matrix_metadata,
     local_csr_to_petsc_aij_matrix,
     local_csr_to_petsc_matis_matrix,
+    owned_coo_to_petsc_aij_matrix,
+    owned_csr_arrays_to_petsc_aij_matrix,
     q_to_free_indices,
     to_numpy_vector,
+    update_petsc_aij_matrix_coo,
     update_petsc_aij_matrix_csr,
     release_petsc_aij_matrix,
 )
 from ..linear.preconditioners import make_near_nullspace_elasticity
 from ..mesh.materials import heterogenous_materials_at_indices
+
+TANGENT_MATRIX_BACKEND_OWNED_CSR = "owned_csr"
+TANGENT_MATRIX_BACKEND_PETSC_CSR = "petsc_csr"
+TANGENT_MATRIX_BACKEND_PETSC_COO = "petsc_coo"
+TANGENT_MATRIX_BACKEND_ALIASES = {
+    "owned_csr": TANGENT_MATRIX_BACKEND_OWNED_CSR,
+    "csr": TANGENT_MATRIX_BACKEND_OWNED_CSR,
+    "petsc_csr": TANGENT_MATRIX_BACKEND_PETSC_CSR,
+    "petsc_aij_csr": TANGENT_MATRIX_BACKEND_PETSC_CSR,
+    "petsc_coo": TANGENT_MATRIX_BACKEND_PETSC_COO,
+    "coo": TANGENT_MATRIX_BACKEND_PETSC_COO,
+    # The requested production name uses a direct PETSc MPIAIJ CSR-buffer path in v1.
+    "petsc_aij_element": TANGENT_MATRIX_BACKEND_PETSC_CSR,
+}
+
+
+def _normalize_tangent_matrix_backend(value: str | None) -> str:
+    key = TANGENT_MATRIX_BACKEND_OWNED_CSR if value is None else str(value).strip().lower()
+    try:
+        return TANGENT_MATRIX_BACKEND_ALIASES[key]
+    except KeyError as exc:
+        supported = ", ".join(sorted(TANGENT_MATRIX_BACKEND_ALIASES))
+        raise ValueError(f"Unsupported tangent_matrix_backend {value!r}; expected one of {supported}") from exc
 
 try:  # pragma: no cover - PETSc is optional in some tests
     from petsc4py import PETSc
@@ -1257,6 +1283,7 @@ class ConstitutiveOperator:
         self.bddc_subdomain_pattern: BDDCSubdomainPattern | None = None
         self.use_compiled_owned_tangent = True
         self.owned_tangent_kernel = DEFAULT_TANGENT_KERNEL
+        self.owned_tangent_matrix_backend = TANGENT_MATRIX_BACKEND_OWNED_CSR
         self.use_compiled_owned_constitutive = True
         self.owned_constitutive_mode = "global"
         self._owned_local_S = None
@@ -1265,10 +1292,14 @@ class ConstitutiveOperator:
         self._owned_tangent_indptr = None
         self._owned_tangent_indices = None
         self._owned_tangent_values = None
+        self._owned_tangent_coo_rows = None
+        self._owned_tangent_coo_cols = None
         self._owned_regularized_mat = None
         self._owned_regularized_indptr = None
         self._owned_regularized_indices = None
         self._owned_regularized_values = None
+        self._owned_regularized_coo_rows = None
+        self._owned_regularized_coo_cols = None
         self._bddc_tangent_mat = None
         self._bddc_tangent_indptr = None
         self._bddc_tangent_indices = None
@@ -1320,11 +1351,13 @@ class ConstitutiveOperator:
         use_compiled: bool = True,
         tangent_kernel: str = DEFAULT_TANGENT_KERNEL,
         constitutive_mode: str = "global",
+        tangent_matrix_backend: str = TANGENT_MATRIX_BACKEND_OWNED_CSR,
         use_compiled_constitutive: bool = True,
     ) -> None:
         self.owned_tangent_pattern = pattern
         self.use_compiled_owned_tangent = bool(use_compiled)
         self.owned_tangent_kernel = str(tangent_kernel).lower()
+        self.owned_tangent_matrix_backend = _normalize_tangent_matrix_backend(tangent_matrix_backend)
         self.use_compiled_owned_constitutive = bool(use_compiled_constitutive)
         self.owned_constitutive_mode = str(constitutive_mode).lower()
         self._prepare_owned_material_arrays()
@@ -1679,6 +1712,70 @@ class ConstitutiveOperator:
             return
         raise ValueError(f"Unsupported owned constitutive mode {self.owned_constitutive_mode!r}")
 
+    def _owned_pattern_coo_indices(self, pattern: OwnedTangentPattern) -> tuple[np.ndarray, np.ndarray]:
+        row0, row1 = tuple(int(v) for v in pattern.owned_row_range)
+        indptr = np.asarray(pattern.local_matrix_pattern.indptr, dtype=np.int64)
+        counts = np.diff(indptr)
+        rows = np.repeat(np.arange(row0, row1, dtype=np.int64), counts).astype(PETSc.IntType, copy=False)
+        cols = np.asarray(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType)
+        return np.ascontiguousarray(rows, dtype=PETSc.IntType), np.ascontiguousarray(cols, dtype=PETSc.IntType)
+
+    def _owned_local_col_size(self, pattern: OwnedTangentPattern) -> int | None:
+        global_size = int(pattern.local_matrix_pattern.shape[1])
+        local_rows = int(pattern.local_matrix_pattern.shape[0])
+        if int(self._local_comm().getSize()) == 1:
+            return int(global_size)
+        if int(self.dim) > 0 and int(local_rows) % int(self.dim) == 0 and int(global_size) % int(self.dim) == 0:
+            return int(local_rows)
+        return None
+
+    def _create_owned_petsc_csr_matrix(self, pattern: OwnedTangentPattern, values: np.ndarray):
+        global_size = int(pattern.local_matrix_pattern.shape[1])
+        local_rows = int(pattern.local_matrix_pattern.shape[0])
+        return owned_csr_arrays_to_petsc_aij_matrix(
+            np.asarray(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType),
+            np.asarray(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType),
+            np.asarray(values, dtype=np.float64),
+            local_shape=(local_rows, global_size),
+            global_shape=(global_size, global_size),
+            comm=self._local_comm(),
+            local_col_size=self._owned_local_col_size(pattern),
+            block_size=int(self.dim),
+            metadata={
+                "tangent_matrix_backend": TANGENT_MATRIX_BACKEND_PETSC_CSR,
+                "tangent_matrix_backend_alias": str(self.owned_tangent_matrix_backend),
+            },
+            new_nonzero_allocation_err=True,
+        )
+
+    def _create_owned_petsc_coo_matrix(
+        self,
+        pattern: OwnedTangentPattern,
+        values: np.ndarray,
+        *,
+        rows: np.ndarray,
+        cols: np.ndarray,
+    ):
+        global_size = int(pattern.local_matrix_pattern.shape[1])
+        return owned_coo_to_petsc_aij_matrix(
+            rows,
+            cols,
+            np.asarray(values, dtype=np.float64),
+            global_shape=(global_size, global_size),
+            owned_row_range=tuple(int(v) for v in pattern.owned_row_range),
+            comm=self._local_comm(),
+            local_col_size=self._owned_local_col_size(pattern),
+            block_size=int(self.dim),
+            metadata={
+                "tangent_matrix_backend": TANGENT_MATRIX_BACKEND_PETSC_COO,
+                "tangent_matrix_backend_alias": str(self.owned_tangent_matrix_backend),
+            },
+            new_nonzero_allocation_err=True,
+        )
+
+    def _update_owned_petsc_coo_matrix(self, mat, values: np.ndarray):
+        return update_petsc_aij_matrix_coo(mat, np.asarray(values, dtype=np.float64))
+
     def _build_owned_tangent_matrix(self):
         if self.owned_tangent_pattern is None:
             raise ValueError("Owned tangent pattern not configured")
@@ -1701,6 +1798,36 @@ class ConstitutiveOperator:
             values = self._owned_tangent_values
             np.copyto(values, tang)
         self.time_build_tangent_local.append(perf_counter() - t0)
+
+        if self.owned_tangent_matrix_backend == TANGENT_MATRIX_BACKEND_PETSC_CSR:
+            if self._owned_tangent_indptr is None:
+                self._owned_tangent_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
+            if self._owned_tangent_indices is None:
+                self._owned_tangent_indices = np.array(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType, copy=True)
+            if self._owned_tangent_mat is None:
+                self._owned_tangent_mat = self._create_owned_petsc_csr_matrix(pattern, values)
+            else:
+                update_petsc_aij_matrix_csr(
+                    self._owned_tangent_mat,
+                    indptr=self._owned_tangent_indptr,
+                    indices=self._owned_tangent_indices,
+                    data=values,
+                )
+            return self._owned_tangent_mat
+
+        if self.owned_tangent_matrix_backend == TANGENT_MATRIX_BACKEND_PETSC_COO:
+            if self._owned_tangent_coo_rows is None or self._owned_tangent_coo_cols is None:
+                self._owned_tangent_coo_rows, self._owned_tangent_coo_cols = self._owned_pattern_coo_indices(pattern)
+            if self._owned_tangent_mat is None:
+                self._owned_tangent_mat = self._create_owned_petsc_coo_matrix(
+                    pattern,
+                    values,
+                    rows=self._owned_tangent_coo_rows,
+                    cols=self._owned_tangent_coo_cols,
+                )
+            else:
+                self._update_owned_petsc_coo_matrix(self._owned_tangent_mat, values)
+            return self._owned_tangent_mat
 
         if self._owned_tangent_indptr is None:
             self._owned_tangent_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
@@ -1754,6 +1881,36 @@ class ConstitutiveOperator:
         values *= 1.0 - float(r)
         values += float(r) * np.asarray(pattern.elastic_values, dtype=np.float64)
         self.time_build_tangent_local.append(perf_counter() - t0)
+
+        if self.owned_tangent_matrix_backend == TANGENT_MATRIX_BACKEND_PETSC_CSR:
+            if self._owned_regularized_indptr is None:
+                self._owned_regularized_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
+            if self._owned_regularized_indices is None:
+                self._owned_regularized_indices = np.array(pattern.local_matrix_pattern.indices, dtype=PETSc.IntType, copy=True)
+            if self._owned_regularized_mat is None:
+                self._owned_regularized_mat = self._create_owned_petsc_csr_matrix(pattern, values)
+            else:
+                update_petsc_aij_matrix_csr(
+                    self._owned_regularized_mat,
+                    indptr=self._owned_regularized_indptr,
+                    indices=self._owned_regularized_indices,
+                    data=values,
+                )
+            return self._owned_regularized_mat
+
+        if self.owned_tangent_matrix_backend == TANGENT_MATRIX_BACKEND_PETSC_COO:
+            if self._owned_regularized_coo_rows is None or self._owned_regularized_coo_cols is None:
+                self._owned_regularized_coo_rows, self._owned_regularized_coo_cols = self._owned_pattern_coo_indices(pattern)
+            if self._owned_regularized_mat is None:
+                self._owned_regularized_mat = self._create_owned_petsc_coo_matrix(
+                    pattern,
+                    values,
+                    rows=self._owned_regularized_coo_rows,
+                    cols=self._owned_regularized_coo_cols,
+                )
+            else:
+                self._update_owned_petsc_coo_matrix(self._owned_regularized_mat, values)
+            return self._owned_regularized_mat
 
         if self._owned_regularized_indptr is None:
             self._owned_regularized_indptr = np.array(pattern.local_matrix_pattern.indptr, dtype=PETSc.IntType, copy=True)
@@ -2411,6 +2568,8 @@ class ConstitutiveOperator:
         self._owned_tangent_indptr = None
         self._owned_tangent_indices = None
         self._owned_tangent_values = None
+        self._owned_tangent_coo_rows = None
+        self._owned_tangent_coo_cols = None
         if PETSc is not None and self._owned_regularized_mat is not None:
             release_petsc_aij_matrix(self._owned_regularized_mat)
             self._owned_regularized_mat.destroy()
@@ -2418,6 +2577,8 @@ class ConstitutiveOperator:
         self._owned_regularized_indptr = None
         self._owned_regularized_indices = None
         self._owned_regularized_values = None
+        self._owned_regularized_coo_rows = None
+        self._owned_regularized_coo_cols = None
         if PETSc is not None and self._bddc_tangent_mat is not None:
             release_petsc_aij_matrix(self._bddc_tangent_mat)
             self._bddc_tangent_mat.destroy()

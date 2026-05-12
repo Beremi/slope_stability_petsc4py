@@ -305,6 +305,7 @@ def case_runner_kwargs(cfg: RunCaseConfig) -> tuple[Callable[..., dict], dict]:
             "recycle_preconditioner": linear.recycle_preconditioner,
             "constitutive_mode": cfg.execution.constitutive_mode,
             "tangent_kernel": cfg.execution.tangent_kernel,
+            "tangent_matrix_backend": cfg.execution.tangent_matrix_backend,
             "store_step_u": cfg.execution.store_step_u,
             **common_linear,
         }

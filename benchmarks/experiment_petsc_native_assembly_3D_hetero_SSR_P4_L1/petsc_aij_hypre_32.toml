@@ -1,0 +1,65 @@
+[benchmark]
+title = "P4(L1) PETSc AIJ hypre 32-rank probe"
+matlab_script = "slope_stability_3D_hetero_SSR.m"
+comparison_kind = "continuation"
+mpi_ranks = 32
+suite = false
+
+[problem]
+name = "p4_l1_petsc_aij_hypre"
+asset = "3d_hetero_slope"
+mesh_variant = "adaptive_family_a_l1.msh"
+analysis = "ssr"
+elem_type = "P4"
+davis_type = "B"
+
+[execution]
+node_ordering = "block_metis"
+mpi_distribute_by_nodes = true
+constitutive_mode = "overlap"
+tangent_kernel = "rows"
+tangent_matrix_backend = "petsc_aij_element"
+
+[continuation]
+method = "indirect"
+lambda_init = 1.0
+d_lambda_init = 0.1
+d_lambda_min = 1e-3
+d_lambda_diff_scaled_min = 1e-3
+omega_max = 7.0e6
+init_newton_stopping_criterion = "relative_correction"
+init_newton_stopping_tol = 1e-3
+step_max = 100
+
+[newton]
+it_max = 200
+it_damp_max = 10
+tol = 1e-4
+r_min = 1e-4
+stopping_criterion = "absolute_delta_lambda"
+stopping_tol = 1e-4
+
+[linear_solver]
+solver_type = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+tolerance = 1e-1
+max_iterations = 100
+deflation_basis_tolerance = 1e-3
+threads = 1
+print_level = 0
+use_as_preconditioner = true
+compiled_outer = false
+recycle_preconditioner = true
+pc_backend = "hypre"
+preconditioner_matrix_source = "tangent"
+preconditioner_matrix_policy = "current"
+preconditioner_rebuild_policy = "every_newton"
+pc_hypre_coarsen_type = "HMIS"
+pc_hypre_interp_type = "ext+i"
+pc_hypre_strong_threshold = 0.5
+pc_hypre_boomeramg_max_iter = 1
+petsc_opt = ["pc_hypre_boomeramg_tol=0.0"]
+
+[export]
+write_custom_debug_bundle = false
+write_history_json = true
+write_solution_vtu = false

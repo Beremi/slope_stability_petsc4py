@@ -321,3 +321,55 @@ def test_plain_owned_tangent_matrix_reuses_petsc_handle() -> None:
     assert np.allclose(np.asarray(vals), np.asarray(updated.data), rtol=1.0e-11, atol=1.0e-11)
 
     builder.release_petsc_caches()
+
+
+@pytest.mark.parametrize("use_compiled", [False, True])
+def test_petsc_native_owned_tangent_matrix_matches_csr_and_reuses_petsc_handle(use_compiled: bool) -> None:
+    pytest.importorskip("petsc4py")
+    from slope_stability.constitutive.problem import ConstitutiveOperator
+
+    _coord, _elem, q_mask, pattern = _build_pattern("P2", n_elem=2)
+    ds1 = _make_ds(pattern, seed=414)
+    ds2 = _make_ds(pattern, seed=415)
+    n_int = int(pattern.local_int_indices.size)
+
+    builder = ConstitutiveOperator(
+        B=None,
+        c0=np.zeros(n_int, dtype=np.float64),
+        phi=np.zeros(n_int, dtype=np.float64),
+        psi=np.zeros(n_int, dtype=np.float64),
+        Davis_type="B",
+        shear=np.ones(n_int, dtype=np.float64),
+        bulk=np.ones(n_int, dtype=np.float64),
+        lame=np.ones(n_int, dtype=np.float64),
+        WEIGHT=np.ones(n_int, dtype=np.float64),
+        n_strain=int(pattern.n_strain),
+        n_int=n_int,
+        dim=int(pattern.dim),
+        q_mask=q_mask,
+    )
+    builder.set_owned_tangent_pattern(
+        pattern,
+        use_compiled=use_compiled,
+        tangent_kernel="rows",
+        constitutive_mode="overlap",
+        tangent_matrix_backend="petsc_aij_element",
+        use_compiled_constitutive=False,
+    )
+    assert builder.owned_tangent_matrix_backend == "petsc_csr"
+
+    builder._owned_local_DS = ds1
+    mat1 = builder._build_owned_tangent_matrix()
+    handle1 = int(mat1.handle)
+
+    builder._owned_local_DS = ds2
+    mat2 = builder._build_owned_tangent_matrix()
+    assert int(mat2.handle) == handle1
+
+    rows, cols, vals = mat2.getValuesCSR()
+    updated = assemble_owned_tangent_matrix(pattern, ds2, use_compiled=use_compiled, kernel="rows")
+    assert np.array_equal(np.asarray(rows), np.asarray(updated.indptr))
+    assert np.array_equal(np.asarray(cols), np.asarray(updated.indices))
+    assert np.allclose(np.asarray(vals), np.asarray(updated.data), rtol=1.0e-11, atol=1.0e-11)
+
+    builder.release_petsc_caches()

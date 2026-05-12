@@ -34,6 +34,7 @@ class ExecutionConfig:
     mpi_distribute_by_nodes: bool = True
     constitutive_mode: str = "overlap"
     tangent_kernel: str = "rows"
+    tangent_matrix_backend: str = "owned_csr"
     store_step_u: bool = True
 
 
@@ -192,6 +193,15 @@ class RunCaseConfig:
             "alg5",
             "armijo_residual",
         }
+        valid_tangent_matrix_backends = {
+            "owned_csr",
+            "csr",
+            "petsc_csr",
+            "petsc_aij_csr",
+            "petsc_coo",
+            "coo",
+            "petsc_aij_element",
+        }
         if not self.problem.asset:
             raise ValueError("[problem].asset must be set.")
         if self.problem.analysis.lower() not in {"ssr", "ll", "seepage"}:
@@ -202,6 +212,10 @@ class RunCaseConfig:
             )
         if str(self.newton.line_search).strip().lower() not in valid_line_search_modes:
             raise ValueError("The newton line_search must be alg5 or armijo_residual.")
+        if str(self.execution.tangent_matrix_backend).strip().lower() not in valid_tangent_matrix_backends:
+            raise ValueError(
+                "The execution tangent_matrix_backend must be owned_csr, petsc_csr, petsc_coo, or petsc_aij_element."
+            )
         for field_name in ("init_newton_stopping_criterion", "fine_newton_stopping_criterion"):
             value = getattr(self.continuation, field_name)
             if value is not None and str(value).strip().lower() not in valid_stopping_criteria:
@@ -324,6 +338,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         mpi_distribute_by_nodes=bool(execution_data.get("mpi_distribute_by_nodes", True)),
         constitutive_mode=str(execution_data.get("constitutive_mode", "overlap")),
         tangent_kernel=str(execution_data.get("tangent_kernel", "rows")),
+        tangent_matrix_backend=str(execution_data.get("tangent_matrix_backend", "owned_csr")),
         store_step_u=bool(execution_data.get("store_step_u", True)),
     )
     continuation = ContinuationConfig(

@@ -269,6 +269,54 @@ def local_csr_to_petsc_aij_matrix(
     return mat
 
 
+def owned_csr_arrays_to_petsc_aij_matrix(
+    indptr,
+    indices,
+    data,
+    *,
+    local_shape: tuple[int, int],
+    global_shape: tuple[int, int],
+    comm,
+    block_size: int | None = None,
+    local_col_size: int | None = None,
+    metadata: dict[str, object] | None = None,
+    new_nonzero_allocation_err: bool = False,
+):
+    """Create a distributed PETSc AIJ matrix directly from owned CSR buffers."""
+
+    _require_petsc()
+    indptr_arr = np.array(indptr, dtype=PETSc.IntType, copy=True)
+    indices_arr = np.array(indices, dtype=PETSc.IntType, copy=True)
+    data_arr = np.array(data, dtype=np.float64, copy=True)
+    local_rows = int(local_shape[0])
+    if int(indptr_arr.size) != local_rows + 1:
+        raise ValueError(f"CSR indptr has size {indptr_arr.size}, expected local_rows + 1 ({local_rows + 1})")
+    if int(indices_arr.size) != int(data_arr.size):
+        raise ValueError("CSR indices and data must have the same length")
+    local_cols = int(local_col_size) if local_col_size is not None else PETSc.DECIDE
+    mat = PETSc.Mat().createAIJ(
+        size=((local_rows, int(global_shape[0])), (local_cols, int(global_shape[1]))),
+        csr=(indptr_arr, indices_arr, data_arr),
+        comm=comm,
+    )
+    if new_nonzero_allocation_err:
+        mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, True)
+    if (
+        block_size is not None
+        and int(local_rows) % int(block_size) == 0
+        and int(global_shape[0]) % int(block_size) == 0
+        and int(global_shape[1]) % int(block_size) == 0
+        and int(local_cols) != int(PETSc.DECIDE)
+        and int(local_cols) % int(block_size) == 0
+    ):
+        mat.setBlockSize(int(block_size))
+    mat.assemble()
+    _PETSC_MAT_CSR_REFS[int(mat.handle)] = (indptr_arr, indices_arr, data_arr)
+    if metadata:
+        set_petsc_matrix_metadata(mat, **metadata)
+    return mat
+
+
 def owned_coo_to_petsc_aij_matrix(
     rows,
     cols,
@@ -278,6 +326,9 @@ def owned_coo_to_petsc_aij_matrix(
     owned_row_range: tuple[int, int],
     comm,
     local_col_size: int | None = None,
+    block_size: int | None = None,
+    metadata: dict[str, object] | None = None,
+    new_nonzero_allocation_err: bool = False,
 ):
     """Create a distributed PETSc AIJ matrix from owned global COO triplets."""
 
@@ -294,17 +345,45 @@ def owned_coo_to_petsc_aij_matrix(
             raise ValueError("COO rows must be locally owned by the target rank")
     local_rows = int(row1 - row0)
     local_cols = int(local_col_size) if local_col_size is not None else PETSc.DECIDE
-
     mat = PETSc.Mat().createAIJ(
         size=((local_rows, int(global_shape[0])), (local_cols, int(global_shape[1]))),
         comm=comm,
     )
-    if row_arr.size:
-        mat.setPreallocationCOO(row_arr, col_arr)
-        mat.setValuesCOO(data_arr)
+    mat.setPreallocationCOO(row_arr, col_arr)
+    if new_nonzero_allocation_err:
+        mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, True)
+    mat.setValuesCOO(data_arr, addv=PETSc.InsertMode.INSERT_VALUES)
     mat.assemble()
+    if (
+        block_size is not None
+        and int(local_rows) % int(block_size) == 0
+        and int(global_shape[0]) % int(block_size) == 0
+        and int(global_shape[1]) % int(block_size) == 0
+        and int(local_cols) != int(PETSc.DECIDE)
+        and int(local_cols) % int(block_size) == 0
+    ):
+        mat.setBlockSize(int(block_size))
     _PETSC_MAT_COO_REFS[int(mat.handle)] = (row_arr, col_arr, data_arr)
+    if metadata:
+        set_petsc_matrix_metadata(mat, **metadata)
     return mat
+
+
+def update_petsc_aij_matrix_coo(A, data: np.ndarray):
+    """Overwrite values of an existing AIJ matrix that was preallocated with COO."""
+
+    _require_petsc()
+    if not isinstance(A, PETSc.Mat):
+        raise TypeError("A must be a PETSc Mat")
+    data_arr = np.asarray(data, dtype=np.float64).reshape(-1)
+    refs = _PETSC_MAT_COO_REFS.get(int(A.handle))
+    if refs is not None and int(data_arr.size) != int(refs[0].size):
+        raise ValueError(f"COO value count changed from {refs[0].size} to {data_arr.size}")
+    A.setValuesCOO(data_arr, addv=PETSc.InsertMode.INSERT_VALUES)
+    A.assemble()
+    if refs is not None:
+        _PETSC_MAT_COO_REFS[int(A.handle)] = (refs[0], refs[1], data_arr)
+    return A
 
 
 def update_petsc_aij_matrix_csr(

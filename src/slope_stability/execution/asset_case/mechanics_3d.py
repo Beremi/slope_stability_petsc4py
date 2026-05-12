@@ -800,6 +800,7 @@ def run_capture(
     recycle_preconditioner: bool = True,
     constitutive_mode: str = "overlap",
     tangent_kernel: str = "rows",
+    tangent_matrix_backend: str = "owned_csr",
     max_deflation_basis_vectors: int = 48,
     store_step_u: bool = True,
 ) -> dict:
@@ -1135,6 +1136,7 @@ def run_capture(
             use_compiled=True,
             tangent_kernel=tangent_kernel,
             constitutive_mode=constitutive_mode,
+            tangent_matrix_backend=tangent_matrix_backend,
             use_compiled_constitutive=True,
         )
         _stage_debug_log(
@@ -1472,6 +1474,7 @@ def run_capture(
         "recycle_preconditioner": bool(recycle_preconditioner),
         "constitutive_mode": constitutive_mode,
         "tangent_kernel": str(tangent_kernel),
+        "tangent_matrix_backend": str(tangent_matrix_backend),
     }
 
     t0 = perf_counter()
@@ -2101,6 +2104,12 @@ def main() -> None:
         choices=["global", "overlap", "unique_gather", "unique_exchange"],
     )
     parser.add_argument("--tangent_kernel", type=str, default="rows", choices=["legacy", "rows"])
+    parser.add_argument(
+        "--tangent_matrix_backend",
+        type=str,
+        default="owned_csr",
+        choices=["owned_csr", "petsc_csr", "petsc_coo", "petsc_aij_element"],
+    )
     args = parser.parse_args()
 
     if args.out_dir is None:
@@ -2229,6 +2238,7 @@ def main() -> None:
         recycle_preconditioner=args.recycle_preconditioner,
         constitutive_mode=args.constitutive_mode,
         tangent_kernel=args.tangent_kernel,
+        tangent_matrix_backend=args.tangent_matrix_backend,
         max_deflation_basis_vectors=args.max_deflation_basis_vectors,
         store_step_u=args.store_step_u,
     )

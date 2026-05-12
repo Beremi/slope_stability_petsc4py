@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from slope_stability.assets import available_problem_assets, load_problem_asset
-from slope_stability.core.run_config import ProblemConfig, RunCaseConfig, load_run_case_config
+from slope_stability.core.run_config import ExecutionConfig, ProblemConfig, RunCaseConfig, load_run_case_config
 from slope_stability.execution.asset_case import RouteKind, case_runner_kwargs, select_case_route
 from slope_stability.postprocess.case_mesh import rebuild_case_mesh
 from slope_stability.problem_asset_runtime import (
@@ -68,6 +68,57 @@ def test_config_runner_routes_are_asset_first() -> None:
         assert kwargs["asset_name"] == cfg.problem.asset
         assert "mesh_variant" in kwargs
         assert forbidden_kwargs.isdisjoint(kwargs)
+
+
+def test_3d_mechanics_config_routes_tangent_matrix_backend(tmp_path: Path) -> None:
+    source = ROOT / "benchmarks/run_3D_hetero_SSR_capture/case.toml"
+    text = source.read_text(encoding="utf-8").replace(
+        "[execution]\n",
+        "[execution]\ntangent_matrix_backend = \"petsc_aij_element\"\n",
+        1,
+    )
+    config_path = tmp_path / "petsc_native_case.toml"
+    config_path.write_text(text, encoding="utf-8")
+
+    cfg = load_run_case_config(config_path)
+    assert cfg.execution.tangent_matrix_backend == "petsc_aij_element"
+    _runner, kwargs = case_runner_kwargs(cfg)
+    assert kwargs["tangent_matrix_backend"] == "petsc_aij_element"
+
+
+def test_petsc_native_experiment_configs_are_loadable() -> None:
+    case_dir = ROOT / "benchmarks/experiment_petsc_native_assembly_3D_hetero_SSR_P4_L1"
+    configs = sorted(case_dir.glob("*.toml"))
+    assert {p.name for p in configs} >= {
+        "owned_csr_pmg_shell_32.toml",
+        "petsc_aij_pmg_shell_32.toml",
+        "petsc_aij_gamg_32.toml",
+        "petsc_aij_hypre_32.toml",
+        "petsc_aij_bddc_32.toml",
+    }
+
+    for path in configs:
+        cfg = load_run_case_config(path)
+        _runner, kwargs = case_runner_kwargs(cfg)
+        assert kwargs["asset_name"] == "3d_hetero_slope"
+        assert kwargs["elem_type"] == "P4"
+        assert kwargs["omega_max_stop"] == pytest.approx(7.0e6)
+
+
+def test_run_config_rejects_unknown_tangent_matrix_backend() -> None:
+    cfg = RunCaseConfig(
+        problem=ProblemConfig(
+            name="bad_tangent_matrix_backend",
+            asset="3d_hetero_slope",
+            mesh_variant="adaptive_family_a_l1.msh",
+            analysis="ssr",
+            elem_type="P4",
+        ),
+        execution=ExecutionConfig(tangent_matrix_backend="python_element_loop"),
+    )
+
+    with pytest.raises(ValueError, match="tangent_matrix_backend"):
+        cfg.validate()
 
 
 def test_seepage_capable_3d_ll_route_is_rejected() -> None:
