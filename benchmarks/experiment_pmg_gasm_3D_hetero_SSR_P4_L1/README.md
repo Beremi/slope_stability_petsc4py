@@ -86,6 +86,33 @@ After the jobs finish, refresh tables and log-log timing plots with:
   --out-root artifacts/experiments/pmg_numa_coalesced_karolina_socket_scaling_p4_l1_omega7
 ```
 
+## Karolina quality-preserving contiguous GASM grid
+
+The NUMA-coalesced zero-overlap variant is intentionally separate from the quality-preserving fake-socket setup. To run the same PMG/GASM smoother setup that matched the local and earlier Karolina quality runs, use the contiguous grid:
+
+```bash
+benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/submit_karolina_contiguous_socket_scaling_qexp.sh
+```
+
+This submits one qexp job per case:
+
+| case | nodes | MPI ranks | contiguous GASM domains | ranks/domain |
+| --- | ---: | ---: | ---: | ---: |
+| `gasm_1x16` | 1 | 16 | 1 | 16 |
+| `gasm_2x16` | 1 | 32 | 2 | 16 |
+| `gasm_4x16` | 1 | 64 | 4 | 16 |
+| `gasm_8x16` | 1 | 128 | 8 | 16 |
+| `gasm_16x16` | 2 | 256 | 16 | 16 |
+
+The generated TOML uses `pmg_smoother_gasm_grouping = "contiguous"`, `pmg_smoother_gasm_overlap = 1`, `preonly+jacobi` subsolves, and keeps the previous PMG-shell coarse path. This is the "same as working local" path; it does not perform hardware NUMA discovery.
+
+After the jobs finish, summarize with:
+
+```bash
+./.venv/bin/python benchmarks/experiment_pmg_gasm_3D_hetero_SSR_P4_L1/summarize_karolina_qexp.py \
+  --out-root artifacts/experiments/pmg_gasm_contiguous_karolina_socket_scaling_p4_l1_omega7
+```
+
 ## Karolina multi-node full-occupancy grid
 
 The multi-node script tests full node occupancy on `2`, `4`, `8`, and `16` nodes with a 10 minute Slurm limit per case:
