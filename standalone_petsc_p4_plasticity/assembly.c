@@ -479,6 +479,16 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
         }
       }
     }
+    if (elem_mat) {
+      /* Keep the tangent exactly symmetric for CG/GAMG despite roundoff-order noise. */
+      for (PetscInt i = 0; i < ndof; ++i) {
+        for (PetscInt j = i + 1; j < ndof; ++j) {
+          const PetscScalar v = 0.5 * (elem_mat[i * ndof + j] + elem_mat[j * ndof + i]);
+          elem_mat[i * ndof + j] = v;
+          elem_mat[j * ndof + i] = v;
+        }
+      }
+    }
     if (u_cell) PetscCall(DMPlexVecRestoreClosure(dm, lsec, u_loc ? u_loc : probe_loc, cell, &u_size, &u_cell));
     if (residual) {
       PetscCall(DMPlexVecSetClosure(dm, lsec, out_loc, cell, elem_vec, ADD_VALUES));

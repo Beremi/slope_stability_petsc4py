@@ -88,7 +88,9 @@ The material table is copied from the heterogenous 3D slope asset:
 - physical region 4: cover layer
 
 The strength reduction is Davis-B at a fixed `lambda`. The Newton initial guess
-is the elastic gravity solution. Boundary elimination is symmetric:
+is the elastic gravity solution. The 24-point tetrahedral quadrature rule is
+stored in unit-simplex coordinates and converted to PETSc's biunit simplex
+before tabulating the PETSc P4 basis. Boundary elimination is symmetric:
 
 - `u_x = 0` on physical faces `x_max` and `x_min`
 - `u_y = 0` on physical face `base`

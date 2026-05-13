@@ -41,13 +41,14 @@ static PetscErrorCode CreateTetra24Quadrature(MPI_Comm comm, PetscQuadrature *qu
   PetscFunctionBeginUser;
   PetscCall(PetscMalloc1(24 * 3, &points));
   PetscCall(PetscMalloc1(24, &weights));
+  /* PETSc tabulates simplex FE spaces on the biunit reference tetrahedron. */
   for (PetscInt q = 0; q < 24; ++q) {
-    points[3 * q + 0] = xi[q][0];
-    points[3 * q + 1] = xi[q][1];
-    points[3 * q + 2] = xi[q][2];
-    weights[q]        = wf[q];
+    for (PetscInt d = 0; d < 3; ++d) points[3 * q + d] = 2.0 * xi[q][d] - 1.0;
+    weights[q] = 8.0 * wf[q];
   }
   PetscCall(PetscQuadratureCreate(comm, quad));
+  PetscCall(PetscQuadratureSetCellType(*quad, DM_POLYTOPE_TETRAHEDRON));
+  PetscCall(PetscQuadratureSetOrder(*quad, 6));
   PetscCall(PetscQuadratureSetData(*quad, 3, 1, 24, points, weights));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
