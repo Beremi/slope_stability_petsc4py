@@ -109,6 +109,64 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode RepairBoundaryFaceSets(DM dm)
+{
+  MPI_Comm      comm;
+  DM            cdm;
+  PetscSection  csec;
+  Vec           coords;
+  DMLabel       faceSets;
+  PetscReal     local_min[3] = {PETSC_MAX_REAL, PETSC_MAX_REAL, PETSC_MAX_REAL};
+  PetscReal     local_max[3] = {-PETSC_MAX_REAL, -PETSC_MAX_REAL, -PETSC_MAX_REAL};
+  PetscReal     global_min[3], global_max[3], scale = 1.0, tol;
+  PetscInt      vStart, vEnd, fStart, fEnd;
+
+  PetscFunctionBeginUser;
+  comm = PetscObjectComm((PetscObject)dm);
+  PetscCall(DMGetCoordinateDM(dm, &cdm));
+  PetscCall(DMGetCoordinateSection(dm, &csec));
+  PetscCall(DMGetCoordinatesLocal(dm, &coords));
+  PetscCheck(coords, comm, PETSC_ERR_ARG_WRONGSTATE, "Mesh has no local coordinates");
+
+  PetscCall(DMPlexGetDepthStratum(dm, 0, &vStart, &vEnd));
+  for (PetscInt v = vStart; v < vEnd; ++v) {
+    PetscScalar *xyz = NULL;
+    PetscInt     size = 0;
+
+    PetscCall(DMPlexVecGetClosure(cdm, csec, coords, v, &size, &xyz));
+    if (size == 3) {
+      for (PetscInt d = 0; d < 3; ++d) {
+        const PetscReal xd = PetscRealPart(xyz[d]);
+        local_min[d]       = PetscMin(local_min[d], xd);
+        local_max[d]       = PetscMax(local_max[d], xd);
+      }
+    }
+    PetscCall(DMPlexVecRestoreClosure(cdm, csec, coords, v, &size, &xyz));
+  }
+  PetscCallMPI(MPI_Allreduce(local_min, global_min, 3, MPIU_REAL, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(local_max, global_max, 3, MPIU_REAL, MPI_MAX, comm));
+  for (PetscInt d = 0; d < 3; ++d) scale = PetscMax(scale, global_max[d] - global_min[d]);
+  tol = 1.0e-9 * scale;
+
+  PetscCall(DMCreateLabel(dm, "Face Sets"));
+  PetscCall(DMGetLabel(dm, "Face Sets", &faceSets));
+  PetscCall(DMPlexGetHeightStratum(dm, 1, &fStart, &fEnd));
+  for (PetscInt f = fStart; f < fEnd; ++f) {
+    PetscReal vol, centroid[3], normal[3];
+    PetscInt  support_size;
+
+    PetscCall(DMPlexGetSupportSize(dm, f, &support_size));
+    if (support_size != 1) continue;
+    PetscCall(DMPlexComputeCellGeometryFVM(dm, f, &vol, centroid, normal));
+    if (PetscAbsReal(centroid[0] - global_max[0]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 1));      /* x_max */
+    else if (PetscAbsReal(centroid[0] - global_min[0]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 2)); /* x_min */
+    else if (PetscAbsReal(centroid[2] - global_min[2]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 3)); /* z_min */
+    else if (PetscAbsReal(centroid[2] - global_max[2]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 4)); /* z_max */
+    else if (PetscAbsReal(centroid[1] - global_min[1]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 5)); /* base */
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *app, P4Basis *basis, DM *dm)
 {
   DM cur;
@@ -149,6 +207,7 @@ static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *app, P4Basis *basis, DM 
     cur = refined;
     PetscCall(DMSetFromOptions(cur));
   }
+  PetscCall(RepairBoundaryFaceSets(cur));
   PetscCall(DMSetField(cur, 0, NULL, (PetscObject)basis->fe_vector));
   PetscCall(DMCreateDS(cur));
   PetscCall(DMGetCoordinatesLocalSetUp(cur));
@@ -195,7 +254,70 @@ static PetscErrorCode AttachNearNullspace(DM dm, IS constrained, Mat A)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AppCtx *app, Mat A, IS constrained)
+static PetscErrorCode BuildOwnedBlockCoordinates(DM dm, P4Basis *basis, PetscInt *nblocks, PetscReal **block_coords)
+{
+  PetscDualSpace dual;
+  PetscSection   lsec, gsec;
+  Vec            v;
+  PetscInt       lo, hi, cStart, cEnd;
+  PetscReal     *owned_coords, *ref_points;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateGlobalVector(dm, &v));
+  PetscCall(VecGetOwnershipRange(v, &lo, &hi));
+  PetscCall(VecDestroy(&v));
+  PetscCheck(lo % 3 == 0 && hi % 3 == 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Expected vector ownership range divisible by 3");
+  *nblocks = (hi - lo) / 3;
+  PetscCall(PetscCalloc1(3 * (*nblocks), &owned_coords));
+
+  PetscCall(PetscFEGetDualSpace(basis->fe_scalar, &dual));
+  PetscCall(PetscMalloc1(3 * basis->n_basis, &ref_points));
+  for (PetscInt b = 0; b < basis->n_basis; ++b) {
+    PetscQuadrature q;
+    PetscInt        dim, Nc, npoints;
+    const PetscReal *points;
+
+    PetscCall(PetscDualSpaceGetFunctional(dual, b, &q));
+    PetscCall(PetscQuadratureGetData(q, &dim, &Nc, &npoints, &points, NULL));
+    PetscCheck(dim == 3 && Nc == 1 && npoints >= 1, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected scalar dual functional shape");
+    for (PetscInt d = 0; d < 3; ++d) ref_points[3 * b + d] = points[d];
+  }
+
+  PetscCall(DMGetLocalSection(dm, &lsec));
+  PetscCall(DMGetGlobalSection(dm, &gsec));
+  PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
+  for (PetscInt cell = cStart; cell < cEnd; ++cell) {
+    PetscReal  v0[3], J[9], invJ[9], detJ;
+    PetscInt   num_indices = 0, *indices = NULL;
+
+    PetscCall(DMPlexComputeCellGeometryFEM(dm, cell, NULL, v0, J, invJ, &detJ));
+    PetscCall(DMPlexGetClosureIndices(dm, lsec, gsec, cell, PETSC_TRUE, &num_indices, &indices, NULL, NULL));
+    PetscCheck(num_indices == 3 * basis->n_basis, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
+               "Unexpected coordinate closure size %" PetscInt_FMT " != %" PetscInt_FMT, num_indices, 3 * basis->n_basis);
+    for (PetscInt b = 0; b < basis->n_basis; ++b) {
+      const PetscReal *r = &ref_points[3 * b];
+      PetscReal        x[3];
+
+      for (PetscInt d = 0; d < 3; ++d) x[d] = v0[d] + J[0 * 3 + d] * r[0] + J[1 * 3 + d] * r[1] + J[2 * 3 + d] * r[2];
+      for (PetscInt comp = 0; comp < 3; ++comp) {
+        const PetscInt row = indices[3 * b + comp];
+        PetscCheck(row >= 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected negative coordinate closure index");
+        if (row >= lo && row < hi) {
+          const PetscInt ib = (row - lo) / 3;
+          owned_coords[3 * ib + 0] = x[0];
+          owned_coords[3 * ib + 1] = x[1];
+          owned_coords[3 * ib + 2] = x[2];
+        }
+      }
+    }
+    PetscCall(DMPlexRestoreClosureIndices(dm, lsec, gsec, cell, PETSC_TRUE, &num_indices, &indices, NULL, NULL));
+  }
+  PetscCall(PetscFree(ref_points));
+  *block_coords = owned_coords;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A)
 {
   PC pc;
 
@@ -223,7 +345,15 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AppCtx *app, Mat A, IS constr
     if (pctype) {
       PetscBool is_gamg;
       PetscCall(PetscStrcmp(pctype, PCGAMG, &is_gamg));
-      if (is_gamg) PetscCall(AttachNearNullspace(dm, constrained, A));
+      if (is_gamg) {
+        PetscInt   ncoords;
+        PetscReal *coords = NULL;
+
+        PetscCall(BuildOwnedBlockCoordinates(dm, actx->basis, &ncoords, &coords));
+        PetscCall(PCSetCoordinates(pc, 3, ncoords, coords));
+        PetscCall(PetscFree(coords));
+        PetscCall(AttachNearNullspace(dm, actx->constrained_is, A));
+      }
     }
   }
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -248,7 +378,7 @@ static PetscErrorCode SolveWithFreshKSP(DM dm, AssemblyCtx *actx, AppCtx *app, M
 
   PetscFunctionBeginUser;
   PetscCall(KSPCreate(PetscObjectComm((PetscObject)dm), &ksp));
-  PetscCall(ConfigureKSP(ksp, dm, app, A, actx->constrained_is));
+  PetscCall(ConfigureKSP(ksp, dm, actx, app, A));
   PetscCall(KSPSolve(ksp, rhs, x));
   PetscCall(KSPGetIterationNumber(ksp, its));
   PetscCall(KSPGetConvergedReason(ksp, &reason));
@@ -334,7 +464,7 @@ int main(int argc, char **argv)
   Vec            u = NULL, f_ext = NULL;
   PetscInt       cStart, cEnd, nStart, nEnd, elastic_its;
   PetscReal      rhs_norm, u_norm;
-  PetscLogDouble t_start, t_end, t0, t1;
+  PetscLogDouble t_start, t_end, t0, t1, elastic_assembly_time, elastic_solve_time;
 
   PetscCall(PetscInitialize(&argc, &argv, NULL, "Standalone pure PETSc P4 plasticity case\n"));
   PetscCall(PetscTime(&t_start));
@@ -351,19 +481,35 @@ int main(int argc, char **argv)
   PetscCall(AssemblyCtxCreate(dm, &basis, &actx));
 
   PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                        "mesh=%s%s refine_levels=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " P4_basis=%" PetscInt_FMT " local_constraints=%" PetscInt_FMT " pc_variant=%s lambda=%.6g\n",
-                        app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, cEnd - cStart, nEnd - nStart, basis.n_basis, actx.n_constrained_local, app.variant_name, (double)app.lambda));
+                        "mesh=%s%s refine_levels=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " P4_basis=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " pc_variant=%s lambda=%.6g\n",
+                        app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, cEnd - cStart, nEnd - nStart, basis.n_basis, actx.n_constrained_local, actx.n_constrained_all, app.variant_name, (double)app.lambda));
 
   PetscCall(PetscTime(&t0));
   PetscCall(AssembleElasticProblem(&actx, A, f_ext));
   PetscCall(PetscTime(&t1));
+  elastic_assembly_time = t1 - t0;
   PetscCall(VecNorm(f_ext, NORM_2, &rhs_norm));
   PetscCall(ApplyZeroDirichlet(actx.constrained_is, A, f_ext));
   PetscCall(VecNorm(f_ext, NORM_2, &rhs_norm));
+  PetscCall(PetscPrintf(PETSC_COMM_WORLD, "elastic assembly_time=%.6g rhs_norm=%.6e\n", (double)elastic_assembly_time, (double)rhs_norm));
+  {
+    PetscBool check_symmetry = PETSC_FALSE;
+
+    PetscCall(PetscOptionsGetBool(NULL, NULL, "-check_matrix_symmetry", &check_symmetry, NULL));
+    if (check_symmetry) {
+      PetscBool symmetric;
+
+      PetscCall(MatIsSymmetric(A, 1.0e-10, &symmetric));
+      PetscCall(PetscPrintf(PETSC_COMM_WORLD, "elastic matrix_symmetric=%s tol=1e-10\n", symmetric ? "true" : "false"));
+    }
+  }
   PetscCall(VecZeroEntries(u));
+  PetscCall(PetscTime(&t0));
   PetscCall(SolveWithFreshKSP(dm, &actx, &app, A, f_ext, u, "Elastic initial", &elastic_its));
+  PetscCall(PetscTime(&t1));
+  elastic_solve_time = t1 - t0;
   PetscCall(VecNorm(u, NORM_2, &u_norm));
-  PetscCall(PetscPrintf(PETSC_COMM_WORLD, "elastic assembly_time=%.6g rhs_norm=%.6e u_norm=%.6e\n", (double)(t1 - t0), (double)rhs_norm, (double)u_norm));
+  PetscCall(PetscPrintf(PETSC_COMM_WORLD, "elastic solve_time=%.6g u_norm=%.6e\n", (double)elastic_solve_time, (double)u_norm));
 
   PetscCall(NewtonSolve(dm, &actx, &app, A, f_ext, u, rhs_norm));
   PetscCall(VecNorm(u, NORM_2, &u_norm));

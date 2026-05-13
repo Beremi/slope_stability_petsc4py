@@ -11,6 +11,11 @@ CPPFLAGS += $(PETSC_CC_INCLUDES)
 
 OBJS = p4_plasticity.o assembly.o material_mc.o p4_basis.o
 
+p4_plasticity.o: p4_plasticity.c assembly.h p4_basis.h
+assembly.o: assembly.c assembly.h material_mc.h p4_basis.h material_mc_kernel.h
+material_mc.o: material_mc.c material_mc.h material_mc_kernel.h
+p4_basis.o: p4_basis.c p4_basis.h
+
 p4_plasticity: $(OBJS)
 	$(PCC_LINKER) -o $@ $(OBJS) $(PETSC_LIB)
 

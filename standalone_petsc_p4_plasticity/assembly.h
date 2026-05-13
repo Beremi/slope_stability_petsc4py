@@ -8,7 +8,10 @@ typedef struct {
   P4Basis *basis;
   DMLabel  cell_sets;
   IS       constrained_is;
+  IS       constrained_all_is;
   PetscInt n_constrained_local;
+  PetscInt n_constrained_all;
+  PetscInt *constrained_all;
   PetscInt cell_dofs;
 } AssemblyCtx;
 
