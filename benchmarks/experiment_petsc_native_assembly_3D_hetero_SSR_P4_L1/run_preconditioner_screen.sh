@@ -16,9 +16,13 @@ export NUMEXPR_NUM_THREADS=1
 cases=(
   owned_csr_pmg_shell_32
   petsc_aij_pmg_shell_32
+  petsc_aij_pmg_shell_redundant_coarse_32
   petsc_aij_hypre_32
+  petsc_aij_hypre_lagged_pmis_32
   petsc_aij_gamg_32
+  petsc_aij_gamg_lagged_lowcomm_32
   petsc_aij_bddc_32
+  petsc_aij_bddc_gamg_32
 )
 
 if [[ "$#" -gt 0 ]]; then
