@@ -373,6 +373,28 @@ static PetscErrorCode MatSetConstrainedDiagonals(AssemblyCtx *ctx, PetscBool use
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode MatEnsureDiagonalSlots(DM dm, PetscBool use_local_indices, PetscSection lsec, Mat A)
+{
+  PetscScalar zero = 0.0;
+
+  PetscFunctionBeginUser;
+  if (use_local_indices) {
+    PetscInt nloc;
+
+    PetscCall(PetscSectionGetStorageSize(lsec, &nloc));
+    for (PetscInt i = 0; i < nloc; ++i) PetscCall(MatSetValuesLocal(A, 1, &i, 1, &i, &zero, ADD_VALUES));
+  } else {
+    Vec      v;
+    PetscInt lo, hi;
+
+    PetscCall(DMCreateGlobalVector(dm, &v));
+    PetscCall(VecGetOwnershipRange(v, &lo, &hi));
+    PetscCall(VecDestroy(&v));
+    for (PetscInt i = lo; i < hi; ++i) PetscCall(MatSetValue(A, i, i, zero, ADD_VALUES));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, Vec f_ext, Mat A, Vec residual, PetscBool plastic, PetscBool assemble_jacobian)
 {
   DM              dm = ctx->dm;
@@ -504,10 +526,14 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
   }
   if (A && assemble_jacobian) {
     /*
-      Eliminated rows have no element entries. Allow PETSc to allocate any
-      missing diagonal slots, then restore strict insertion for later assembly.
+      Eliminated rows have no element entries, and BDDC may later extract local
+      submatrices whose diagonals were not present in the element sparsity.
+      Allocate all diagonal slots explicitly, then put unit values on constrained
+      rows and restore strict insertion for later assembly.
     */
     PetscCall(MatSetOption(A, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE));
+    PetscCall(MatSetOption(A, MAT_IGNORE_ZERO_ENTRIES, PETSC_FALSE));
+    PetscCall(MatEnsureDiagonalSlots(dm, use_local_mat_indices, lsec, A));
     PetscCall(MatSetConstrainedDiagonals(ctx, use_local_mat_indices, lsec, gsec, A));
     PetscCall(MatSetOption(A, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE));
     PetscCall(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY));

@@ -317,6 +317,215 @@ static PetscErrorCode BuildOwnedBlockCoordinates(DM dm, P4Basis *basis, PetscInt
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode BuildOwnedDofCoordinates(DM dm, P4Basis *basis, PetscInt *ndofs, PetscReal **dof_coords)
+{
+  PetscDualSpace dual;
+  PetscSection   lsec, gsec;
+  Vec            v;
+  PetscInt       lo, hi, cStart, cEnd;
+  PetscReal     *owned_coords, *ref_points;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateGlobalVector(dm, &v));
+  PetscCall(VecGetOwnershipRange(v, &lo, &hi));
+  PetscCall(VecDestroy(&v));
+  *ndofs = hi - lo;
+  PetscCall(PetscCalloc1(3 * (*ndofs), &owned_coords));
+
+  PetscCall(PetscFEGetDualSpace(basis->fe_scalar, &dual));
+  PetscCall(PetscMalloc1(3 * basis->n_basis, &ref_points));
+  for (PetscInt b = 0; b < basis->n_basis; ++b) {
+    PetscQuadrature  q;
+    PetscInt         dim, Nc, npoints;
+    const PetscReal *points;
+
+    PetscCall(PetscDualSpaceGetFunctional(dual, b, &q));
+    PetscCall(PetscQuadratureGetData(q, &dim, &Nc, &npoints, &points, NULL));
+    PetscCheck(dim == 3 && Nc == 1 && npoints >= 1, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected scalar dual functional shape");
+    for (PetscInt d = 0; d < 3; ++d) ref_points[3 * b + d] = points[d];
+  }
+
+  PetscCall(DMGetLocalSection(dm, &lsec));
+  PetscCall(DMGetGlobalSection(dm, &gsec));
+  PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
+  for (PetscInt cell = cStart; cell < cEnd; ++cell) {
+    PetscReal v0[3], J[9], invJ[9], detJ;
+    PetscInt  num_indices = 0, *indices = NULL;
+
+    PetscCall(DMPlexComputeCellGeometryFEM(dm, cell, NULL, v0, J, invJ, &detJ));
+    PetscCall(DMPlexGetClosureIndices(dm, lsec, gsec, cell, PETSC_TRUE, &num_indices, &indices, NULL, NULL));
+    PetscCheck(num_indices == 3 * basis->n_basis, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
+               "Unexpected coordinate closure size %" PetscInt_FMT " != %" PetscInt_FMT, num_indices, 3 * basis->n_basis);
+    for (PetscInt b = 0; b < basis->n_basis; ++b) {
+      const PetscReal *r = &ref_points[3 * b];
+      PetscReal        x[3];
+
+      for (PetscInt d = 0; d < 3; ++d) x[d] = v0[d] + J[0 * 3 + d] * r[0] + J[1 * 3 + d] * r[1] + J[2 * 3 + d] * r[2];
+      for (PetscInt comp = 0; comp < 3; ++comp) {
+        const PetscInt row = indices[3 * b + comp];
+
+        PetscCheck(row >= 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected negative coordinate closure index");
+        if (row >= lo && row < hi) {
+          const PetscInt i = row - lo;
+
+          owned_coords[3 * i + 0] = x[0];
+          owned_coords[3 * i + 1] = x[1];
+          owned_coords[3 * i + 2] = x[2];
+        }
+      }
+    }
+    PetscCall(DMPlexRestoreClosureIndices(dm, lsec, gsec, cell, PETSC_TRUE, &num_indices, &indices, NULL, NULL));
+  }
+  PetscCall(PetscFree(ref_points));
+  *dof_coords = owned_coords;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscBool IsConstrainedGlobalDofApp(const AssemblyCtx *actx, PetscInt idx)
+{
+  PetscInt lo = 0, hi = actx->n_constrained_all;
+
+  if (idx < 0 || actx->n_constrained_all == 0) return PETSC_FALSE;
+  while (lo < hi) {
+    const PetscInt mid = lo + (hi - lo) / 2;
+    if (actx->constrained_all[mid] == idx) return PETSC_TRUE;
+    if (actx->constrained_all[mid] < idx) lo = mid + 1;
+    else hi = mid;
+  }
+  return PETSC_FALSE;
+}
+
+static PetscErrorCode BuildLocalConstrainedIS(DM dm, AssemblyCtx *actx, IS *local_is)
+{
+  PetscSection lsec, gsec;
+  PetscInt     pStart, pEnd, nidx = 0, cap = 0, *idx = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLocalSection(dm, &lsec));
+  PetscCall(DMGetGlobalSection(dm, &gsec));
+  PetscCall(PetscSectionGetChart(lsec, &pStart, &pEnd));
+  for (PetscInt p = pStart; p < pEnd; ++p) {
+    PetscInt ldof, gdof, loff, goff;
+
+    PetscCall(PetscSectionGetDof(lsec, p, &ldof));
+    PetscCall(PetscSectionGetDof(gsec, p, &gdof));
+    if (ldof <= 0 || gdof <= 0) continue;
+    PetscCheck(ldof == gdof, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Local/global dof mismatch on point %" PetscInt_FMT, p);
+    PetscCall(PetscSectionGetOffset(lsec, p, &loff));
+    PetscCall(PetscSectionGetOffset(gsec, p, &goff));
+    if (goff < 0) goff = -(goff + 1);
+    for (PetscInt d = 0; d < gdof; ++d) {
+      if (!IsConstrainedGlobalDofApp(actx, goff + d)) continue;
+      if (nidx == cap) {
+        cap = cap ? 2 * cap : 1024;
+        PetscCall(PetscRealloc(cap * sizeof(PetscInt), &idx));
+      }
+      idx[nidx++] = loff + d;
+    }
+  }
+  PetscCall(PetscSortRemoveDupsInt(&nidx, idx));
+  PetscCall(ISCreateGeneral(PetscObjectComm((PetscObject)dm), nidx, idx, PETSC_OWN_POINTER, local_is));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode AttachLocalNearNullspace(DM dm, P4Basis *basis, Mat A)
+{
+  PetscBool ismatis = PETSC_FALSE;
+  Mat       local_mat = NULL;
+  Vec       local_coords = NULL;
+  PetscInt  nloc;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &ismatis));
+  if (!ismatis) PetscFunctionReturn(PETSC_SUCCESS);
+
+  PetscCall(MatISGetLocalMat(A, &local_mat));
+  PetscCall(MatCreateVecs(local_mat, &local_coords, NULL));
+  PetscCall(VecGetLocalSize(local_coords, &nloc));
+  PetscCheck(nloc % 3 == 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Expected local MATIS size divisible by displacement block size 3");
+  PetscCall(VecSetBlockSize(local_coords, 3));
+  PetscCall(VecZeroEntries(local_coords));
+
+  {
+    PetscDualSpace dual;
+    PetscSection   lsec;
+    PetscReal     *ref_points;
+    PetscScalar   *coords;
+    PetscInt       cStart, cEnd;
+
+    PetscCall(PetscFEGetDualSpace(basis->fe_scalar, &dual));
+    PetscCall(PetscMalloc1(3 * basis->n_basis, &ref_points));
+    for (PetscInt b = 0; b < basis->n_basis; ++b) {
+      PetscQuadrature  q;
+      PetscInt         dim, Nc, npoints;
+      const PetscReal *points;
+
+      PetscCall(PetscDualSpaceGetFunctional(dual, b, &q));
+      PetscCall(PetscQuadratureGetData(q, &dim, &Nc, &npoints, &points, NULL));
+      PetscCheck(dim == 3 && Nc == 1 && npoints >= 1, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected scalar dual functional shape");
+      for (PetscInt d = 0; d < 3; ++d) ref_points[3 * b + d] = points[d];
+    }
+
+    PetscCall(DMGetLocalSection(dm, &lsec));
+    PetscCall(VecGetArray(local_coords, &coords));
+    PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
+    for (PetscInt cell = cStart; cell < cEnd; ++cell) {
+      PetscReal v0[3], J[9], invJ[9], detJ;
+      PetscInt  num_indices = 0, *indices = NULL;
+
+      PetscCall(DMPlexComputeCellGeometryFEM(dm, cell, NULL, v0, J, invJ, &detJ));
+      PetscCall(DMPlexGetClosureIndices(dm, lsec, lsec, cell, PETSC_TRUE, &num_indices, &indices, NULL, NULL));
+      PetscCheck(num_indices == 3 * basis->n_basis, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
+                 "Unexpected local coordinate closure size %" PetscInt_FMT " != %" PetscInt_FMT, num_indices, 3 * basis->n_basis);
+      for (PetscInt b = 0; b < basis->n_basis; ++b) {
+        const PetscReal *r = &ref_points[3 * b];
+        PetscReal        x[3];
+
+        for (PetscInt d = 0; d < 3; ++d) x[d] = v0[d] + J[0 * 3 + d] * r[0] + J[1 * 3 + d] * r[1] + J[2 * 3 + d] * r[2];
+        for (PetscInt comp = 0; comp < 3; ++comp) {
+          const PetscInt row = indices[3 * b + comp];
+
+          PetscCheck(row >= 0 && row < nloc, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
+                     "Unexpected local coordinate row %" PetscInt_FMT " outside [0,%" PetscInt_FMT ")", row, nloc);
+          coords[row] = x[comp];
+        }
+      }
+      PetscCall(DMPlexRestoreClosureIndices(dm, lsec, lsec, cell, PETSC_TRUE, &num_indices, &indices, NULL, NULL));
+    }
+    PetscCall(VecRestoreArray(local_coords, &coords));
+    PetscCall(PetscFree(ref_points));
+  }
+
+  {
+    MatNullSpace ns;
+
+    PetscCall(MatNullSpaceCreateRigidBody(local_coords, &ns));
+    PetscCall(MatSetNearNullSpace(local_mat, ns));
+    PetscCall(MatNullSpaceDestroy(&ns));
+  }
+  PetscCall(VecDestroy(&local_coords));
+  PetscCall(MatISRestoreLocalMat(A, &local_mat));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigureBDDC(PC pc, DM dm, AssemblyCtx *actx, Mat A)
+{
+  IS         dirichlet_local = NULL;
+  PetscInt   ncoords;
+  PetscReal *coords = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(BuildLocalConstrainedIS(dm, actx, &dirichlet_local));
+  PetscCall(PCBDDCSetDirichletBoundariesLocal(pc, dirichlet_local));
+  PetscCall(ISDestroy(&dirichlet_local));
+  PetscCall(BuildOwnedDofCoordinates(dm, actx->basis, &ncoords, &coords));
+  PetscCall(PCSetCoordinates(pc, 3, ncoords, coords));
+  PetscCall(PetscFree(coords));
+  PetscCall(AttachNearNullspace(dm, actx->constrained_is, A));
+  PetscCall(AttachLocalNearNullspace(dm, actx->basis, A));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A)
 {
   PC pc;
@@ -343,8 +552,9 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
     PetscCall(KSPGetPC(ksp, &pc));
     PetscCall(PCGetType(pc, &pctype));
     if (pctype) {
-      PetscBool is_gamg;
+      PetscBool is_gamg, is_bddc;
       PetscCall(PetscStrcmp(pctype, PCGAMG, &is_gamg));
+      PetscCall(PetscStrcmp(pctype, PCBDDC, &is_bddc));
       if (is_gamg) {
         PetscInt   ncoords;
         PetscReal *coords = NULL;
@@ -353,6 +563,8 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
         PetscCall(PCSetCoordinates(pc, 3, ncoords, coords));
         PetscCall(PetscFree(coords));
         PetscCall(AttachNearNullspace(dm, actx->constrained_is, A));
+      } else if (is_bddc) {
+        PetscCall(ConfigureBDDC(pc, dm, actx, A));
       }
     }
   }
