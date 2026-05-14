@@ -24,8 +24,17 @@ if [[ ! -f "$csv" ]]; then
 fi
 
 sample_rss_kb() {
-  local pgid="$1"
-  ps -o rss= -g "$pgid" 2>/dev/null | awk '{s += $1} END {print s + 0}'
+  local sid="$1"
+  ps -o rss= -s "$sid" 2>/dev/null | awk '{s += $1} END {print s + 0}'
+}
+
+kill_session() {
+  local sid="$1"
+  kill -TERM -- "-$sid" 2>/dev/null || true
+  pkill -TERM -s "$sid" 2>/dev/null || true
+  sleep 3
+  kill -KILL -- "-$sid" 2>/dev/null || true
+  pkill -KILL -s "$sid" 2>/dev/null || true
 }
 
 field_from_result() {
@@ -72,16 +81,12 @@ run_guarded() {
     if (( rss > peak_kb )); then peak_kb="$rss"; fi
     if (( rss > limit_kb )); then
       printf 'Memory guard tripped: %.3f GiB > %.3f GiB\n' "$(awk -v kb="$rss" 'BEGIN {print kb/1024/1024}')" "$MEM_LIMIT_GB" | tee -a "$log"
-      kill -TERM -- "-$pid" 2>/dev/null || true
-      sleep 3
-      kill -KILL -- "-$pid" 2>/dev/null || true
+      kill_session "$pid"
       break
     fi
     if (( TIME_LIMIT_SEC > 0 && $(date +%s) - start_sec > TIME_LIMIT_SEC )); then
       printf 'Time guard tripped: %s sec > %s sec\n' "$(( $(date +%s) - start_sec ))" "$TIME_LIMIT_SEC" | tee -a "$log"
-      kill -TERM -- "-$pid" 2>/dev/null || true
-      sleep 3
-      kill -KILL -- "-$pid" 2>/dev/null || true
+      kill_session "$pid"
       break
     fi
     sleep "$SAMPLE_INTERVAL"
