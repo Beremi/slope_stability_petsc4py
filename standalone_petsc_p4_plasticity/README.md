@@ -78,6 +78,7 @@ mpiexec -n 2 ./p4_plasticity \
 - `-bddc_local_solver_auto true`
 - `-bddc_exact_local_max_dofs 8000`
 - `-debug_bddc_dirichlet_rows`
+- `-inspect_partition` to print DMPlex/MATIS partition diagnostics and exit
 - `-use_box_mesh` for a tiny generated DMPlex tetra mesh smoke test
 - `-check_matrix_symmetry` to print an elastic `MatIsSymmetric()` check
 - `-ksp_view`
@@ -100,6 +101,18 @@ consume the workstation:
 ```bash
 MEM_LIMIT_GB=120 TIME_LIMIT_SEC=600 OMP_NUM_THREADS=1 \
   ./run_guarded_preconditioners.sh
+```
+
+The guarded runner does not force a partitioner. PETSc's MPI default is a graph
+partitioner when available; on the local PETSc build this is ParMETIS, with
+PT-Scotch also available. Use `PARTITIONER=parmetis` or `PARTITIONER=ptscotch`
+when reproducible layout comparisons are needed. Avoid `PARTITIONER=simple` for
+full BDDC/FETI-DP runs; on the P4(L1) mesh it creates much larger duplicated
+MATIS interfaces than graph partitioners. A layout-only check is cheap and safe:
+
+```bash
+mpiexec -n 16 ./p4_plasticity -pc_variant bddc -inspect_partition \
+  -petscpartitioner_type parmetis
 ```
 
 ## Model Notes
@@ -143,6 +156,20 @@ documentation describes blocked vector coordinates, PETSc 3.24 BDDC still has a
 local import check marked `TODO: support for blocked`, so BDDC/FETI-DP must use
 scalar-equation coordinates in this build. GAMG continues to use blocked
 coordinates.
+
+For BDDC/FETI-DP on more than one rank, if the user has not explicitly supplied
+`-petscpartitioner_type`, the program asks PETSc for ParMETIS when compiled in,
+falling back to PT-Scotch when available. The previous validation runner forced
+`simple`, which balanced cell counts but produced pathological high-order
+interfaces: on the P4(L1) mesh at 16 ranks, `simple` duplicated MATIS rows by
+about 1.92x with a max rank interface of 83k rows, while ParMETIS/PT-Scotch were
+about 1.06x with max interfaces near 7k rows.
+
+When BDDC local MATIS matrices exceed `-bddc_exact_local_max_dofs`, the automatic
+large-subdomain path marks Dirichlet/Neumann subsolves as approximate and uses
+HYPRE BoomerAMG when available, otherwise GAMG. Because these approximate
+subsolves are not a guaranteed CG-symmetric preconditioner, outer BDDC defaults
+to flexible GMRES unless the user explicitly sets `-ksp_type`.
 
 Current BDDC status: tiny distributed MATIS smoke tests converge with PETSc's
 local matrix graph and vertex-only defaults. The note3-style strict

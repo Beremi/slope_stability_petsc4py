@@ -35,6 +35,7 @@ typedef struct {
   PetscBool bddc_local_solver_auto;
   PetscInt  bddc_exact_local_max_dofs;
   PetscBool debug_bddc_dirichlet_rows;
+  PetscBool inspect_partition;
 } AppCtx;
 
 typedef struct {
@@ -109,6 +110,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->bddc_local_solver_auto    = PETSC_TRUE;
   app->bddc_exact_local_max_dofs = 8000;
   app->debug_bddc_dirichlet_rows = PETSC_FALSE;
+  app->inspect_partition         = PETSC_FALSE;
 
   PetscOptionsBegin(comm, NULL, "Standalone P4 plasticity options", NULL);
   PetscCall(PetscOptionsString("-mesh", "Gmsh mesh path", NULL, app->mesh, app->mesh, sizeof(app->mesh), NULL));
@@ -132,6 +134,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsBool("-bddc_local_solver_auto", "Choose scalable BDDC local/coarse solvers for large subdomains", NULL, app->bddc_local_solver_auto, &app->bddc_local_solver_auto, NULL));
   PetscCall(PetscOptionsInt("-bddc_exact_local_max_dofs", "Maximum local MATIS rows before switching BDDC subsolves away from LU", NULL, app->bddc_exact_local_max_dofs, &app->bddc_exact_local_max_dofs, NULL));
   PetscCall(PetscOptionsBool("-debug_bddc_dirichlet_rows", "Check local MATIS rows marked as BDDC Dirichlet rows", NULL, app->debug_bddc_dirichlet_rows, &app->debug_bddc_dirichlet_rows, NULL));
+  PetscCall(PetscOptionsBool("-inspect_partition", "Print DMPlex/MATIS partition diagnostics and exit before assembly", NULL, app->inspect_partition, &app->inspect_partition, NULL));
   PetscOptionsEnd();
 
   PetscCall(PetscStrcasecmp(app->variant_name, "gamg", &flg));
@@ -165,6 +168,32 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
       PetscCall(PetscStrcasecmp(app->bddc_coordinates, "none", &flg));
       PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-bddc_coordinates must be scalar, blocked, or none");
     }
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetDDPartitionerDefault(MPI_Comm comm, const AppCtx *app)
+{
+  PetscMPIInt size;
+  PetscBool   is_dd = (PetscBool)(app->variant == VARIANT_BDDC || app->variant == VARIANT_FETIDP);
+  PetscBool   user_set;
+  const char *part_type = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  if (!is_dd || size <= 1) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscOptionsHasName(NULL, NULL, "-petscpartitioner_type", &user_set));
+  if (user_set) PetscFunctionReturn(PETSC_SUCCESS);
+#if defined(PETSC_HAVE_PARMETIS)
+  part_type = "parmetis";
+#elif defined(PETSC_HAVE_PTSCOTCH)
+  part_type = "ptscotch";
+#endif
+  if (part_type) {
+    PetscCall(PetscOptionsSetValue(NULL, "-petscpartitioner_type", part_type));
+    PetscCall(PetscPrintf(comm, "BDDC/FETI-DP partitioner default: -petscpartitioner_type %s\n", part_type));
+  } else {
+    PetscCall(PetscPrintf(comm, "BDDC/FETI-DP partitioner warning: PETSc has no ParMETIS/PTScotch; using PETSc's available partitioner default\n"));
   }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -274,6 +303,126 @@ static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *app, P4Basis *basis, DM 
   if (app->variant == VARIANT_BDDC || app->variant == VARIANT_FETIDP) PetscCall(DMSetMatType(cur, MATIS));
   else PetscCall(DMSetMatType(cur, MATAIJ));
   *dm = cur;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ReportPartitionDiagnostics(DM dm, Mat A, Vec u, const AssemblyCtx *actx, const AppCtx *app)
+{
+  MPI_Comm             comm = PetscObjectComm((PetscObject)dm);
+  PetscMPIInt          size;
+  PetscPartitioner     part = NULL;
+  PetscPartitionerType part_type = NULL;
+  PetscInt             cStart, cEnd, vStart, vEnd;
+  PetscInt             local_cells, local_vertices, local_owned_rows, global_rows;
+  PetscInt             cells_sum, cells_min, cells_max, vertices_sum, vertices_min, vertices_max, owned_min, owned_max;
+  PetscInt             constraints_sum, constraints_min, constraints_max;
+  PetscBool            ismatis = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  PetscCall(DMPlexGetPartitioner(dm, &part));
+  if (part) PetscCall(PetscPartitionerGetType(part, &part_type));
+  PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
+  PetscCall(DMPlexGetDepthStratum(dm, 0, &vStart, &vEnd));
+  local_cells    = cEnd - cStart;
+  local_vertices = vEnd - vStart;
+  PetscCall(VecGetLocalSize(u, &local_owned_rows));
+  PetscCall(VecGetSize(u, &global_rows));
+
+  PetscCallMPI(MPI_Allreduce(&local_cells, &cells_sum, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&local_cells, &cells_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&local_cells, &cells_max, 1, MPIU_INT, MPI_MAX, comm));
+  PetscCallMPI(MPI_Allreduce(&local_vertices, &vertices_sum, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&local_vertices, &vertices_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&local_vertices, &vertices_max, 1, MPIU_INT, MPI_MAX, comm));
+  PetscCallMPI(MPI_Allreduce(&local_owned_rows, &owned_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&local_owned_rows, &owned_max, 1, MPIU_INT, MPI_MAX, comm));
+  PetscCallMPI(MPI_Allreduce(&actx->n_constrained_local, &constraints_sum, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&actx->n_constrained_local, &constraints_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&actx->n_constrained_local, &constraints_max, 1, MPIU_INT, MPI_MAX, comm));
+
+  PetscCall(PetscPrintf(comm,
+                        "PARTITION_RESULT kind=dm partitioner=%s ranks=%d variant=%s mesh=%s%s refine_levels=%" PetscInt_FMT " cells_sum=%" PetscInt_FMT " cells_min=%" PetscInt_FMT " cells_max=%" PetscInt_FMT " cell_imbalance=%.6g vertices_sum=%" PetscInt_FMT " vertices_min=%" PetscInt_FMT " vertices_max=%" PetscInt_FMT " owned_rows_min=%" PetscInt_FMT " owned_rows_max=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " owned_constraints_sum=%" PetscInt_FMT " owned_constraints_min=%" PetscInt_FMT " owned_constraints_max=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT "\n",
+                        part_type ? part_type : "unknown", size, app->variant_name, app->use_box_mesh ? "generated-box:" : "", app->use_box_mesh ? "unit" : app->mesh, app->refine_levels,
+                        cells_sum, cells_min, cells_max, cells_sum ? ((double)cells_max * (double)size) / (double)cells_sum : 0.0, vertices_sum, vertices_min, vertices_max, owned_min, owned_max, global_rows,
+                        constraints_sum, constraints_min, constraints_max, actx->n_constrained_all));
+
+  PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &ismatis));
+  if (ismatis) {
+    Mat                    local_mat = NULL;
+    ISLocalToGlobalMapping mapping = NULL;
+    PetscInt               local_matis_rows, matis_rows_sum, matis_rows_min, matis_rows_max;
+    PetscInt               map_rows, map_rows_min, map_rows_max, map_bs;
+    PetscInt               n_neighs = 0, *neighs = NULL, *n_shared = NULL, **shared = NULL;
+    PetscMPIInt            rank;
+    PetscBool             *is_interface = NULL;
+    PetscInt               interface_rows = 0, interface_rows_sum, interface_rows_min, interface_rows_max;
+    PetscInt               remote_neighbors = 0, remote_neighbors_sum, remote_neighbors_min, remote_neighbors_max;
+    PetscInt               shared_entries = 0, shared_entries_sum, shared_entries_min, shared_entries_max, max_shared_with_neighbor = 0, global_max_shared_with_neighbor;
+    PetscInt               nblocks = 0, block_min = PETSC_MAX_INT, block_max = 0, block_sum = 0, block_sum_total, blocks_min, blocks_max, global_block_min, global_block_max;
+    const PetscInt        *bsizes = NULL;
+
+    PetscCallMPI(MPI_Comm_rank(comm, &rank));
+    PetscCall(MatISGetLocalMat(A, &local_mat));
+    PetscCall(MatGetSize(local_mat, &local_matis_rows, NULL));
+    PetscCall(MatGetVariableBlockSizes(local_mat, &nblocks, &bsizes));
+    for (PetscInt b = 0; b < nblocks; ++b) {
+      block_min = PetscMin(block_min, bsizes[b]);
+      block_max = PetscMax(block_max, bsizes[b]);
+      block_sum += bsizes[b];
+    }
+    if (!nblocks) block_min = 0;
+    PetscCall(MatISRestoreLocalMat(A, &local_mat));
+    PetscCall(MatISGetLocalToGlobalMapping(A, &mapping, NULL));
+    PetscCall(ISLocalToGlobalMappingGetSize(mapping, &map_rows));
+    PetscCall(ISLocalToGlobalMappingGetBlockSize(mapping, &map_bs));
+    PetscCall(PetscCalloc1(map_rows, &is_interface));
+    PetscCall(ISLocalToGlobalMappingGetInfo(mapping, &n_neighs, &neighs, &n_shared, &shared));
+    for (PetscInt n = 0; n < n_neighs; ++n) {
+      if (neighs[n] == rank) continue;
+      ++remote_neighbors;
+      shared_entries += n_shared[n];
+      max_shared_with_neighbor = PetscMax(max_shared_with_neighbor, n_shared[n]);
+      for (PetscInt j = 0; j < n_shared[n]; ++j) {
+        const PetscInt row = shared[n][j];
+
+        PetscCheck(row >= 0 && row < map_rows, comm, PETSC_ERR_PLIB, "Shared local row %" PetscInt_FMT " outside [0,%" PetscInt_FMT ")", row, map_rows);
+        is_interface[row] = PETSC_TRUE;
+      }
+    }
+    PetscCall(ISLocalToGlobalMappingRestoreInfo(mapping, &n_neighs, &neighs, &n_shared, &shared));
+    for (PetscInt r = 0; r < map_rows; ++r)
+      if (is_interface[r]) ++interface_rows;
+    PetscCall(PetscFree(is_interface));
+
+    PetscCallMPI(MPI_Allreduce(&local_matis_rows, &matis_rows_sum, 1, MPIU_INT, MPI_SUM, comm));
+    PetscCallMPI(MPI_Allreduce(&local_matis_rows, &matis_rows_min, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&local_matis_rows, &matis_rows_max, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&map_rows, &map_rows_min, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&map_rows, &map_rows_max, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&interface_rows, &interface_rows_sum, 1, MPIU_INT, MPI_SUM, comm));
+    PetscCallMPI(MPI_Allreduce(&interface_rows, &interface_rows_min, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&interface_rows, &interface_rows_max, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&remote_neighbors, &remote_neighbors_sum, 1, MPIU_INT, MPI_SUM, comm));
+    PetscCallMPI(MPI_Allreduce(&remote_neighbors, &remote_neighbors_min, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&remote_neighbors, &remote_neighbors_max, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&shared_entries, &shared_entries_sum, 1, MPIU_INT, MPI_SUM, comm));
+    PetscCallMPI(MPI_Allreduce(&shared_entries, &shared_entries_min, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&shared_entries, &shared_entries_max, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&max_shared_with_neighbor, &global_max_shared_with_neighbor, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&nblocks, &blocks_min, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&nblocks, &blocks_max, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&block_min, &global_block_min, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&block_max, &global_block_max, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCallMPI(MPI_Allreduce(&block_sum, &block_sum_total, 1, MPIU_INT, MPI_SUM, comm));
+
+    PetscCall(PetscPrintf(comm,
+                          "PARTITION_RESULT kind=matis partitioner=%s ranks=%d variant=%s matis_rows_sum=%" PetscInt_FMT " matis_rows_min=%" PetscInt_FMT " matis_rows_max=%" PetscInt_FMT " matis_row_imbalance=%.6g matis_duplication=%.6g map_rows_min=%" PetscInt_FMT " map_rows_max=%" PetscInt_FMT " map_ltog_bs=%" PetscInt_FMT " interface_rows_sum=%" PetscInt_FMT " interface_rows_min=%" PetscInt_FMT " interface_rows_max=%" PetscInt_FMT " remote_neighbors_sum=%" PetscInt_FMT " remote_neighbors_min=%" PetscInt_FMT " remote_neighbors_max=%" PetscInt_FMT " shared_entries_sum=%" PetscInt_FMT " shared_entries_min=%" PetscInt_FMT " shared_entries_max=%" PetscInt_FMT " max_shared_with_neighbor=%" PetscInt_FMT " variable_blocks_min=%" PetscInt_FMT " variable_blocks_max=%" PetscInt_FMT " variable_block_size_min=%" PetscInt_FMT " variable_block_size_max=%" PetscInt_FMT " variable_block_size_local_sum=%" PetscInt_FMT "\n",
+                          part_type ? part_type : "unknown", size, app->variant_name, matis_rows_sum, matis_rows_min, matis_rows_max,
+                          matis_rows_sum ? ((double)matis_rows_max * (double)size) / (double)matis_rows_sum : 0.0, global_rows ? (double)matis_rows_sum / (double)global_rows : 0.0, map_rows_min, map_rows_max,
+                          map_bs, interface_rows_sum, interface_rows_min, interface_rows_max, remote_neighbors_sum, remote_neighbors_min, remote_neighbors_max, shared_entries_sum, shared_entries_min,
+                          shared_entries_max, global_max_shared_with_neighbor, blocks_min, blocks_max, global_block_min, global_block_max, block_sum_total));
+  }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -635,10 +784,18 @@ static PetscErrorCode ConfigureBDDCAutoSolvers(AppCtx *app, Mat A, const char pr
 #endif
   PetscCall(SetPrefixedDefault(prefix, "dirichlet_ksp_type", "preonly"));
   PetscCall(SetPrefixedDefault(prefix, "dirichlet_pc_type", pc_type));
+  PetscCall(SetPrefixedDefault(prefix, "dirichlet_approximate", "true"));
   PetscCall(SetPrefixedDefault(prefix, "neumann_ksp_type", "preonly"));
   PetscCall(SetPrefixedDefault(prefix, "neumann_pc_type", pc_type));
+  PetscCall(SetPrefixedDefault(prefix, "neumann_approximate", "true"));
   PetscCall(SetPrefixedDefault(prefix, "coarse_ksp_type", "preonly"));
   PetscCall(SetPrefixedDefault(prefix, "coarse_pc_type", pc_type));
+  {
+    PetscBool outer_bddc;
+
+    PetscCall(PetscStrcmp(prefix, "pc_bddc_", &outer_bddc));
+    if (outer_bddc) PetscCall(SetDefaultOption("-ksp_type", "fgmres"));
+  }
 #if defined(PETSC_HAVE_HYPRE)
   PetscCall(SetPrefixedDefault(prefix, "dirichlet_pc_hypre_type", "boomeramg"));
   PetscCall(SetPrefixedDefault(prefix, "dirichlet_pc_hypre_boomeramg_max_iter", "1"));
@@ -1446,6 +1603,7 @@ int main(int argc, char **argv)
   PetscCall(PetscInitialize(&argc, &argv, NULL, "Standalone pure PETSc P4 plasticity case\n"));
   PetscCall(PetscTime(&t_start));
   PetscCall(ParseOptions(PETSC_COMM_WORLD, &app));
+  PetscCall(SetDDPartitionerDefault(PETSC_COMM_WORLD, &app));
   PetscCall(P4BasisCreate(PETSC_COMM_SELF, &basis));
   PetscCall(CreateMesh(PETSC_COMM_WORLD, &app, &basis, &dm));
   PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
@@ -1462,6 +1620,17 @@ int main(int argc, char **argv)
   PetscCall(PetscPrintf(PETSC_COMM_WORLD,
                         "mesh=%s%s refine_levels=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " local_dofs=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " P4_basis=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " pc_variant=%s lambda=%.6g\n",
                         app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, cEnd - cStart, nEnd - nStart, local_dofs, global_dofs, basis.n_basis, actx.n_constrained_local, actx.n_constrained_all, app.variant_name, (double)app.lambda));
+  if (app.inspect_partition) {
+    PetscCall(ReportPartitionDiagnostics(dm, A, u, &actx, &app));
+    PetscCall(AssemblyCtxDestroy(&actx));
+    PetscCall(VecDestroy(&f_ext));
+    PetscCall(VecDestroy(&u));
+    PetscCall(MatDestroy(&A));
+    PetscCall(DMDestroy(&dm));
+    PetscCall(P4BasisDestroy(&basis));
+    PetscCall(PetscFinalize());
+    return 0;
+  }
 
   PetscCall(PetscTime(&t0));
   PetscCall(AssembleElasticProblem(&actx, A, f_ext));
@@ -1496,11 +1665,15 @@ int main(int argc, char **argv)
   PetscCall(PetscPrintf(PETSC_COMM_WORLD, "final displacement_norm=%.8e total_wall_time=%.6g\n", (double)u_norm, (double)(t_end - t_start)));
   {
     PetscMPIInt size;
+    PetscPartitioner     part = NULL;
+    PetscPartitionerType part_type = NULL;
 
     PetscCallMPI(MPI_Comm_size(PETSC_COMM_WORLD, &size));
+    PetscCall(DMPlexGetPartitioner(dm, &part));
+    if (part) PetscCall(PetscPartitionerGetType(part, &part_type));
     PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                          "RESULT variant=%s ranks=%d global_dofs=%" PetscInt_FMT " elastic_its=%" PetscInt_FMT " newton_its=%" PetscInt_FMT " newton_linear_its=%" PetscInt_FMT " total_linear_its=%" PetscInt_FMT " elastic_assembly_time=%.6g elastic_solve_time=%.6g newton_assembly_time=%.6g newton_solve_time=%.6g wall_time=%.6g final_rel=%.6e\n",
-                          app.variant_name, size, global_dofs, elastic_its, newton_stats.newton_its, newton_stats.total_linear_its, elastic_its + newton_stats.total_linear_its,
+                          "RESULT variant=%s ranks=%d partitioner=%s global_dofs=%" PetscInt_FMT " elastic_its=%" PetscInt_FMT " newton_its=%" PetscInt_FMT " newton_linear_its=%" PetscInt_FMT " total_linear_its=%" PetscInt_FMT " elastic_assembly_time=%.6g elastic_solve_time=%.6g newton_assembly_time=%.6g newton_solve_time=%.6g wall_time=%.6g final_rel=%.6e\n",
+                          app.variant_name, size, part_type ? part_type : "unknown", global_dofs, elastic_its, newton_stats.newton_its, newton_stats.total_linear_its, elastic_its + newton_stats.total_linear_its,
                           (double)elastic_assembly_time, (double)elastic_solve_time, (double)newton_stats.assembly_time, (double)newton_stats.solve_time, (double)(t_end - t_start),
                           (double)newton_stats.final_rel));
   }
