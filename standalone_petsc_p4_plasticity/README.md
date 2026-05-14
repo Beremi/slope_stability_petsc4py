@@ -2,8 +2,9 @@
 
 This directory is an extracted C/PETSc-only test case for the heterogenous 3D
 P4(L1) slope mesh. It intentionally avoids petsc4py, Python package imports,
-continuation logic, PMG, NUMA/GASM experiments, plotting, and repo-local solver
-abstractions.
+continuation logic, NUMA/GASM experiments, plotting, and repo-local solver
+abstractions. The only multigrid hierarchy kept here is the self-contained
+PETSc `PCMG` P4 -> P2 -> P1 preconditioner used by `-pc_variant pmg`.
 
 The program reads `data/adaptive_family_a_l1.msh` with `DMPlexCreateFromFile`,
 adds a 3-component degree-4 Lagrange FE space, creates PETSc-owned matrices and
@@ -29,6 +30,7 @@ PETSC_DIR=$PWD/.build/src/petsc-3.24.5 PETSC_ARCH=linux-c-opt \
 cd standalone_petsc_p4_plasticity
 mpiexec -n 1 ./p4_plasticity -pc_variant gamg -refine_levels 0
 mpiexec -n 4 ./p4_plasticity -pc_variant gamg -refine_levels 0
+mpiexec -n 4 ./p4_plasticity -pc_variant pmg -refine_levels 0
 mpiexec -n 4 ./p4_plasticity -pc_variant bddc -refine_levels 0
 mpiexec -n 4 ./p4_plasticity -pc_variant fetidp -refine_levels 0
 ```
@@ -64,7 +66,15 @@ mpiexec -n 2 ./p4_plasticity \
 - `-newton_rtol 1e-4`
 - `-newton_max_it 20`
 - `-linear_rtol 1e-8`
-- `-pc_variant gamg|bddc|fetidp|none`
+- `-pc_variant gamg|pmg|bddc|fetidp|none`
+- `-pmg_coarse_pc_type auto|hypre|gamg|lu`
+- `-pmg_coarse_lu_max_dofs 50000`
+- `-pmg_smoother_ksp_type chebyshev`
+- `-pmg_smoother_pc_type jacobi`
+- `-pmg_smoother_max_it 2`
+- `-bddc_graph petsc|topology`
+- `-bddc_local_solver_auto true`
+- `-bddc_exact_local_max_dofs 8000`
 - `-use_box_mesh` for a tiny generated DMPlex tetra mesh smoke test
 - `-check_matrix_symmetry` to print an elastic `MatIsSymmetric()` check
 - `-ksp_view`
@@ -74,8 +84,17 @@ Option files are provided in `options/`:
 
 ```bash
 mpiexec -n 4 ./p4_plasticity -options_file options/gamg.opts
+mpiexec -n 4 ./p4_plasticity -options_file options/pmg.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/bddc.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/fetidp.opts
+```
+
+For full comparisons, use the guarded runner so failed PETSc setup paths do not
+consume the workstation:
+
+```bash
+MEM_LIMIT_GB=120 TIME_LIMIT_SEC=600 OMP_NUM_THREADS=1 \
+  ./run_guarded_preconditioners.sh
 ```
 
 ## Model Notes
@@ -106,18 +125,25 @@ constrained vector entries, but the solve path does not call
 
 The GAMG variant attaches six projected rigid-body-like near-nullspace vectors
 with constrained entries zeroed and supplies owned P4 block coordinates to
-PETSc. The BDDC path supplies PETSc's MATIS solver with local Dirichlet
-boundaries, global and local rigid-body near-nullspace data, and per-scalar-dof
-coordinates for PETSc's BDDC corner-selection code. BDDC and FETI-DP remain
-PETSc-native runtime variants over MATIS; if this PETSc build rejects a setup,
-the PETSc error is left visible so the small case can be discussed with PETSc
-experts.
+PETSc. The PMG variant builds same-mesh P1, P2, and P4 DMs, evaluates coarse FE
+basis functions at fine dual points to form P1 -> P2 and P2 -> P4 interpolation,
+and lets PETSc build Galerkin operators inside `PCMG`.
 
-Current BDDC status: tiny distributed MATIS smoke tests converge, but the full
-P4(L1) mesh is still blocked in PETSc BDDC setup. With PETSc's default local
-matrix graph, the 16-rank full mesh can crash inside PETSc during setup. With
-`-pc_bddc_use_local_mat_graph false`, face-only constraints set up cheaply but
-are too weak for elasticity, while edge plus near-nullspace constraints avoid
-the crash but spend minutes and tens to hundreds of GiB in coarse-space setup
-without reaching Krylov iterations. Treat BDDC/FETI-DP full-mesh numbers as
-diagnostic until that PETSc BDDC coarse-space issue is resolved.
+The BDDC path supplies PETSc's MATIS solver with local Dirichlet boundaries,
+component-wise local dof splitting, global and local rigid-body near-nullspace
+data, and scalable default subsolvers for large local MATIS matrices. FETI-DP
+configures its internal BDDC object explicitly; PETSc 3.24 expects the inner
+BDDC options as `-fetidp_bddc_pc_bddc_*`. Although public `PCSetCoordinates()`
+documentation describes blocked vector coordinates, PETSc 3.24 BDDC still has a
+local import check marked `TODO: support for blocked`, so BDDC/FETI-DP must use
+scalar-equation coordinates in this build. GAMG continues to use blocked
+coordinates.
+
+Current BDDC status: tiny distributed MATIS smoke tests converge with PETSc's
+local matrix graph and vertex-only defaults. The experimental
+`-bddc_graph topology` P4 nearest-neighbor graph is available but still fails
+the tiny distributed BDDC check with `DIVERGED_PC_FAILED`, so it is not the
+default. On the full P4(L1) mesh, PETSc BDDC/FETI-DP setup still remains too
+expensive or produces an indefinite preconditioner under the 120 GiB guarded
+validation runs. Those PETSc failures are left visible rather than hidden behind
+fallbacks.
