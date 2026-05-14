@@ -15,9 +15,11 @@ typedef struct {
   PetscReal pressure;
   PetscReal gravity;
   char      variant[32];
+  char      mesh_bc_mode[32];
   char      mesh[PETSC_MAX_PATH_LEN];
   PetscBool use_mesh;
   PetscBool configure_bddc_metadata;
+  PetscBool inspect_layout;
 } AppCtx;
 
 enum {
@@ -97,8 +99,10 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, AppCtx *app)
   app->gravity  = 0.0;
   app->use_mesh = PETSC_FALSE;
   app->configure_bddc_metadata = PETSC_FALSE;
+  app->inspect_layout           = PETSC_FALSE;
   app->mesh[0]  = '\0';
   PetscCall(PetscStrncpy(app->variant, "gamg", sizeof(app->variant)));
+  PetscCall(PetscStrncpy(app->mesh_bc_mode, "rollers", sizeof(app->mesh_bc_mode)));
 
   PetscOptionsBegin(comm, NULL, "P4 elasticity options", NULL);
   PetscCall(PetscOptionsString("-mesh", "Optional mesh file to read with DMPlexCreateFromFile", NULL, app->mesh, app->mesh, sizeof(app->mesh), &meshSet));
@@ -110,7 +114,9 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsReal("-pressure", "Downward top traction magnitude for generated cube", NULL, app->pressure, &app->pressure, &pressureSet));
   PetscCall(PetscOptionsReal("-gravity", "Downward body force in the mesh vertical y-direction", NULL, app->gravity, &app->gravity, &gravitySet));
   PetscCall(PetscOptionsString("-pc_variant", "gamg|bddc|fetidp|none", NULL, app->variant, app->variant, sizeof(app->variant), NULL));
+  PetscCall(PetscOptionsString("-mesh_bc_mode", "For -mesh: rollers|base_only|full_sides", NULL, app->mesh_bc_mode, app->mesh_bc_mode, sizeof(app->mesh_bc_mode), NULL));
   PetscCall(PetscOptionsBool("-configure_bddc_metadata", "Experimental local Dirichlet/splitting metadata for PCBDDC/KSPFETIDP", NULL, app->configure_bddc_metadata, &app->configure_bddc_metadata, NULL));
+  PetscCall(PetscOptionsBool("-inspect_layout", "Print constrained section/MATIS layout diagnostics and exit", NULL, app->inspect_layout, &app->inspect_layout, NULL));
   PetscOptionsEnd();
 
   app->use_mesh = (PetscBool)(meshSet && app->mesh[0]);
@@ -119,6 +125,13 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, AppCtx *app)
   for (PetscInt d = 0; d < 3; ++d) PetscCheck(app->faces[d] > 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-cube_faces entries must be positive");
   PetscCheck(app->degree >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-degree must be >= 1");
   PetscCheck(app->poisson > -1.0 && app->poisson < 0.5, comm, PETSC_ERR_ARG_OUTOFRANGE, "-poisson must lie in (-1,0.5)");
+  if (app->use_mesh) {
+    PetscBool isRollers, isBaseOnly, isFullSides;
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &isRollers));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "base_only", &isBaseOnly));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "full_sides", &isFullSides));
+    PetscCheck(isRollers || isBaseOnly || isFullSides, comm, PETSC_ERR_ARG_WRONG, "-mesh_bc_mode must be rollers, base_only, or full_sides");
+  }
   g_mu       = app->young / (2.0 * (1.0 + app->poisson));
   g_lambda   = app->young * app->poisson / ((1.0 + app->poisson) * (1.0 - 2.0 * app->poisson));
   g_pressure = app->pressure;
@@ -284,10 +297,21 @@ static PetscErrorCode SetupDiscretization(DM dm, const AppCtx *app)
   if (app->use_mesh) {
     const PetscInt base = MARKER_BASE, xRollers[2] = {MARKER_X_MIN, MARKER_X_MAX}, zRollers[2] = {MARKER_Z_MIN, MARKER_Z_MAX};
     const PetscInt xComp[1] = {0}, zComp[1] = {2};
+    PetscBool      isRollers, isBaseOnly, isFullSides;
 
     PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "glued_base", label, 1, &base, 0, 3, components, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
-    PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "x_side_rollers", label, 2, xRollers, 0, 1, xComp, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
-    PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "z_side_rollers", label, 2, zRollers, 0, 1, zComp, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &isRollers));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "base_only", &isBaseOnly));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "full_sides", &isFullSides));
+    if (isRollers) {
+      PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "x_side_rollers", label, 2, xRollers, 0, 1, xComp, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+      PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "z_side_rollers", label, 2, zRollers, 0, 1, zComp, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+    } else if (isFullSides) {
+      PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "x_side_clamps", label, 2, xRollers, 0, 3, components, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+      PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "z_side_clamps", label, 2, zRollers, 0, 3, components, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+    } else {
+      PetscCheck(isBaseOnly, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONG, "Unknown -mesh_bc_mode %s", app->mesh_bc_mode);
+    }
   } else {
     const PetscInt bottom = MARKER_Z_MIN, top = MARKER_Z_MAX;
 
@@ -401,11 +425,25 @@ static PetscErrorCode BuildLocalDirichletIS(DM dm, const AppCtx *app, IS *dirich
   PetscCheck(label, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE, "Missing marker label");
 
   if (app->use_mesh) {
+    PetscBool isRollers, isBaseOnly, isFullSides;
+
     PetscCall(AppendConstrainedStratum(label, section, MARKER_BASE, 3, allComponents, &nidx, &cap, &idx));
-    PetscCall(AppendConstrainedStratum(label, section, MARKER_X_MIN, 1, xComponent, &nidx, &cap, &idx));
-    PetscCall(AppendConstrainedStratum(label, section, MARKER_X_MAX, 1, xComponent, &nidx, &cap, &idx));
-    PetscCall(AppendConstrainedStratum(label, section, MARKER_Z_MIN, 1, zComponent, &nidx, &cap, &idx));
-    PetscCall(AppendConstrainedStratum(label, section, MARKER_Z_MAX, 1, zComponent, &nidx, &cap, &idx));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &isRollers));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "base_only", &isBaseOnly));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "full_sides", &isFullSides));
+    if (isRollers) {
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_X_MIN, 1, xComponent, &nidx, &cap, &idx));
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_X_MAX, 1, xComponent, &nidx, &cap, &idx));
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_Z_MIN, 1, zComponent, &nidx, &cap, &idx));
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_Z_MAX, 1, zComponent, &nidx, &cap, &idx));
+    } else if (isFullSides) {
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_X_MIN, 3, allComponents, &nidx, &cap, &idx));
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_X_MAX, 3, allComponents, &nidx, &cap, &idx));
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_Z_MIN, 3, allComponents, &nidx, &cap, &idx));
+      PetscCall(AppendConstrainedStratum(label, section, MARKER_Z_MAX, 3, allComponents, &nidx, &cap, &idx));
+    } else {
+      PetscCheck(isBaseOnly, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONG, "Unknown -mesh_bc_mode %s", app->mesh_bc_mode);
+    }
   } else {
     PetscCall(AppendConstrainedStratum(label, section, MARKER_Z_MIN, 3, allComponents, &nidx, &cap, &idx));
   }
@@ -415,26 +453,104 @@ static PetscErrorCode BuildLocalDirichletIS(DM dm, const AppCtx *app, IS *dirich
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode SetBDDCDofSplittingLocal(PC pc, Mat A)
+static PetscErrorCode BuildGlobalComponentMap(DM dm, PetscInt *ngids, PetscInt **gids, PetscInt **comps)
 {
-  PetscBool ismatis = PETSC_FALSE;
-  Mat       localMat = NULL;
-  IS        fields[3] = {NULL, NULL, NULL};
-  PetscInt  nloc;
+  PetscSection section, sectionGlobal;
+  PetscInt     pStart, pEnd, n = 0, cap = 0, *gid = NULL, *comp = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLocalSection(dm, &section));
+  PetscCall(DMGetGlobalSection(dm, &sectionGlobal));
+  PetscCall(PetscSectionGetChart(section, &pStart, &pEnd));
+  for (PetscInt p = pStart; p < pEnd; ++p) {
+    const PetscInt *cdofs = NULL;
+    PetscInt        dof, cdof, off, cind = 0;
+
+    PetscCall(PetscSectionGetDof(section, p, &dof));
+    if (!dof) continue;
+    PetscCheck(dof % 3 == 0, PETSC_COMM_SELF, PETSC_ERR_PLIB, "Expected vector dofs in blocks of 3 on point %" PetscInt_FMT, p);
+    PetscCall(PetscSectionGetConstraintDof(section, p, &cdof));
+    PetscCall(PetscSectionGetConstraintIndices(section, p, &cdofs));
+    PetscCall(PetscSectionGetOffset(sectionGlobal, p, &off));
+    for (PetscInt c = 0; c < dof; ++c) {
+      if (cind < cdof && c == cdofs[cind]) {
+        ++cind;
+        continue;
+      }
+      if (n == cap) {
+        cap = cap ? 2 * cap : 1024;
+        PetscCall(PetscRealloc((size_t)cap * sizeof(PetscInt), &gid));
+        PetscCall(PetscRealloc((size_t)cap * sizeof(PetscInt), &comp));
+      }
+      gid[n]    = (off < 0 ? -(off + 1) : off) + c - cind;
+      comp[n++] = c % 3;
+    }
+  }
+
+  PetscCall(PetscSortIntWithArray(n, gid, comp));
+  if (n) {
+    PetscInt w = 1;
+
+    for (PetscInt r = 1; r < n; ++r) {
+      if (gid[r] == gid[w - 1]) {
+        PetscCheck(comp[r] == comp[w - 1], PETSC_COMM_SELF, PETSC_ERR_PLIB, "Global dof %" PetscInt_FMT " was assigned components %" PetscInt_FMT " and %" PetscInt_FMT, gid[r], comp[w - 1], comp[r]);
+        continue;
+      }
+      gid[w]  = gid[r];
+      comp[w] = comp[r];
+      ++w;
+    }
+    n = w;
+  }
+
+  *ngids = n;
+  *gids  = gid;
+  *comps = comp;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetBDDCDofSplittingLocal(PC pc, DM dm, Mat A)
+{
+  PetscBool                ismatis = PETSC_FALSE;
+  Mat                      localMat = NULL;
+  ISLocalToGlobalMapping   rmap;
+  const PetscInt          *ridx;
+  IS                       fields[3] = {NULL, NULL, NULL};
+  PetscInt                 nloc, nrows, ngids, *gids = NULL, *comps = NULL;
+  PetscInt                 nfield[3] = {0, 0, 0};
+  PetscInt                *fieldIdx[3] = {NULL, NULL, NULL};
 
   PetscFunctionBeginUser;
   PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &ismatis));
   if (!ismatis) PetscFunctionReturn(PETSC_SUCCESS);
   PetscCall(MatISGetLocalMat(A, &localMat));
-  PetscCall(MatGetSize(localMat, &nloc, NULL));
-  if (nloc % 3) {
-    PetscCall(MatISRestoreLocalMat(A, &localMat));
-    PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(MatGetSize(localMat, &nrows, NULL));
+  PetscCall(MatISRestoreLocalMat(A, &localMat));
+  PetscCall(MatISGetLocalToGlobalMapping(A, &rmap, NULL));
+  PetscCall(ISLocalToGlobalMappingGetSize(rmap, &nloc));
+  PetscCheck(nloc == nrows, PETSC_COMM_SELF, PETSC_ERR_PLIB, "MATIS local map size %" PetscInt_FMT " differs from local matrix rows %" PetscInt_FMT, nloc, nrows);
+
+  PetscCall(BuildGlobalComponentMap(dm, &ngids, &gids, &comps));
+  PetscCall(PetscMalloc3(nloc, &fieldIdx[0], nloc, &fieldIdx[1], nloc, &fieldIdx[2]));
+  PetscCall(ISLocalToGlobalMappingGetIndices(rmap, &ridx));
+  for (PetscInt i = 0; i < nloc; ++i) {
+    PetscInt loc, comp;
+
+    PetscCheck(ridx[i] >= 0, PETSC_COMM_SELF, PETSC_ERR_PLIB, "MATIS cleaned local-to-global map contains negative index %" PetscInt_FMT, ridx[i]);
+    PetscCall(PetscFindInt(ridx[i], ngids, gids, &loc));
+    PetscCheck(loc >= 0, PETSC_COMM_SELF, PETSC_ERR_PLIB, "Could not recover displacement component for MATIS local row %" PetscInt_FMT " global dof %" PetscInt_FMT, i, ridx[i]);
+    comp = comps[loc];
+    PetscCheck(comp >= 0 && comp < 3, PETSC_COMM_SELF, PETSC_ERR_PLIB, "Invalid component %" PetscInt_FMT " for MATIS local row %" PetscInt_FMT, comp, i);
+    fieldIdx[comp][nfield[comp]++] = i;
   }
-  for (PetscInt comp = 0; comp < 3; ++comp) PetscCall(ISCreateStride(PETSC_COMM_SELF, nloc / 3, comp, 3, &fields[comp]));
+  PetscCall(ISLocalToGlobalMappingRestoreIndices(rmap, &ridx));
+
+  for (PetscInt comp = 0; comp < 3; ++comp) PetscCall(ISCreateGeneral(PETSC_COMM_SELF, nfield[comp], fieldIdx[comp], PETSC_COPY_VALUES, &fields[comp]));
   PetscCall(PCBDDCSetDofsSplittingLocal(pc, 3, fields));
   for (PetscInt comp = 0; comp < 3; ++comp) PetscCall(ISDestroy(&fields[comp]));
-  PetscCall(MatISRestoreLocalMat(A, &localMat));
+  PetscCall(PetscFree3(fieldIdx[0], fieldIdx[1], fieldIdx[2]));
+  PetscCall(PetscFree(gids));
+  PetscCall(PetscFree(comps));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -447,7 +563,14 @@ static PetscErrorCode ConfigureBDDCMetadata(PC pc, DM dm, const AppCtx *app, Mat
   PetscCall(BuildLocalDirichletIS(dm, app, &dirichlet));
   PetscCall(PCBDDCSetDirichletBoundariesLocal(pc, dirichlet));
   PetscCall(ISDestroy(&dirichlet));
-  PetscCall(SetBDDCDofSplittingLocal(pc, A));
+  PetscCall(SetBDDCDofSplittingLocal(pc, dm, A));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigureBDDCComponentSplitting(PC pc, DM dm, Mat A)
+{
+  PetscFunctionBeginUser;
+  PetscCall(SetBDDCDofSplittingLocal(pc, dm, A));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -459,6 +582,101 @@ static PetscErrorCode ConfigureFETIDPMetadata(KSP ksp, DM dm, const AppCtx *app,
   PetscCall(KSPFETIDPGetInnerBDDC(ksp, &inner));
   PetscCall(ConfigureBDDCMetadata(inner, dm, app, A));
   PetscCall(KSPFETIDPSetInnerBDDC(ksp, inner));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigureFETIDPComponentSplitting(KSP ksp, DM dm, Mat A)
+{
+  PC inner = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(KSPFETIDPGetInnerBDDC(ksp, &inner));
+  PetscCall(ConfigureBDDCComponentSplitting(inner, dm, A));
+  PetscCall(KSPFETIDPSetInnerBDDC(ksp, inner));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app)
+{
+  MPI_Comm                 comm = PetscObjectComm((PetscObject)dm);
+  PetscSection             section;
+  ISLocalToGlobalMapping   ltog;
+  PetscBool                ismatis = PETSC_FALSE;
+  PetscMPIInt              ranks;
+  PetscInt                 pStart, pEnd, localStorage, localUnconstrained, matRowsLocal, matRowsGlobal;
+  PetscInt                 dofPts = 0, partialPts = 0, fullConstraintPts = 0, cdofTotal = 0, ccomp[3] = {0, 0, 0};
+  PetscInt                 sumLocalStorage, sumLocalUnconstrained, sumDofPts, sumPartialPts, sumFullConstraintPts, sumCdofTotal, sumCcomp[3];
+  PetscInt                 minMatRows, maxMatRows, dmBlockSize;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &ranks));
+  PetscCall(DMGetLocalSection(dm, &section));
+  PetscCall(PetscSectionGetChart(section, &pStart, &pEnd));
+  PetscCall(PetscSectionGetStorageSize(section, &localStorage));
+  PetscCall(PetscSectionGetConstrainedStorageSize(section, &localUnconstrained));
+  PetscCall(MatGetLocalSize(A, &matRowsLocal, NULL));
+  PetscCall(MatGetSize(A, &matRowsGlobal, NULL));
+  PetscCall(DMGetLocalToGlobalMapping(dm, &ltog));
+  PetscCall(ISLocalToGlobalMappingGetBlockSize(ltog, &dmBlockSize));
+
+  for (PetscInt p = pStart; p < pEnd; ++p) {
+    const PetscInt *cdofs = NULL;
+    PetscInt        dof, cdof;
+
+    PetscCall(PetscSectionGetDof(section, p, &dof));
+    if (!dof) continue;
+    PetscCall(PetscSectionGetConstraintDof(section, p, &cdof));
+    PetscCall(PetscSectionGetConstraintIndices(section, p, &cdofs));
+    ++dofPts;
+    cdofTotal += cdof;
+    if (cdof && cdof < dof) ++partialPts;
+    if (cdof == dof) ++fullConstraintPts;
+    for (PetscInt i = 0; i < cdof; ++i) ccomp[cdofs[i] % 3]++;
+  }
+
+  PetscCallMPI(MPI_Allreduce(&localStorage, &sumLocalStorage, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&localUnconstrained, &sumLocalUnconstrained, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&dofPts, &sumDofPts, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&partialPts, &sumPartialPts, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&fullConstraintPts, &sumFullConstraintPts, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&cdofTotal, &sumCdofTotal, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(ccomp, sumCcomp, 3, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&matRowsLocal, &minMatRows, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&matRowsLocal, &maxMatRows, 1, MPIU_INT, MPI_MAX, comm));
+  PetscCall(PetscPrintf(comm,
+                        "LAYOUT ranks=%d mesh=%s bc=%s degree=%" PetscInt_FMT " mat_global_rows=%" PetscInt_FMT " mat_local_rows_minmax=%" PetscInt_FMT ",%" PetscInt_FMT " dm_ltog_bs=%" PetscInt_FMT " local_storage_sum=%" PetscInt_FMT " local_unconstrained_sum=%" PetscInt_FMT " dof_points_sum=%" PetscInt_FMT " partial_constraint_points_sum=%" PetscInt_FMT " full_constraint_points_sum=%" PetscInt_FMT " constrained_dofs_sum=%" PetscInt_FMT " constrained_components_sum=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT "\n",
+                        ranks, app->use_mesh ? app->mesh : "generated_cube", app->use_mesh ? app->mesh_bc_mode : "cube_clamped_bottom", app->degree, matRowsGlobal, minMatRows, maxMatRows, dmBlockSize, sumLocalStorage,
+                        sumLocalUnconstrained, sumDofPts, sumPartialPts, sumFullConstraintPts, sumCdofTotal, sumCcomp[0], sumCcomp[1], sumCcomp[2]));
+
+  PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &ismatis));
+  if (ismatis) {
+    ISLocalToGlobalMapping rmap;
+    const PetscInt        *ridx;
+    PetscInt               nloc, mapBlockSize, ngids, *gids = NULL, *comps = NULL;
+    PetscInt               localCompRows[3] = {0, 0, 0}, sumCompRows[3], minMapRows, maxMapRows;
+
+    PetscCall(MatISGetLocalToGlobalMapping(A, &rmap, NULL));
+    PetscCall(ISLocalToGlobalMappingGetSize(rmap, &nloc));
+    PetscCall(ISLocalToGlobalMappingGetBlockSize(rmap, &mapBlockSize));
+    PetscCall(BuildGlobalComponentMap(dm, &ngids, &gids, &comps));
+    PetscCall(ISLocalToGlobalMappingGetIndices(rmap, &ridx));
+    for (PetscInt i = 0; i < nloc; ++i) {
+      PetscInt loc;
+
+      PetscCall(PetscFindInt(ridx[i], ngids, gids, &loc));
+      PetscCheck(loc >= 0, PETSC_COMM_SELF, PETSC_ERR_PLIB, "Could not recover component for MATIS local row %" PetscInt_FMT " global dof %" PetscInt_FMT, i, ridx[i]);
+      localCompRows[comps[loc]]++;
+    }
+    PetscCall(ISLocalToGlobalMappingRestoreIndices(rmap, &ridx));
+    PetscCallMPI(MPI_Allreduce(localCompRows, sumCompRows, 3, MPIU_INT, MPI_SUM, comm));
+    PetscCallMPI(MPI_Allreduce(&nloc, &minMapRows, 1, MPIU_INT, MPI_MIN, comm));
+    PetscCallMPI(MPI_Allreduce(&nloc, &maxMapRows, 1, MPIU_INT, MPI_MAX, comm));
+    PetscCall(PetscPrintf(comm,
+                          "MATIS_LAYOUT ranks=%d map_rows_minmax=%" PetscInt_FMT ",%" PetscInt_FMT " map_ltog_bs=%" PetscInt_FMT " component_rows_sum=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT "\n",
+                          ranks, minMapRows, maxMapRows, mapBlockSize, sumCompRows[0], sumCompRows[1], sumCompRows[2]));
+    PetscCall(PetscFree(gids));
+    PetscCall(PetscFree(comps));
+  }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -498,6 +716,15 @@ int main(int argc, char **argv)
   PetscCall(MatSetOption(A, MAT_SYMMETRY_ETERNAL, PETSC_TRUE));
   PetscCall(MatSetOption(A, MAT_SPD, PETSC_TRUE));
   PetscCall(MatSetOption(A, MAT_SPD_ETERNAL, PETSC_TRUE));
+  if (app.inspect_layout) {
+    PetscCall(ReportLayoutStats(dm, A, &app));
+    PetscCall(VecDestroy(&rhs));
+    PetscCall(VecDestroy(&u));
+    PetscCall(MatDestroy(&A));
+    PetscCall(DMDestroy(&dm));
+    PetscCall(PetscFinalize());
+    return 0;
+  }
 
   PetscCall(SNESCreate(PETSC_COMM_WORLD, &snes));
   PetscCall(SNESSetDM(snes, dm));
@@ -507,6 +734,8 @@ int main(int argc, char **argv)
   PetscCall(SNESSetFromOptions(snes));
   PetscCall(SNESGetKSP(snes, &ksp));
   PetscCall(KSPGetPC(ksp, &pc));
+  if (is_bddc) PetscCall(ConfigureBDDCComponentSplitting(pc, dm, A));
+  if (is_fetidp) PetscCall(ConfigureFETIDPComponentSplitting(ksp, dm, A));
   if (app.configure_bddc_metadata && is_bddc) PetscCall(ConfigureBDDCMetadata(pc, dm, &app, A));
   if (app.configure_bddc_metadata && is_fetidp) PetscCall(ConfigureFETIDPMetadata(ksp, dm, &app, A));
 
@@ -519,8 +748,8 @@ int main(int argc, char **argv)
   PetscCallMPI(MPI_Allreduce(&localSize, &maxLocalSize, 1, MPIU_INT, MPI_MAX, PETSC_COMM_WORLD));
   if (app.use_mesh) {
     PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                          "mesh_tet_p%d mesh=%s ranks=%d global_cells=%" PetscInt_FMT " local_dofs_minmax=%" PetscInt_FMT ",%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " variant=%s gravity=%.6g E=%.6g nu=%.6g\n",
-                          (int)app.degree, app.mesh, ranks, globalCells, minLocalSize, maxLocalSize, globalSize, app.variant, (double)app.gravity, (double)app.young, (double)app.poisson));
+                          "mesh_tet_p%d mesh=%s ranks=%d global_cells=%" PetscInt_FMT " local_dofs_minmax=%" PetscInt_FMT ",%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " variant=%s bc=%s gravity=%.6g E=%.6g nu=%.6g\n",
+                          (int)app.degree, app.mesh, ranks, globalCells, minLocalSize, maxLocalSize, globalSize, app.variant, app.mesh_bc_mode, (double)app.gravity, (double)app.young, (double)app.poisson));
   } else {
     PetscCall(PetscPrintf(PETSC_COMM_WORLD,
                           "cube_tet_p%d faces=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT " ranks=%d global_cells=%" PetscInt_FMT " local_dofs_minmax=%" PetscInt_FMT ",%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " variant=%s pressure=%.6g E=%.6g nu=%.6g\n",
@@ -538,8 +767,8 @@ int main(int argc, char **argv)
   PetscCall(KSPGetIterationNumber(ksp, &its));
   PetscCall(KSPGetConvergedReason(ksp, &reason));
   PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                        "RESULT variant=%s ranks=%d degree=%" PetscInt_FMT " mesh=%s faces=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " ksp_its=%" PetscInt_FMT " ksp_reason=%d solve_time=%.6g max_abs_u=%.6e\n",
-                        app.variant, ranks, app.degree, app.use_mesh ? app.mesh : "generated_cube", app.faces[0], app.faces[1], app.faces[2], globalSize, its, (int)reason, (double)solveTime, (double)unorm));
+                        "RESULT variant=%s ranks=%d degree=%" PetscInt_FMT " mesh=%s bc=%s faces=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " ksp_its=%" PetscInt_FMT " ksp_reason=%d solve_time=%.6g max_abs_u=%.6e\n",
+                        app.variant, ranks, app.degree, app.use_mesh ? app.mesh : "generated_cube", app.use_mesh ? app.mesh_bc_mode : "cube_clamped_bottom", app.faces[0], app.faces[1], app.faces[2], globalSize, its, (int)reason, (double)solveTime, (double)unorm));
 
   PetscCall(VecDestroy(&rhs));
   PetscCall(VecDestroy(&u));
