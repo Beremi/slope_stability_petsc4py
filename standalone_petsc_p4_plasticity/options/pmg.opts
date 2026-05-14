@@ -1,0 +1,10 @@
+-pc_variant pmg
+-ksp_type fgmres
+-pc_type mg
+-pmg_coarse_pc_type auto
+-pmg_coarse_lu_max_dofs 50000
+-pmg_smoother_ksp_type chebyshev
+-pmg_smoother_pc_type jacobi
+-pmg_smoother_max_it 2
+-linear_rtol 1.0e-3
+-ksp_converged_reason

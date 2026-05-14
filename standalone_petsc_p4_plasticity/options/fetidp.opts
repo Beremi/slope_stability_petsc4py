@@ -2,6 +2,12 @@
 -dm_mat_type is
 -mat_is_localmat_type aij
 -ksp_type fetidp
+-bddc_graph petsc
+-bddc_local_solver_auto true
+-bddc_exact_local_max_dofs 8000
+-fetidp_bddc_pc_bddc_use_vertices true
+-fetidp_bddc_pc_bddc_use_edges false
+-fetidp_bddc_pc_bddc_use_faces false
 -ksp_fetidp_fullyredundant false
--ksp_rtol 1.0e-8
+-linear_rtol 1.0e-3
 -ksp_converged_reason
