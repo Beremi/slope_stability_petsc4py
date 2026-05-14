@@ -259,23 +259,21 @@ PetscErrorCode ZeroConstrainedVector(IS is, Vec v)
 
   PetscFunctionBeginUser;
   PetscCall(ISGetLocalSize(is, &n));
-  if (n == 0) PetscFunctionReturn(PETSC_SUCCESS);
-  PetscCall(ISGetIndices(is, &idx));
-  PetscCall(VecGetOwnershipRange(v, &lo, &hi));
-  PetscCall(PetscMalloc1(n, &filtered));
-  for (PetscInt i = 0; i < n; ++i) {
-    if (idx[i] >= lo && idx[i] < hi) filtered[nf++] = idx[i];
-  }
-  if (nf == 0) {
+  if (n > 0) {
+    PetscCall(ISGetIndices(is, &idx));
+    PetscCall(VecGetOwnershipRange(v, &lo, &hi));
+    PetscCall(PetscMalloc1(n, &filtered));
+    for (PetscInt i = 0; i < n; ++i) {
+      if (idx[i] >= lo && idx[i] < hi) filtered[nf++] = idx[i];
+    }
+    if (nf > 0) {
+      PetscCall(PetscCalloc1(nf, &zeros));
+      PetscCall(VecSetValues(v, nf, filtered, zeros, INSERT_VALUES));
+      PetscCall(PetscFree(zeros));
+    }
     PetscCall(PetscFree(filtered));
     PetscCall(ISRestoreIndices(is, &idx));
-    PetscFunctionReturn(PETSC_SUCCESS);
   }
-  PetscCall(PetscCalloc1(nf, &zeros));
-  PetscCall(VecSetValues(v, nf, filtered, zeros, INSERT_VALUES));
-  PetscCall(PetscFree(filtered));
-  PetscCall(PetscFree(zeros));
-  PetscCall(ISRestoreIndices(is, &idx));
   PetscCall(VecAssemblyBegin(v));
   PetscCall(VecAssemblyEnd(v));
   PetscFunctionReturn(PETSC_SUCCESS);
