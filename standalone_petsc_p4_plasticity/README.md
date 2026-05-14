@@ -73,8 +73,11 @@ mpiexec -n 2 ./p4_plasticity \
 - `-pmg_smoother_pc_type jacobi`
 - `-pmg_smoother_max_it 2`
 - `-bddc_graph petsc|topology`
+- `-bddc_coordinates scalar|blocked|none`
+- `-bddc_collapse_shared true|false`
 - `-bddc_local_solver_auto true`
 - `-bddc_exact_local_max_dofs 8000`
+- `-debug_bddc_dirichlet_rows`
 - `-use_box_mesh` for a tiny generated DMPlex tetra mesh smoke test
 - `-check_matrix_symmetry` to print an elastic `MatIsSymmetric()` check
 - `-ksp_view`
@@ -87,6 +90,8 @@ mpiexec -n 4 ./p4_plasticity -options_file options/gamg.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/pmg.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/bddc.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/fetidp.opts
+mpiexec -n 4 ./p4_plasticity -options_file options/bddc_approx_local.opts
+mpiexec -n 4 ./p4_plasticity -options_file options/fetidp_approx_local.opts
 ```
 
 For full comparisons, use the guarded runner so failed PETSc setup paths do not
@@ -140,10 +145,20 @@ scalar-equation coordinates in this build. GAMG continues to use blocked
 coordinates.
 
 Current BDDC status: tiny distributed MATIS smoke tests converge with PETSc's
-local matrix graph and vertex-only defaults. The experimental
-`-bddc_graph topology` P4 nearest-neighbor graph is available but still fails
-the tiny distributed BDDC check with `DIVERGED_PC_FAILED`, so it is not the
-default. On the full P4(L1) mesh, PETSc BDDC/FETI-DP setup still remains too
-expensive or produces an indefinite preconditioner under the 120 GiB guarded
-validation runs. Those PETSc failures are left visible rather than hidden behind
-fallbacks.
+local matrix graph and vertex-only defaults. The note3-style strict
+`-pc_bddc_use_local_mat_graph false` presets are kept in
+`options/bddc_safe.opts`, `options/bddc_edges.opts`, and the matching FETI-DP
+files, but they still expose singular local Neumann solves on the tiny mesh.
+The usable tiny BDDC/FETI-DP configuration is the topology graph plus
+approximate GAMG local Dirichlet/Neumann solvers in
+`options/bddc_approx_local.opts` and `options/fetidp_approx_local.opts`.
+
+On the full P4(L1) mesh, 16- and 32-rank BDDC/FETI-DP setup still remains too
+large under the 120 GiB guarded validation runs when edge/change-of-basis
+constraints are enabled. `-pc_bddc_graph_maxcount 2` bounds memory by producing
+no coarse problem, but then BDDC fails with `DIVERGED_PC_FAILED` and FETI-DP
+with `DIVERGED_NANORINF`. Oversubscribed 64-rank BDDC reduced peak memory to
+about 22 GiB but timed out before reaching an elastic result on this workstation,
+so it is only evidence that smaller subdomains help memory, not a valid
+convergence result. These PETSc failures are left visible rather than hidden
+behind fallbacks.

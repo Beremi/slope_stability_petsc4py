@@ -4,6 +4,8 @@ set -uo pipefail
 MEM_LIMIT_GB="${MEM_LIMIT_GB:-120}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.2}"
 TIME_LIMIT_SEC="${TIME_LIMIT_SEC:-0}"
+MPIEXEC="${MPIEXEC:-mpiexec}"
+RUN_LABEL="${RUN_LABEL:-}"
 OUTDIR="${OUTDIR:-/tmp/standalone_petsc_p4_plasticity_$(date +%Y%m%d_%H%M%S)}"
 MESH="${MESH:-data/adaptive_family_a_l1.msh}"
 RANKS="${RANKS:-16 32}"
@@ -44,6 +46,7 @@ run_guarded() {
   local ranks="$1"
   local variant="$2"
   local log="$OUTDIR/${variant}_${ranks}.log"
+  if [[ -n "$RUN_LABEL" ]]; then log="$OUTDIR/${variant}_${ranks}_${RUN_LABEL}.log"; fi
   local peak_kb=0
   local status="failed"
   local exit_code=0
@@ -52,7 +55,7 @@ run_guarded() {
 
   printf '\n== ranks=%s variant=%s ==\n' "$ranks" "$variant"
   setsid env OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" \
-    mpiexec -n "$ranks" ./p4_plasticity \
+    $MPIEXEC -n "$ranks" ./p4_plasticity \
     -mesh "$MESH" \
     -petscpartitioner_type simple \
     -pc_variant "$variant" \

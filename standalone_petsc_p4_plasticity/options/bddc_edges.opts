@@ -1,0 +1,17 @@
+-pc_variant bddc
+-dm_mat_type is
+-mat_is_localmat_type aij
+-ksp_type cg
+-pc_type bddc
+-bddc_graph petsc
+-bddc_coordinates scalar
+-bddc_local_solver_auto false
+-pc_bddc_check_level 1
+-pc_bddc_use_local_mat_graph false
+-pc_bddc_corner_selection true
+-pc_bddc_use_vertices true
+-pc_bddc_use_edges true
+-pc_bddc_use_faces false
+-pc_bddc_use_change_of_basis true
+-linear_rtol 1.0e-3
+-ksp_converged_reason

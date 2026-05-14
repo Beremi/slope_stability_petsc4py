@@ -2,6 +2,7 @@
 #include "p4_basis.h"
 
 #include <petscksp.h>
+#include <stdlib.h>
 
 typedef enum {
   VARIANT_GAMG,
@@ -29,8 +30,11 @@ typedef struct {
   PetscInt  pmg_coarse_lu_max_dofs;
   PetscInt  pmg_smoother_max_it;
   char      bddc_graph[32];
+  char      bddc_coordinates[32];
+  PetscBool bddc_collapse_shared;
   PetscBool bddc_local_solver_auto;
   PetscInt  bddc_exact_local_max_dofs;
+  PetscBool debug_bddc_dirichlet_rows;
 } AppCtx;
 
 typedef struct {
@@ -100,8 +104,11 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->pmg_coarse_lu_max_dofs = 50000;
   app->pmg_smoother_max_it    = 2;
   PetscCall(PetscStrncpy(app->bddc_graph, "petsc", sizeof(app->bddc_graph)));
+  PetscCall(PetscStrncpy(app->bddc_coordinates, "scalar", sizeof(app->bddc_coordinates)));
+  app->bddc_collapse_shared    = PETSC_FALSE;
   app->bddc_local_solver_auto    = PETSC_TRUE;
   app->bddc_exact_local_max_dofs = 8000;
+  app->debug_bddc_dirichlet_rows = PETSC_FALSE;
 
   PetscOptionsBegin(comm, NULL, "Standalone P4 plasticity options", NULL);
   PetscCall(PetscOptionsString("-mesh", "Gmsh mesh path", NULL, app->mesh, app->mesh, sizeof(app->mesh), NULL));
@@ -120,8 +127,11 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsString("-pmg_smoother_pc_type", "PMG smoother PC type", NULL, app->pmg_smoother_pc_type, app->pmg_smoother_pc_type, sizeof(app->pmg_smoother_pc_type), NULL));
   PetscCall(PetscOptionsInt("-pmg_smoother_max_it", "PMG smoother iterations per V-cycle", NULL, app->pmg_smoother_max_it, &app->pmg_smoother_max_it, NULL));
   PetscCall(PetscOptionsString("-bddc_graph", "topology|petsc", NULL, app->bddc_graph, app->bddc_graph, sizeof(app->bddc_graph), NULL));
+  PetscCall(PetscOptionsString("-bddc_coordinates", "scalar|blocked|none", NULL, app->bddc_coordinates, app->bddc_coordinates, sizeof(app->bddc_coordinates), NULL));
+  PetscCall(PetscOptionsBool("-bddc_collapse_shared", "With -bddc_graph topology, connect local DOFs sharing the same neighboring rank set", NULL, app->bddc_collapse_shared, &app->bddc_collapse_shared, NULL));
   PetscCall(PetscOptionsBool("-bddc_local_solver_auto", "Choose scalable BDDC local/coarse solvers for large subdomains", NULL, app->bddc_local_solver_auto, &app->bddc_local_solver_auto, NULL));
   PetscCall(PetscOptionsInt("-bddc_exact_local_max_dofs", "Maximum local MATIS rows before switching BDDC subsolves away from LU", NULL, app->bddc_exact_local_max_dofs, &app->bddc_exact_local_max_dofs, NULL));
+  PetscCall(PetscOptionsBool("-debug_bddc_dirichlet_rows", "Check local MATIS rows marked as BDDC Dirichlet rows", NULL, app->debug_bddc_dirichlet_rows, &app->debug_bddc_dirichlet_rows, NULL));
   PetscOptionsEnd();
 
   PetscCall(PetscStrcasecmp(app->variant_name, "gamg", &flg));
@@ -147,6 +157,14 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   if (!flg) {
     PetscCall(PetscStrcasecmp(app->bddc_graph, "petsc", &flg));
     PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-bddc_graph must be topology or petsc");
+  }
+  PetscCall(PetscStrcasecmp(app->bddc_coordinates, "scalar", &flg));
+  if (!flg) {
+    PetscCall(PetscStrcasecmp(app->bddc_coordinates, "blocked", &flg));
+    if (!flg) {
+      PetscCall(PetscStrcasecmp(app->bddc_coordinates, "none", &flg));
+      PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-bddc_coordinates must be scalar, blocked, or none");
+    }
   }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -656,6 +674,63 @@ static PetscErrorCode SetBDDCDofSplittingLocal(PC pc, Mat A)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode CheckLocalDirichletRows(Mat A, IS dirichlet_local)
+{
+  MPI_Comm       comm = PetscObjectComm((PetscObject)A);
+  PetscBool      ismatis = PETSC_FALSE;
+  Mat            local_mat = NULL;
+  const PetscInt *rows;
+  PetscInt       nrows, global_nrows = 0, local_bad_diag = 0, local_bad_offdiag = 0, global_bad_diag = 0, global_bad_offdiag = 0;
+  PetscReal      local_max_diag_error = 0.0, local_max_offdiag = 0.0, global_max_diag_error = 0.0, global_max_offdiag = 0.0;
+  PetscReal      tol = 1.0e-9;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &ismatis));
+  if (!ismatis) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(MatISGetLocalMat(A, &local_mat));
+  PetscCall(ISGetLocalSize(dirichlet_local, &nrows));
+  PetscCall(ISGetIndices(dirichlet_local, &rows));
+  for (PetscInt i = 0; i < nrows; ++i) {
+    const PetscInt    row = rows[i];
+    PetscInt          ncols;
+    const PetscInt   *cols;
+    const PetscScalar *vals;
+    PetscScalar       diag = 0.0;
+    PetscReal         offdiag = 0.0;
+    PetscBool         found_diag = PETSC_FALSE;
+
+    PetscCall(MatGetRow(local_mat, row, &ncols, &cols, &vals));
+    for (PetscInt j = 0; j < ncols; ++j) {
+      if (cols[j] == row) {
+        diag += vals[j];
+        found_diag = PETSC_TRUE;
+      } else {
+        offdiag = PetscMax(offdiag, PetscAbsScalar(vals[j]));
+      }
+    }
+    PetscCall(MatRestoreRow(local_mat, row, &ncols, &cols, &vals));
+    {
+      const PetscReal diag_error = found_diag ? PetscAbsScalar(diag - 1.0) : PETSC_MAX_REAL;
+
+      local_max_diag_error = PetscMax(local_max_diag_error, diag_error);
+      local_max_offdiag    = PetscMax(local_max_offdiag, offdiag);
+      if (diag_error > tol) ++local_bad_diag;
+      if (offdiag > tol) ++local_bad_offdiag;
+    }
+  }
+  PetscCall(ISRestoreIndices(dirichlet_local, &rows));
+  PetscCallMPI(MPI_Allreduce(&nrows, &global_nrows, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&local_bad_diag, &global_bad_diag, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&local_bad_offdiag, &global_bad_offdiag, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&local_max_diag_error, &global_max_diag_error, 1, MPIU_REAL, MPI_MAX, comm));
+  PetscCallMPI(MPI_Allreduce(&local_max_offdiag, &global_max_offdiag, 1, MPIU_REAL, MPI_MAX, comm));
+  PetscCall(PetscPrintf(comm,
+                        "BDDC local Dirichlet row check: rows=%" PetscInt_FMT " bad_diag=%" PetscInt_FMT " bad_offdiag=%" PetscInt_FMT " max_diag_error=%.3e max_offdiag=%.3e\n",
+                        global_nrows, global_bad_diag, global_bad_offdiag, (double)global_max_diag_error, (double)global_max_offdiag));
+  PetscCall(MatISRestoreLocalMat(A, &local_mat));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 typedef struct {
   PetscInt *cols;
   PetscInt  n;
@@ -680,6 +755,96 @@ static PetscErrorCode AddSymmetricAdjacency(AdjacencyRow rows[], PetscInt nloc, 
   PetscFunctionBeginUser;
   PetscCall(AdjacencyAdd(rows, nloc, a, b));
   if (a != b) PetscCall(AdjacencyAdd(rows, nloc, b, a));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+typedef struct {
+  PetscInt row;
+  PetscInt count;
+  PetscInt hash1;
+  PetscInt hash2;
+} SharedSignature;
+
+static int CompareSharedSignature(const void *a, const void *b)
+{
+  const SharedSignature *sa = (const SharedSignature *)a;
+  const SharedSignature *sb = (const SharedSignature *)b;
+
+  if (sa->count < sb->count) return -1;
+  if (sa->count > sb->count) return 1;
+  if (sa->hash1 < sb->hash1) return -1;
+  if (sa->hash1 > sb->hash1) return 1;
+  if (sa->hash2 < sb->hash2) return -1;
+  if (sa->hash2 > sb->hash2) return 1;
+  if (sa->row < sb->row) return -1;
+  if (sa->row > sb->row) return 1;
+  return 0;
+}
+
+static PetscBool SameSharedSignature(const SharedSignature *a, const SharedSignature *b)
+{
+  return (PetscBool)(a->count == b->count && a->hash1 == b->hash1 && a->hash2 == b->hash2);
+}
+
+static PetscErrorCode AddSharedSetCollapseAdjacency(Mat A, AdjacencyRow rows[], PetscInt nloc)
+{
+  ISLocalToGlobalMapping mapping = NULL;
+  PetscMPIInt            rank;
+  PetscInt               n_neighs, *neighs, *n_shared, **shared;
+  SharedSignature       *sigs = NULL;
+  const PetscInt         p1 = 2147483647, p2 = 2147483629;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_rank(PetscObjectComm((PetscObject)A), &rank));
+  PetscCall(MatISGetLocalToGlobalMapping(A, &mapping, NULL));
+  PetscCall(PetscCalloc1(nloc, &sigs));
+  for (PetscInt r = 0; r < nloc; ++r) sigs[r].row = r;
+  PetscCall(ISLocalToGlobalMappingGetInfo(mapping, &n_neighs, &neighs, &n_shared, &shared));
+  for (PetscInt n = 0; n < n_neighs; ++n) {
+    if (neighs[n] == rank) continue;
+    for (PetscInt j = 0; j < n_shared[n]; ++j) {
+      const PetscInt row = shared[n][j];
+      long long      h1, h2, nr;
+
+      PetscCheck(row >= 0 && row < nloc, PetscObjectComm((PetscObject)A), PETSC_ERR_PLIB,
+                 "Shared local row %" PetscInt_FMT " outside [0,%" PetscInt_FMT ")", row, nloc);
+      nr              = (long long)neighs[n] + 1;
+      h1              = ((long long)sigs[row].hash1 + (nr * 1000003LL)) % p1;
+      h2              = ((long long)sigs[row].hash2 + (nr * (nr + 17LL) * 9176LL)) % p2;
+      sigs[row].hash1 = (PetscInt)h1;
+      sigs[row].hash2 = (PetscInt)h2;
+      sigs[row].count++;
+    }
+  }
+  PetscCall(ISLocalToGlobalMappingRestoreInfo(mapping, &n_neighs, &neighs, &n_shared, &shared));
+  qsort(sigs, (size_t)nloc, sizeof(*sigs), CompareSharedSignature);
+  {
+    PetscInt local_shared = 0, local_groups = 0, local_max_group = 0;
+    PetscInt global_shared = 0, global_groups = 0, global_max_group = 0;
+
+    for (PetscInt i = 0; i < nloc;) {
+      PetscInt j = i + 1;
+
+      while (j < nloc && SameSharedSignature(&sigs[i], &sigs[j])) ++j;
+      if (sigs[i].count) {
+        local_shared += j - i;
+        local_groups++;
+        local_max_group = PetscMax(local_max_group, j - i);
+      }
+      i = j;
+    }
+    PetscCallMPI(MPI_Allreduce(&local_shared, &global_shared, 1, MPIU_INT, MPI_SUM, PetscObjectComm((PetscObject)A)));
+    PetscCallMPI(MPI_Allreduce(&local_groups, &global_groups, 1, MPIU_INT, MPI_SUM, PetscObjectComm((PetscObject)A)));
+    PetscCallMPI(MPI_Allreduce(&local_max_group, &global_max_group, 1, MPIU_INT, MPI_MAX, PetscObjectComm((PetscObject)A)));
+    PetscCall(PetscPrintf(PetscObjectComm((PetscObject)A),
+                          "BDDC shared-set graph collapse: shared_rows=%" PetscInt_FMT " groups=%" PetscInt_FMT " max_group=%" PetscInt_FMT "\n",
+                          global_shared, global_groups, global_max_group));
+  }
+  for (PetscInt i = 1; i < nloc; ++i) {
+    if (!sigs[i].count || !SameSharedSignature(&sigs[i - 1], &sigs[i])) continue;
+    PetscCall(AddSymmetricAdjacency(rows, nloc, sigs[i - 1].row, sigs[i].row));
+  }
+  PetscCall(PetscFree(sigs));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -719,7 +884,7 @@ static PetscBool BarycentricNeighbors(const PetscInt a[], const PetscInt b[])
   return (PetscBool)(dist == 2);
 }
 
-static PetscErrorCode ConfigureBDDCTopologyGraph(PC pc, DM dm, P4Basis *basis, Mat A)
+static PetscErrorCode ConfigureBDDCTopologyGraph(PC pc, DM dm, P4Basis *basis, Mat A, PetscBool collapse_shared)
 {
   PetscBool     ismatis = PETSC_FALSE;
   Mat           local_mat = NULL;
@@ -763,6 +928,7 @@ static PetscErrorCode ConfigureBDDCTopologyGraph(PC pc, DM dm, P4Basis *basis, M
     }
     PetscCall(DMPlexRestoreClosureIndices(dm, lsec, lsec, cell, PETSC_TRUE, &num_indices, &indices, NULL, NULL));
   }
+  if (collapse_shared) PetscCall(AddSharedSetCollapseAdjacency(A, rows, nloc));
 
   PetscCall(PetscMalloc1(nloc + 1, &xadj));
   xadj[0] = 0;
@@ -837,20 +1003,36 @@ static PetscErrorCode ConfigureBDDC(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app
   PetscFunctionBeginUser;
   PetscCall(PCSetType(pc, PCBDDC));
   PetscCall(BuildLocalConstrainedIS(dm, actx, &dirichlet_local));
+  if (app->debug_bddc_dirichlet_rows) PetscCall(CheckLocalDirichletRows(A, dirichlet_local));
   PetscCall(PCBDDCSetDirichletBoundariesLocal(pc, dirichlet_local));
   PetscCall(ISDestroy(&dirichlet_local));
-  /*
-    PETSc 3.24 BDDC still has "TODO: support for blocked" in its coordinate
-    import path and checks against the scalar local pmat size. GAMG uses
-    blocked coordinates; BDDC/FETI-DP need scalar-equation coordinates here.
-  */
-  PetscCall(BuildOwnedDofCoordinates(dm, actx->basis, &ncoords, &coords));
-  PetscCall(PCSetCoordinates(pc, 3, ncoords, coords));
-  PetscCall(PetscFree(coords));
+  {
+    PetscBool use_scalar, use_blocked, use_none;
+
+    PetscCall(PetscStrcasecmp(app->bddc_coordinates, "scalar", &use_scalar));
+    PetscCall(PetscStrcasecmp(app->bddc_coordinates, "blocked", &use_blocked));
+    PetscCall(PetscStrcasecmp(app->bddc_coordinates, "none", &use_none));
+    if (use_scalar) {
+      /*
+        PETSc 3.24 BDDC still has "TODO: support for blocked" in its coordinate
+        import path and checks against the scalar local pmat size. GAMG uses
+        blocked coordinates; scalar is the default BDDC/FETI-DP workaround here.
+      */
+      PetscCall(BuildOwnedDofCoordinates(dm, actx->basis, &ncoords, &coords));
+      PetscCall(PCSetCoordinates(pc, 3, ncoords, coords));
+      PetscCall(PetscFree(coords));
+    } else if (use_blocked) {
+      PetscCall(BuildOwnedBlockCoordinates(dm, actx->basis, &ncoords, &coords));
+      PetscCall(PCSetCoordinates(pc, 3, ncoords, coords));
+      PetscCall(PetscFree(coords));
+    } else {
+      PetscCheck(use_none, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONG, "Unknown -bddc_coordinates value %s", app->bddc_coordinates);
+    }
+  }
   PetscCall(SetBDDCDofSplittingLocal(pc, A));
   PetscCall(PetscStrcasecmp(app->bddc_graph, "topology", &use_topology_graph));
   if (use_topology_graph) {
-    PetscCall(ConfigureBDDCTopologyGraph(pc, dm, actx->basis, A));
+    PetscCall(ConfigureBDDCTopologyGraph(pc, dm, actx->basis, A, app->bddc_collapse_shared));
     PetscCall(ConfigureBDDCPrimalVertices(pc, dm, actx->basis));
   }
   PetscCall(AttachNearNullspace(dm, actx->constrained_is, A));

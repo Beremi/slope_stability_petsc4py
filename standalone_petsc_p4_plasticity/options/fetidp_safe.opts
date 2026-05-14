@@ -1,0 +1,17 @@
+-pc_variant fetidp
+-dm_mat_type is
+-mat_is_localmat_type aij
+-ksp_type fetidp
+-ksp_fetidp_fullyredundant false
+-fetidp_ksp_type cg
+-bddc_graph petsc
+-bddc_coordinates scalar
+-bddc_local_solver_auto false
+-fetidp_bddc_pc_bddc_check_level 1
+-fetidp_bddc_pc_bddc_use_local_mat_graph false
+-fetidp_bddc_pc_bddc_corner_selection true
+-fetidp_bddc_pc_bddc_use_vertices true
+-fetidp_bddc_pc_bddc_use_edges false
+-fetidp_bddc_pc_bddc_use_faces false
+-linear_rtol 1.0e-3
+-ksp_converged_reason
