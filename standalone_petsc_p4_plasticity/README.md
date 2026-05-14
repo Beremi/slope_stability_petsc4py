@@ -106,6 +106,18 @@ constrained vector entries, but the solve path does not call
 
 The GAMG variant attaches six projected rigid-body-like near-nullspace vectors
 with constrained entries zeroed and supplies owned P4 block coordinates to
-PETSc. BDDC and FETI-DP are exposed as PETSc-native runtime variants over MATIS;
-if this PETSc build rejects a setup, the PETSc error is left visible so the
-small case can be discussed with PETSc experts.
+PETSc. The BDDC path supplies PETSc's MATIS solver with local Dirichlet
+boundaries, global and local rigid-body near-nullspace data, and per-scalar-dof
+coordinates for PETSc's BDDC corner-selection code. BDDC and FETI-DP remain
+PETSc-native runtime variants over MATIS; if this PETSc build rejects a setup,
+the PETSc error is left visible so the small case can be discussed with PETSc
+experts.
+
+Current BDDC status: tiny distributed MATIS smoke tests converge, but the full
+P4(L1) mesh is still blocked in PETSc BDDC setup. With PETSc's default local
+matrix graph, the 16-rank full mesh can crash inside PETSc during setup. With
+`-pc_bddc_use_local_mat_graph false`, face-only constraints set up cheaply but
+are too weak for elasticity, while edge plus near-nullspace constraints avoid
+the crash but spend minutes and tens to hundreds of GiB in coarse-space setup
+without reaching Krylov iterations. Treat BDDC/FETI-DP full-mesh numbers as
+diagnostic until that PETSc BDDC coarse-space issue is resolved.
