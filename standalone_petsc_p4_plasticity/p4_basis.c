@@ -53,20 +53,21 @@ static PetscErrorCode CreateTetra24Quadrature(MPI_Comm comm, PetscQuadrature *qu
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-PetscErrorCode P4BasisCreate(MPI_Comm comm, P4Basis *basis)
+PetscErrorCode P4BasisCreateDegree(MPI_Comm comm, PetscInt degree, P4Basis *basis)
 {
   PetscInt Nc, dim, npoints;
 
   PetscFunctionBeginUser;
+  PetscCheck(degree == 1 || degree == 2 || degree == 4, comm, PETSC_ERR_ARG_OUTOFRANGE, "Only P1/P2/P4 tetrahedral bases are supported");
   PetscCall(PetscMemzero(basis, sizeof(*basis)));
   basis->dim        = 3;
   basis->components = 3;
-  basis->degree     = 4;
+  basis->degree     = degree;
 
   PetscCall(CreateTetra24Quadrature(comm, &basis->quadrature));
-  PetscCall(PetscFECreateLagrange(comm, 3, 3, PETSC_TRUE, 4, PETSC_DETERMINE, &basis->fe_vector));
+  PetscCall(PetscFECreateLagrange(comm, 3, 3, PETSC_TRUE, degree, PETSC_DETERMINE, &basis->fe_vector));
   PetscCall(PetscFESetQuadrature(basis->fe_vector, basis->quadrature));
-  PetscCall(PetscFECreateLagrange(comm, 3, 1, PETSC_TRUE, 4, PETSC_DETERMINE, &basis->fe_scalar));
+  PetscCall(PetscFECreateLagrange(comm, 3, 1, PETSC_TRUE, degree, PETSC_DETERMINE, &basis->fe_scalar));
   PetscCall(PetscFESetQuadrature(basis->fe_scalar, basis->quadrature));
   PetscCall(PetscQuadratureGetData(basis->quadrature, &dim, &Nc, &npoints, &basis->points, &basis->weights));
   PetscCheck(dim == 3 && Nc == 1 && npoints == 24, comm, PETSC_ERR_PLIB, "Unexpected quadrature shape");
@@ -75,6 +76,13 @@ PetscErrorCode P4BasisCreate(MPI_Comm comm, P4Basis *basis)
   PetscCall(PetscFECreateTabulation(basis->fe_scalar, 1, basis->n_qp, basis->points, 1, &basis->tabulation));
   basis->basis     = basis->tabulation->T[0];
   basis->basis_der = basis->tabulation->T[1];
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode P4BasisCreate(MPI_Comm comm, P4Basis *basis)
+{
+  PetscFunctionBeginUser;
+  PetscCall(P4BasisCreateDegree(comm, 4, basis));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 

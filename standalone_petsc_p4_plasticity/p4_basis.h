@@ -20,4 +20,5 @@ typedef struct {
 } P4Basis;
 
 PetscErrorCode P4BasisCreate(MPI_Comm comm, P4Basis *basis);
+PetscErrorCode P4BasisCreateDegree(MPI_Comm comm, PetscInt degree, P4Basis *basis);
 PetscErrorCode P4BasisDestroy(P4Basis *basis);
