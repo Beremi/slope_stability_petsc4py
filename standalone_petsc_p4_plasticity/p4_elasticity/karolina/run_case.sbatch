@@ -34,6 +34,16 @@ export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 export NUMEXPR_NUM_THREADS="$OMP_NUM_THREADS"
 
+# PETSc was built against EasyBuild dependencies on Karolina. Some transitive
+# libraries are not visible on compute nodes unless their module paths are in
+# the runtime search path.
+KAROLINA_BZIP2_ROOT="${KAROLINA_BZIP2_ROOT:-/apps/all/bzip2/1.0.8-GCCcore-14.3.0}"
+for libdir in "$KAROLINA_BZIP2_ROOT/lib64" "$KAROLINA_BZIP2_ROOT/lib"; do
+  if [[ -d "$libdir" ]]; then
+    export LD_LIBRARY_PATH="$libdir:${LD_LIBRARY_PATH:-}"
+  fi
+done
+
 RESULT_DIR="$CAMPAIGN_DIR/results/${JOB_ID}_${CASE}_${VARIANT}_${TOTAL_RANKS}r"
 mkdir -p "$RESULT_DIR"
 
@@ -52,6 +62,7 @@ metadata="$RESULT_DIR/job.env"
   echo "PETSC_DIR=$PETSC_DIR"
   echo "PETSC_ARCH=$PETSC_ARCH"
   echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
+  echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
   echo "REPO_ROOT=$REPO_ROOT"
   echo "COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)"
   echo "BRANCH=$(git -C "$REPO_ROOT" branch --show-current)"
