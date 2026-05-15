@@ -19,6 +19,8 @@ typedef struct {
   PetscBool use_mesh;
   PetscBool configure_bddc_metadata;
   PetscBool inspect_layout;
+  PetscInt  pmg_coarse_redundant_group_size;
+  PetscBool pmg_coarse_gamg_aggressive_square_graph;
   PetscReal matis_duplication_limit;
 } AppCtx;
 
@@ -128,6 +130,8 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   app->use_mesh = (PetscBool)(spec->kind == P4_ELASTICITY_L1_MESH);
   app->configure_bddc_metadata = PETSC_FALSE;
   app->inspect_layout           = PETSC_FALSE;
+  app->pmg_coarse_redundant_group_size        = 16;
+  app->pmg_coarse_gamg_aggressive_square_graph = PETSC_FALSE;
   app->matis_duplication_limit  = 1.25;
   PetscCall(PetscStrncpy(app->case_name, spec->name ? spec->name : "unknown", sizeof(app->case_name)));
   PetscCall(PetscStrncpy(app->mesh, spec->default_mesh ? spec->default_mesh : "", sizeof(app->mesh)));
@@ -148,6 +152,8 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   PetscCall(PetscOptionsReal("-pressure", "Downward top traction magnitude for generated cube", NULL, app->pressure, &app->pressure, &pressureSet));
   PetscCall(PetscOptionsReal("-gravity", "Downward body force in the mesh vertical y-direction", NULL, app->gravity, &app->gravity, &gravitySet));
   PetscCall(PetscOptionsString("-pc_variant", "gamg|pmg|bddc|fetidp|none", NULL, app->variant, app->variant, sizeof(app->variant), NULL));
+  PetscCall(PetscOptionsInt("-pmg_coarse_redundant_group_size", "Use PCREDUNDANT for PMG P1 coarse GAMG on groups of this many ranks; 0 disables", NULL, app->pmg_coarse_redundant_group_size, &app->pmg_coarse_redundant_group_size, NULL));
+  PetscCall(PetscOptionsBool("-pmg_coarse_gamg_aggressive_square_graph", "Use PETSc GAMG square-graph aggressive coarsening on PMG P1 coarse solves", NULL, app->pmg_coarse_gamg_aggressive_square_graph, &app->pmg_coarse_gamg_aggressive_square_graph, NULL));
   PetscCall(PetscOptionsBool("-configure_bddc_metadata", "Experimental local Dirichlet/splitting metadata for PCBDDC/KSPFETIDP", NULL, app->configure_bddc_metadata, &app->configure_bddc_metadata, NULL));
   PetscCall(PetscOptionsBool("-inspect_layout", "Print constrained section/MATIS layout diagnostics and exit", NULL, app->inspect_layout, &app->inspect_layout, NULL));
   PetscCall(PetscOptionsReal("-matis_duplication_limit", "Abort L1 BDDC/FETI-DP solves when MATIS duplicated rows / global rows reaches this value", NULL, app->matis_duplication_limit, &app->matis_duplication_limit, NULL));
@@ -159,6 +165,7 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   PetscCheck(!app->use_mesh || app->mesh[0], comm, PETSC_ERR_ARG_WRONG, "Mesh case requires a non-empty -mesh path");
   for (PetscInt d = 0; d < 3; ++d) PetscCheck(app->faces[d] > 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-cube_faces entries must be positive");
   PetscCheck(app->degree >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-degree must be >= 1");
+  PetscCheck(app->pmg_coarse_redundant_group_size >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_redundant_group_size must be nonnegative");
   PetscCheck(app->poisson > -1.0 && app->poisson < 0.5, comm, PETSC_ERR_ARG_OUTOFRANGE, "-poisson must lie in (-1,0.5)");
   if (app->use_mesh) {
     PetscBool isRollers, isBaseOnly, isFullSides;
@@ -526,6 +533,48 @@ static PetscErrorCode ConfigurePMG(PC pc, DM fineDM)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode ConfigurePMGCoarseSolve(KSP coarse, const AppCtx *app)
+{
+  MPI_Comm    comm;
+  KSP         innerKSP;
+  PC          cpc, innerPC;
+  PetscMPIInt ranks;
+  PetscInt    groupSize, nredundant;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscObjectGetComm((PetscObject)coarse, &comm));
+  PetscCallMPI(MPI_Comm_size(comm, &ranks));
+  groupSize = app->pmg_coarse_redundant_group_size;
+
+  PetscCall(KSPSetType(coarse, KSPCG));
+  PetscCall(KSPSetTolerances(coarse, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 50));
+  PetscCall(KSPGetPC(coarse, &cpc));
+
+  if (groupSize > 0 && ranks > groupSize) {
+    nredundant = ((PetscInt)ranks + groupSize - 1) / groupSize;
+    PetscCall(KSPSetType(coarse, KSPPREONLY));
+    PetscCall(PCSetType(cpc, PCREDUNDANT));
+    PetscCall(PCRedundantSetNumber(cpc, nredundant));
+    PetscCall(PCRedundantGetKSP(cpc, &innerKSP));
+    PetscCall(KSPSetType(innerKSP, KSPCG));
+    PetscCall(KSPSetTolerances(innerKSP, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 50));
+    PetscCall(KSPGetPC(innerKSP, &innerPC));
+    PetscCall(PCSetType(innerPC, PCGAMG));
+    PetscCall(PCGAMGSetType(innerPC, PCGAMGAGG));
+    PetscCall(PCGAMGSetAggressiveSquareGraph(innerPC, app->pmg_coarse_gamg_aggressive_square_graph));
+    PetscCall(PetscPrintf(comm,
+                          "PMG_COARSE_SOLVE type=redundant group_size=%" PetscInt_FMT " copies=%" PetscInt_FMT " inner_pc=gamg aggressive_square_graph=%s\n",
+                          groupSize, nredundant, app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
+  } else {
+    PetscCall(PCSetType(cpc, PCGAMG));
+    PetscCall(PCGAMGSetType(cpc, PCGAMGAGG));
+    PetscCall(PCGAMGSetAggressiveSquareGraph(cpc, app->pmg_coarse_gamg_aggressive_square_graph));
+    PetscCall(PetscPrintf(comm, "PMG_COARSE_SOLVE type=gamg group_size=%" PetscInt_FMT " copies=1 aggressive_square_graph=%s\n", groupSize,
+                          app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode ConfigureSolver(SNES snes, DM dm, Mat A, const AppCtx *app)
 {
   KSP       ksp;
@@ -550,7 +599,6 @@ static PetscErrorCode ConfigureSolver(SNES snes, DM dm, Mat A, const AppCtx *app
     PetscCall(PCGAMGSetType(pc, PCGAMGAGG));
   } else if (is_pmg) {
     KSP coarse;
-    PC  cpc;
 
     PetscCall(PCSetType(pc, PCMG));
     PetscCall(PCMGSetLevels(pc, 3, NULL));
@@ -559,11 +607,7 @@ static PetscErrorCode ConfigureSolver(SNES snes, DM dm, Mat A, const AppCtx *app
     PetscCall(PCMGSetGalerkin(pc, PC_MG_GALERKIN_BOTH));
     PetscCall(ConfigurePMG(pc, dm));
     PetscCall(PCMGGetCoarseSolve(pc, &coarse));
-    PetscCall(KSPSetType(coarse, KSPCG));
-    PetscCall(KSPSetTolerances(coarse, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 50));
-    PetscCall(KSPGetPC(coarse, &cpc));
-    PetscCall(PCSetType(cpc, PCGAMG));
-    PetscCall(PCGAMGSetType(cpc, PCGAMGAGG));
+    PetscCall(ConfigurePMGCoarseSolve(coarse, app));
     for (PetscInt level = 1; level < 3; ++level) {
       KSP smooth;
       PC  spc;

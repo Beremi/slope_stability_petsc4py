@@ -125,6 +125,18 @@ space. It builds same-topology DMPlex levels with degree progression P4 -> P2
 -> P1, supplies explicit DMPlex interpolation and transpose restriction
 matrices, uses Galerkin coarse operators, and sets the P1 bottom solve to GAMG.
 The P4 and P2 levels use two Chebyshev/Jacobi smoothing steps by default.
+On MPI jobs larger than 16 ranks, the P1 solve defaults to `PCREDUNDANT` with
+one GAMG solve per 16-rank group. This avoids over-parallelizing the small P1
+problem. PMG also disables GAMG's aggressive square-graph coarsening by default,
+using PETSc's MIS-k path instead; the square-graph path was the dominant memory
+spike in high-rank local traces.
+
+Useful PMG coarse-solve knobs:
+
+```text
+-pmg_coarse_redundant_group_size 16
+-pmg_coarse_gamg_aggressive_square_graph false
+```
 
 This variant intentionally avoids MATIS, BDDC, and FETI-DP interface
 duplication. It currently requires `-degree 4`; very small toy meshes can have
