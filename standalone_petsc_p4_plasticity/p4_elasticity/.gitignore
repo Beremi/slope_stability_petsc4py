@@ -1,4 +1,5 @@
 cube_elasticity
 l1_elasticity
 *.o
+karolina/runs/
 *.log
