@@ -6,7 +6,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+if [[ -z "${REPO_ROOT:-}" ]]; then
+  REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+fi
 ELASTICITY_DIR="$REPO_ROOT/standalone_petsc_p4_plasticity/p4_elasticity"
 
 CASE="${CASE:?Set CASE=cube|l1}"

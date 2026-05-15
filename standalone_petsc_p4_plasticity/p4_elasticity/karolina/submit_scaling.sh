@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 
 ACCOUNT="${ACCOUNT:-fta-26-40}"
 QOS="${QOS:-3571_6328}"
@@ -54,7 +55,7 @@ submit_one() {
     --job-name="$job_name"
     --output="$RUN_ROOT/logs/%x-%j.out"
     --error="$RUN_ROOT/logs/%x-%j.err"
-    --export=ALL,CAMPAIGN_DIR="$RUN_ROOT",ACCOUNT="$ACCOUNT",QOS="$QOS",CASE="$case_name",VARIANT="$variant",RANKS="$ranks"
+    --export=ALL,REPO_ROOT="$REPO_ROOT",CAMPAIGN_DIR="$RUN_ROOT",ACCOUNT="$ACCOUNT",QOS="$QOS",CASE="$case_name",VARIANT="$variant",RANKS="$ranks"
   )
 
   if [[ "${SBATCH_TEST_ONLY:-0}" == "1" ]]; then
