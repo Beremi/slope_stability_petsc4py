@@ -19,6 +19,7 @@ typedef struct {
   PetscBool use_mesh;
   PetscBool configure_bddc_metadata;
   PetscBool inspect_layout;
+  PetscReal matis_duplication_limit;
 } AppCtx;
 
 enum {
@@ -120,6 +121,7 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   app->use_mesh = (PetscBool)(spec->kind == P4_ELASTICITY_L1_MESH);
   app->configure_bddc_metadata = PETSC_FALSE;
   app->inspect_layout           = PETSC_FALSE;
+  app->matis_duplication_limit  = 1.25;
   PetscCall(PetscStrncpy(app->case_name, spec->name ? spec->name : "unknown", sizeof(app->case_name)));
   PetscCall(PetscStrncpy(app->mesh, spec->default_mesh ? spec->default_mesh : "", sizeof(app->mesh)));
   PetscCall(PetscStrncpy(app->variant, "gamg", sizeof(app->variant)));
@@ -141,6 +143,7 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   PetscCall(PetscOptionsString("-pc_variant", "gamg|bddc|fetidp|none", NULL, app->variant, app->variant, sizeof(app->variant), NULL));
   PetscCall(PetscOptionsBool("-configure_bddc_metadata", "Experimental local Dirichlet/splitting metadata for PCBDDC/KSPFETIDP", NULL, app->configure_bddc_metadata, &app->configure_bddc_metadata, NULL));
   PetscCall(PetscOptionsBool("-inspect_layout", "Print constrained section/MATIS layout diagnostics and exit", NULL, app->inspect_layout, &app->inspect_layout, NULL));
+  PetscCall(PetscOptionsReal("-matis_duplication_limit", "Abort L1 BDDC/FETI-DP solves when MATIS duplicated rows / global rows reaches this value", NULL, app->matis_duplication_limit, &app->matis_duplication_limit, NULL));
   PetscOptionsEnd();
 
   (void)meshSet;
@@ -795,7 +798,7 @@ static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app, PetscRe
     PetscCall(PetscPrintf(comm,
                           "MATIS_LAYOUT ranks=%d map_rows_minmax=%" PetscInt_FMT ",%" PetscInt_FMT " map_ltog_bs=%" PetscInt_FMT " component_rows_sum=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT "\n",
                           ranks, minMapRows, maxMapRows, mapBlockSize, sumCompRows[0], sumCompRows[1], sumCompRows[2]));
-    PetscCall(PetscPrintf(comm, "MATIS_DUPLICATION value=%.6g limit=1.25\n", (double)duplication));
+    PetscCall(PetscPrintf(comm, "MATIS_DUPLICATION value=%.6g limit=%.6g\n", (double)duplication, (double)app->matis_duplication_limit));
     PetscCall(PetscFree(gids));
     PetscCall(PetscFree(comps));
   }
@@ -856,8 +859,9 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
     PetscReal duplication;
 
     PetscCall(ReportLayoutStats(dm, A, &app, &duplication));
-    PetscCheck(duplication < 1.25, PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG,
-               "Bad MATIS duplication %.6g >= 1.25: do not run BDDC/FETI-DP on this L1 partition; use -inspect_layout with graph partitioning first", (double)duplication);
+    PetscCheck(duplication < app.matis_duplication_limit, PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG,
+               "Bad MATIS duplication %.6g >= %.6g: do not run BDDC/FETI-DP on this L1 partition unless this diagnostic run intentionally raises -matis_duplication_limit",
+               (double)duplication, (double)app.matis_duplication_limit);
   }
 
   PetscCall(SNESCreate(PETSC_COMM_WORLD, &snes));
