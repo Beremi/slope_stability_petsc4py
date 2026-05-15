@@ -47,6 +47,13 @@ static PetscErrorCode IsDDVariant(const AppCtx *app, PetscBool *is_dd)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode IsPMGVariant(const AppCtx *app, PetscBool *is_pmg)
+{
+  PetscFunctionBeginUser;
+  PetscCall(PetscStrcasecmp(app->variant, "pmg", is_pmg));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static const char *BoundaryLabelName(const AppCtx *app)
 {
   return app->use_mesh ? "boundary_marker" : "marker";
@@ -140,7 +147,7 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   PetscCall(PetscOptionsReal("-poisson", "Poisson ratio", NULL, app->poisson, &app->poisson, NULL));
   PetscCall(PetscOptionsReal("-pressure", "Downward top traction magnitude for generated cube", NULL, app->pressure, &app->pressure, &pressureSet));
   PetscCall(PetscOptionsReal("-gravity", "Downward body force in the mesh vertical y-direction", NULL, app->gravity, &app->gravity, &gravitySet));
-  PetscCall(PetscOptionsString("-pc_variant", "gamg|bddc|fetidp|none", NULL, app->variant, app->variant, sizeof(app->variant), NULL));
+  PetscCall(PetscOptionsString("-pc_variant", "gamg|pmg|bddc|fetidp|none", NULL, app->variant, app->variant, sizeof(app->variant), NULL));
   PetscCall(PetscOptionsBool("-configure_bddc_metadata", "Experimental local Dirichlet/splitting metadata for PCBDDC/KSPFETIDP", NULL, app->configure_bddc_metadata, &app->configure_bddc_metadata, NULL));
   PetscCall(PetscOptionsBool("-inspect_layout", "Print constrained section/MATIS layout diagnostics and exit", NULL, app->inspect_layout, &app->inspect_layout, NULL));
   PetscCall(PetscOptionsReal("-matis_duplication_limit", "Abort L1 BDDC/FETI-DP solves when MATIS duplicated rows / global rows reaches this value", NULL, app->matis_duplication_limit, &app->matis_duplication_limit, NULL));
@@ -446,11 +453,84 @@ static PetscErrorCode SetupDiscretization(DM dm, const AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode CreatePMGLevelDM(DM templateDM, const AppCtx *app, PetscInt degree, const char name[], DM *levelDM)
+{
+  AppCtx levelApp = *app;
+
+  PetscFunctionBeginUser;
+  levelApp.degree = degree;
+  PetscCall(DMClone(templateDM, levelDM));
+  PetscCall(PetscObjectSetName((PetscObject)*levelDM, name));
+  PetscCall(SetupDiscretization(*levelDM, &levelApp));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetupPMGHierarchy(DM fineDM, const AppCtx *app)
+{
+  DM       p2 = NULL, p1 = NULL;
+  PetscInt n1, n2;
+
+  PetscFunctionBeginUser;
+  PetscCheck(app->degree == 4, PetscObjectComm((PetscObject)fineDM), PETSC_ERR_SUP, "-pc_variant pmg currently implements the P4 -> P2 -> P1 hierarchy, so use -degree 4");
+  PetscCall(CreatePMGLevelDM(fineDM, app, 2, "pmg_p2", &p2));
+  PetscCall(CreatePMGLevelDM(fineDM, app, 1, "pmg_p1", &p1));
+  PetscCall(DMSetCoarseDM(fineDM, p2));
+  PetscCall(DMSetCoarseDM(p2, p1));
+  {
+    Vec v1 = NULL, v2 = NULL;
+    PetscInt n1Local, n2Local;
+
+    PetscCall(DMCreateGlobalVector(p1, &v1));
+    PetscCall(DMCreateGlobalVector(p2, &v2));
+    PetscCall(VecGetLocalSize(v1, &n1Local));
+    PetscCall(VecGetLocalSize(v2, &n2Local));
+    PetscCallMPI(MPI_Allreduce(&n1Local, &n1, 1, MPIU_INT, MPI_SUM, PetscObjectComm((PetscObject)fineDM)));
+    PetscCallMPI(MPI_Allreduce(&n2Local, &n2, 1, MPIU_INT, MPI_SUM, PetscObjectComm((PetscObject)fineDM)));
+    PetscCall(VecDestroy(&v2));
+    PetscCall(VecDestroy(&v1));
+  }
+  PetscCheck(n1 > 0 && n2 > n1, PetscObjectComm((PetscObject)fineDM), PETSC_ERR_ARG_SIZ,
+             "PMG needs a nonempty hierarchy; got P2=%" PetscInt_FMT " P1=%" PetscInt_FMT " free dofs. Use a larger mesh for P4 -> P2 -> P1.", n2, n1);
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)fineDM), "PMG_HIERARCHY degrees=4,2,1 coarse_global_dofs=%" PetscInt_FMT ",%" PetscInt_FMT " coarse_pc=gamg\n", n2, n1));
+  PetscCall(DMDestroy(&p2));
+  PetscCall(DMDestroy(&p1));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetPMGTransfer(PC pc, PetscInt level, DM coarse, DM fine)
+{
+  Mat P = NULL, R = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateInterpolation(coarse, fine, &P, NULL));
+  PetscCall(MatTranspose(P, MAT_INITIAL_MATRIX, &R));
+  PetscCall(PCMGSetInterpolation(pc, level, P));
+  PetscCall(PCMGSetRestriction(pc, level, R));
+  PetscCall(PCMGSetInjection(pc, level, R));
+  PetscCall(MatDestroy(&R));
+  PetscCall(MatDestroy(&P));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigurePMG(PC pc, DM fineDM)
+{
+  DM p2 = NULL, p1 = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetCoarseDM(fineDM, &p2));
+  PetscCheck(p2, PetscObjectComm((PetscObject)fineDM), PETSC_ERR_ARG_WRONGSTATE, "PMG fine DM has no P2 coarse DM");
+  PetscCall(DMGetCoarseDM(p2, &p1));
+  PetscCheck(p1, PetscObjectComm((PetscObject)fineDM), PETSC_ERR_ARG_WRONGSTATE, "PMG P2 DM has no P1 coarse DM");
+  PetscCall(SetPMGTransfer(pc, 1, p1, p2));
+  PetscCall(SetPMGTransfer(pc, 2, p2, fineDM));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode ConfigureSolver(SNES snes, DM dm, Mat A, const AppCtx *app)
 {
   KSP       ksp;
   PC        pc;
-  PetscBool is_gamg, is_bddc, is_fetidp, is_none;
+  PetscBool is_gamg, is_pmg, is_bddc, is_fetidp, is_none;
 
   PetscFunctionBeginUser;
   PetscCall(SNESSetType(snes, SNESKSPONLY));
@@ -459,14 +539,42 @@ static PetscErrorCode ConfigureSolver(SNES snes, DM dm, Mat A, const AppCtx *app
   PetscCall(KSPSetTolerances(ksp, 1.0e-8, PETSC_DEFAULT, PETSC_DEFAULT, 200));
   PetscCall(KSPGetPC(ksp, &pc));
   PetscCall(PetscStrcasecmp(app->variant, "gamg", &is_gamg));
+  PetscCall(PetscStrcasecmp(app->variant, "pmg", &is_pmg));
   PetscCall(PetscStrcasecmp(app->variant, "bddc", &is_bddc));
   PetscCall(PetscStrcasecmp(app->variant, "fetidp", &is_fetidp));
   PetscCall(PetscStrcasecmp(app->variant, "none", &is_none));
-  PetscCheck(is_gamg || is_bddc || is_fetidp || is_none, PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG, "-pc_variant must be gamg, bddc, fetidp, or none");
+  PetscCheck(is_gamg || is_pmg || is_bddc || is_fetidp || is_none, PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG, "-pc_variant must be gamg, pmg, bddc, fetidp, or none");
 
   if (is_gamg) {
     PetscCall(PCSetType(pc, PCGAMG));
     PetscCall(PCGAMGSetType(pc, PCGAMGAGG));
+  } else if (is_pmg) {
+    KSP coarse;
+    PC  cpc;
+
+    PetscCall(PCSetType(pc, PCMG));
+    PetscCall(PCMGSetLevels(pc, 3, NULL));
+    PetscCall(PCMGSetType(pc, PC_MG_MULTIPLICATIVE));
+    PetscCall(PCMGSetCycleType(pc, PC_MG_CYCLE_V));
+    PetscCall(PCMGSetGalerkin(pc, PC_MG_GALERKIN_BOTH));
+    PetscCall(ConfigurePMG(pc, dm));
+    PetscCall(PCMGGetCoarseSolve(pc, &coarse));
+    PetscCall(KSPSetType(coarse, KSPCG));
+    PetscCall(KSPSetTolerances(coarse, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 50));
+    PetscCall(KSPGetPC(coarse, &cpc));
+    PetscCall(PCSetType(cpc, PCGAMG));
+    PetscCall(PCGAMGSetType(cpc, PCGAMGAGG));
+    for (PetscInt level = 1; level < 3; ++level) {
+      KSP smooth;
+      PC  spc;
+
+      PetscCall(PCMGGetSmoother(pc, level, &smooth));
+      PetscCall(KSPSetType(smooth, KSPCHEBYSHEV));
+      PetscCall(KSPSetNormType(smooth, KSP_NORM_NONE));
+      PetscCall(KSPSetTolerances(smooth, PETSC_DEFAULT, PETSC_DEFAULT, PETSC_DEFAULT, 2));
+      PetscCall(KSPGetPC(smooth, &spc));
+      PetscCall(PCSetType(spc, PCJACOBI));
+    }
   } else if (is_bddc) {
     PetscCall(PCSetType(pc, PCBDDC));
   } else if (is_fetidp) {
@@ -475,7 +583,7 @@ static PetscErrorCode ConfigureSolver(SNES snes, DM dm, Mat A, const AppCtx *app
     PetscCall(PCSetType(pc, PCNONE));
   }
 
-  if (is_gamg || is_bddc || is_fetidp) {
+  if (is_gamg || is_pmg || is_bddc || is_fetidp) {
     DM           subdm;
     MatNullSpace nearNullSpace;
     PetscInt     field = 0;
@@ -818,7 +926,7 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
   PetscMPIInt    ranks;
   PetscReal      solveTime, t0, t1, unorm;
   KSPConvergedReason reason;
-  PetscBool      is_bddc, is_fetidp;
+  PetscBool      is_pmg, is_bddc, is_fetidp;
 
   PetscFunctionBeginUser;
   PetscCall(PetscInitialize(&argc, &argv, NULL, help));
@@ -827,6 +935,7 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
   PetscCall(SetDDPartitionerDefault(PETSC_COMM_WORLD, &app));
   PetscCheck(!app.configure_bddc_metadata, PETSC_COMM_WORLD, PETSC_ERR_SUP,
              "-configure_bddc_metadata is disabled for this constrained PetscDS/DMPlex FEM driver: current local Dirichlet candidates are full local-section offsets, not verified MATIS local matrix rows");
+  PetscCall(IsPMGVariant(&app, &is_pmg));
   PetscCall(PetscStrcasecmp(app.variant, "bddc", &is_bddc));
   PetscCall(PetscStrcasecmp(app.variant, "fetidp", &is_fetidp));
 
@@ -834,6 +943,7 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
   if (app.use_mesh) PetscCall(BuildBoundaryMarkerFromFaceSets(dm));
   else PetscCall(MarkBoundaryFaces(dm));
   PetscCall(ReportBoundaryCounts(dm, &app));
+  if (is_pmg) PetscCall(SetupPMGHierarchy(dm, &app));
   PetscCall(SetupDiscretization(dm, &app));
   if (is_bddc || is_fetidp) {
     PetscCall(DMSetMatType(dm, MATIS));

@@ -6,9 +6,9 @@ that deliberately share the same implementation:
 - `cube_elasticity.c`: tiny main for a generated tetrahedral cube.
 - `l1_elasticity.c`: tiny main for the copied L1 Gmsh mesh.
 - `p4_elasticity_common.c`: all FE setup, assembly through
-  `PetscDS`/`DMPlexSetSNESLocalFEM`, solver setup, BDDC/FETI-DP component
-  metadata, boundary-label handling, layout diagnostics, solve reporting, and
-  result printing.
+  `PetscDS`/`DMPlexSetSNESLocalFEM`, solver setup, PMG hierarchy setup,
+  BDDC/FETI-DP component metadata, boundary-label handling, layout diagnostics,
+  solve reporting, and result printing.
 
 The runners should stay boring. If a change affects assembly, FE degree,
 boundary treatment, KSP/PC setup, or diagnostics, it belongs in the common file
@@ -59,6 +59,16 @@ mpiexec -n 2 ./l1_elasticity \
   -petscpartitioner_type parmetis
 ```
 
+L1 mesh P4 -> P2 -> P1 PMG solve:
+
+```bash
+mpiexec -n 2 ./l1_elasticity \
+  -pc_variant pmg \
+  -petscpartitioner_type simple \
+  -ksp_rtol 1e-3 \
+  -ksp_converged_reason
+```
+
 The L1 runner defaults to `../data/adaptive_family_a_l1.msh`, gravity loading,
 glued bottom, and roller side constraints. Override with `-mesh` or
 `-mesh_bc_mode rollers|base_only|full_sides`.
@@ -74,7 +84,7 @@ Both programs use the same:
 - PETSc P4 Lagrange vector FE space by default;
 - linear isotropic elasticity residual/Jacobian callbacks;
 - `SNESKSPONLY` solve path;
-- GAMG, BDDC, FETI-DP, and `none` variant selection;
+- GAMG, PMG, BDDC, FETI-DP, and `none` variant selection;
 - rigid-body near-nullspace attachment;
 - BDDC component splitting;
 - `BOUNDARY_COUNT`, `LAYOUT`, `MATIS_LAYOUT`, and `MATIS_DUPLICATION`
@@ -107,6 +117,26 @@ glued base plus side rollers, and many partial constraints. PETSc's constrained
 section therefore becomes scalar from the MATIS/BDDC point of view:
 `map_ltog_bs=1`. This is expected for the roller case and is why we provide
 component splitting manually.
+
+## PMG Variant
+
+`-pc_variant pmg` is a pure PETSc `PCMG` p-multigrid path for the default P4
+space. It builds same-topology DMPlex levels with degree progression P4 -> P2
+-> P1, supplies explicit DMPlex interpolation and transpose restriction
+matrices, uses Galerkin coarse operators, and sets the P1 bottom solve to GAMG.
+The P4 and P2 levels use two Chebyshev/Jacobi smoothing steps by default.
+
+This variant intentionally avoids MATIS, BDDC, and FETI-DP interface
+duplication. It currently requires `-degree 4`; very small toy meshes can have
+an empty constrained P1 space, in which case the driver asks for a larger mesh.
+
+Recent local PMG checks:
+
+```text
+cube faces=2,2,2 ranks=2: P2=300 P1=54, 16 KSP iterations
+L1 ranks=2 inspect_layout: P2=79024 P1=10526
+L1 ranks=2 rtol=1e-3: 3 KSP iterations, solve_time=87.5441 s
+```
 
 ## Why The L1 Mesh Is Harder
 
