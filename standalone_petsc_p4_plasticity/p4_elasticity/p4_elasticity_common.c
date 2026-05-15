@@ -32,6 +32,25 @@ enum {
 
 static PetscReal g_mu = 0.3846153846153846, g_lambda = 0.5769230769230769, g_pressure = 1.0, g_gravity = 0.0;
 
+static const PetscInt  boundaryValues[] = {MARKER_X_MAX, MARKER_X_MIN, MARKER_Z_MIN, MARKER_Z_MAX, MARKER_BASE, MARKER_Y_MAX};
+static const char     *boundaryNames[]  = {"x_max", "x_min", "z_min", "z_max", "base", "y_max"};
+
+static PetscErrorCode IsDDVariant(const AppCtx *app, PetscBool *is_dd)
+{
+  PetscBool is_bddc = PETSC_FALSE, is_fetidp = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscStrcasecmp(app->variant, "bddc", &is_bddc));
+  PetscCall(PetscStrcasecmp(app->variant, "fetidp", &is_fetidp));
+  *is_dd = (PetscBool)(is_bddc || is_fetidp);
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static const char *BoundaryLabelName(const AppCtx *app)
+{
+  return app->use_mesh ? "boundary_marker" : "marker";
+}
+
 static PetscErrorCode ZeroDisplacement(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar u[], void *ctx)
 {
   PetscFunctionBeginUser;
@@ -142,6 +161,32 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   g_lambda   = app->young * app->poisson / ((1.0 + app->poisson) * (1.0 - 2.0 * app->poisson));
   g_pressure = app->pressure;
   g_gravity  = app->gravity;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetDDPartitionerDefault(MPI_Comm comm, const AppCtx *app)
+{
+  PetscBool   is_dd, user_set;
+  PetscMPIInt ranks;
+  const char *part_type = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(IsDDVariant(app, &is_dd));
+  PetscCallMPI(MPI_Comm_size(comm, &ranks));
+  if (!app->use_mesh || !is_dd || ranks <= 1) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscOptionsHasName(NULL, NULL, "-petscpartitioner_type", &user_set));
+  if (user_set) PetscFunctionReturn(PETSC_SUCCESS);
+#if defined(PETSC_HAVE_PARMETIS)
+  part_type = "parmetis";
+#elif defined(PETSC_HAVE_PTSCOTCH)
+  part_type = "ptscotch";
+#endif
+  if (part_type) {
+    PetscCall(PetscOptionsSetValue(NULL, "-petscpartitioner_type", part_type));
+    PetscCall(PetscPrintf(comm, "L1 BDDC/FETI-DP partitioner default: -petscpartitioner_type %s\n", part_type));
+  } else {
+    PetscCall(PetscPrintf(comm, "L1 BDDC/FETI-DP partitioner warning: PETSc has no ParMETIS/PTScotch; using available default\n"));
+  }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -281,6 +326,71 @@ static PetscErrorCode MarkBoundaryFaces(DM dm)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode BuildBoundaryMarkerFromFaceSets(DM dm)
+{
+  DMLabel faceSets = NULL, marker = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLabel(dm, "Face Sets", &faceSets));
+  PetscCheck(faceSets, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE,
+             "Gmsh mesh has no 'Face Sets' label. Run with -dm_view ::ascii_info_detail or check the .msh PhysicalNames/Entities.");
+  PetscCall(DMCreateLabel(dm, "boundary_marker"));
+  PetscCall(DMGetLabel(dm, "boundary_marker", &marker));
+  for (PetscInt k = 0; k < (PetscInt)(sizeof(boundaryValues) / sizeof(boundaryValues[0])); ++k) {
+    IS              points = NULL;
+    const PetscInt *idx;
+    PetscInt        n;
+
+    PetscCall(DMLabelGetStratumIS(faceSets, boundaryValues[k], &points));
+    if (!points) continue;
+    PetscCall(ISGetLocalSize(points, &n));
+    PetscCall(ISGetIndices(points, &idx));
+    for (PetscInt i = 0; i < n; ++i) PetscCall(DMLabelSetValue(marker, idx[i], boundaryValues[k]));
+    PetscCall(ISRestoreIndices(points, &idx));
+    PetscCall(ISDestroy(&points));
+  }
+  PetscCall(DMPlexLabelComplete(dm, marker));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ReportBoundaryCounts(DM dm, const AppCtx *app)
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)dm);
+  DMLabel  label = NULL;
+  PetscInt counts[sizeof(boundaryValues) / sizeof(boundaryValues[0])];
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLabel(dm, BoundaryLabelName(app), &label));
+  PetscCheck(label, comm, PETSC_ERR_ARG_WRONGSTATE, "Missing boundary label %s", BoundaryLabelName(app));
+  for (PetscInt k = 0; k < (PetscInt)(sizeof(boundaryValues) / sizeof(boundaryValues[0])); ++k) {
+    IS       is = NULL;
+    PetscInt nloc = 0;
+
+    PetscCall(DMLabelGetStratumIS(label, boundaryValues[k], &is));
+    if (is) PetscCall(ISGetLocalSize(is, &nloc));
+    PetscCallMPI(MPI_Allreduce(&nloc, &counts[k], 1, MPIU_INT, MPI_SUM, comm));
+    PetscCall(PetscPrintf(comm, "BOUNDARY_COUNT name=%s tag=%" PetscInt_FMT " points=%" PetscInt_FMT "\n", boundaryNames[k], boundaryValues[k], counts[k]));
+    PetscCall(ISDestroy(&is));
+  }
+
+  if (app->use_mesh) {
+    PetscBool isRollers, isFullSides;
+
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &isRollers));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "full_sides", &isFullSides));
+    PetscCheck(counts[4] > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "L1 boundary label has no base points");
+    if (isRollers || isFullSides) {
+      PetscCheck(counts[0] > 0 && counts[1] > 0 && counts[2] > 0 && counts[3] > 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+                 "L1 boundary label is missing at least one required side group: x_max=%" PetscInt_FMT " x_min=%" PetscInt_FMT " z_min=%" PetscInt_FMT " z_max=%" PetscInt_FMT,
+                 counts[0], counts[1], counts[2], counts[3]);
+    }
+  } else {
+    PetscCheck(counts[2] > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "Cube boundary label has no clamped z_min points");
+    PetscCheck(app->pressure == 0.0 || counts[3] > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "Cube boundary label has no loaded z_max points");
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode SetupDiscretization(DM dm, const AppCtx *app)
 {
   const PetscInt components[3] = {0, 1, 2};
@@ -299,7 +409,8 @@ static PetscErrorCode SetupDiscretization(DM dm, const AppCtx *app)
   PetscCall(PetscDSSetResidual(ds, 0, ResidualBody, ResidualStress));
   PetscCall(PetscDSSetJacobian(ds, 0, 0, NULL, NULL, NULL, JacobianElasticity));
 
-  PetscCall(DMGetLabel(dm, "marker", &label));
+  PetscCall(DMGetLabel(dm, BoundaryLabelName(app), &label));
+  PetscCheck(label, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE, "Missing boundary label %s", BoundaryLabelName(app));
   if (app->use_mesh) {
     const PetscInt base = MARKER_BASE, xRollers[2] = {MARKER_X_MIN, MARKER_X_MAX}, zRollers[2] = {MARKER_Z_MIN, MARKER_Z_MAX};
     const PetscInt xComp[1] = {0}, zComp[1] = {2};
@@ -427,8 +538,8 @@ static PetscErrorCode BuildLocalDirichletIS(DM dm, const AppCtx *app, IS *dirich
 
   PetscFunctionBeginUser;
   PetscCall(DMGetLocalSection(dm, &section));
-  PetscCall(DMGetLabel(dm, "marker", &label));
-  PetscCheck(label, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE, "Missing marker label");
+  PetscCall(DMGetLabel(dm, BoundaryLabelName(app), &label));
+  PetscCheck(label, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE, "Missing boundary label %s", BoundaryLabelName(app));
 
   if (app->use_mesh) {
     PetscBool isRollers, isBaseOnly, isFullSides;
@@ -602,7 +713,7 @@ static PetscErrorCode ConfigureFETIDPComponentSplitting(KSP ksp, DM dm, Mat A)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app)
+static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app, PetscReal *matisDuplication)
 {
   MPI_Comm                 comm = PetscObjectComm((PetscObject)dm);
   PetscSection             section;
@@ -615,6 +726,7 @@ static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app)
   PetscInt                 minMatRows, maxMatRows, dmBlockSize;
 
   PetscFunctionBeginUser;
+  if (matisDuplication) *matisDuplication = 0.0;
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
   PetscCall(DMGetLocalSection(dm, &section));
   PetscCall(PetscSectionGetChart(section, &pStart, &pEnd));
@@ -660,6 +772,7 @@ static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app)
     const PetscInt        *ridx;
     PetscInt               nloc, mapBlockSize, ngids, *gids = NULL, *comps = NULL;
     PetscInt               localCompRows[3] = {0, 0, 0}, sumCompRows[3], minMapRows, maxMapRows;
+    PetscReal              duplication;
 
     PetscCall(MatISGetLocalToGlobalMapping(A, &rmap, NULL));
     PetscCall(ISLocalToGlobalMappingGetSize(rmap, &nloc));
@@ -677,9 +790,12 @@ static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app)
     PetscCallMPI(MPI_Allreduce(localCompRows, sumCompRows, 3, MPIU_INT, MPI_SUM, comm));
     PetscCallMPI(MPI_Allreduce(&nloc, &minMapRows, 1, MPIU_INT, MPI_MIN, comm));
     PetscCallMPI(MPI_Allreduce(&nloc, &maxMapRows, 1, MPIU_INT, MPI_MAX, comm));
+    duplication = matRowsGlobal ? ((PetscReal)(sumCompRows[0] + sumCompRows[1] + sumCompRows[2])) / ((PetscReal)matRowsGlobal) : 0.0;
+    if (matisDuplication) *matisDuplication = duplication;
     PetscCall(PetscPrintf(comm,
                           "MATIS_LAYOUT ranks=%d map_rows_minmax=%" PetscInt_FMT ",%" PetscInt_FMT " map_ltog_bs=%" PetscInt_FMT " component_rows_sum=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT "\n",
                           ranks, minMapRows, maxMapRows, mapBlockSize, sumCompRows[0], sumCompRows[1], sumCompRows[2]));
+    PetscCall(PetscPrintf(comm, "MATIS_DUPLICATION value=%.6g limit=1.25\n", (double)duplication));
     PetscCall(PetscFree(gids));
     PetscCall(PetscFree(comps));
   }
@@ -705,11 +821,16 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
   PetscCall(PetscInitialize(&argc, &argv, NULL, help));
   PetscCallMPI(MPI_Comm_size(PETSC_COMM_WORLD, &ranks));
   PetscCall(ProcessOptions(PETSC_COMM_WORLD, spec, &app));
+  PetscCall(SetDDPartitionerDefault(PETSC_COMM_WORLD, &app));
+  PetscCheck(!app.configure_bddc_metadata, PETSC_COMM_WORLD, PETSC_ERR_SUP,
+             "-configure_bddc_metadata is disabled for this constrained PetscDS/DMPlex FEM driver: current local Dirichlet candidates are full local-section offsets, not verified MATIS local matrix rows");
   PetscCall(PetscStrcasecmp(app.variant, "bddc", &is_bddc));
   PetscCall(PetscStrcasecmp(app.variant, "fetidp", &is_fetidp));
 
   PetscCall(CreateMesh(PETSC_COMM_WORLD, &app, &dm));
-  PetscCall(MarkBoundaryFaces(dm));
+  if (app.use_mesh) PetscCall(BuildBoundaryMarkerFromFaceSets(dm));
+  else PetscCall(MarkBoundaryFaces(dm));
+  PetscCall(ReportBoundaryCounts(dm, &app));
   PetscCall(SetupDiscretization(dm, &app));
   if (is_bddc || is_fetidp) {
     PetscCall(DMSetMatType(dm, MATIS));
@@ -723,13 +844,20 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
   PetscCall(MatSetOption(A, MAT_SPD, PETSC_TRUE));
   PetscCall(MatSetOption(A, MAT_SPD_ETERNAL, PETSC_TRUE));
   if (app.inspect_layout) {
-    PetscCall(ReportLayoutStats(dm, A, &app));
+    PetscCall(ReportLayoutStats(dm, A, &app, NULL));
     PetscCall(VecDestroy(&rhs));
     PetscCall(VecDestroy(&u));
     PetscCall(MatDestroy(&A));
     PetscCall(DMDestroy(&dm));
     PetscCall(PetscFinalize());
     PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  if (app.use_mesh && (is_bddc || is_fetidp)) {
+    PetscReal duplication;
+
+    PetscCall(ReportLayoutStats(dm, A, &app, &duplication));
+    PetscCheck(duplication < 1.25, PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG,
+               "Bad MATIS duplication %.6g >= 1.25: do not run BDDC/FETI-DP on this L1 partition; use -inspect_layout with graph partitioning first", (double)duplication);
   }
 
   PetscCall(SNESCreate(PETSC_COMM_WORLD, &snes));
@@ -742,8 +870,6 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
   PetscCall(KSPGetPC(ksp, &pc));
   if (is_bddc) PetscCall(ConfigureBDDCComponentSplitting(pc, dm, A));
   if (is_fetidp) PetscCall(ConfigureFETIDPComponentSplitting(ksp, dm, A));
-  if (app.configure_bddc_metadata && is_bddc) PetscCall(ConfigureBDDCMetadata(pc, dm, &app, A));
-  if (app.configure_bddc_metadata && is_fetidp) PetscCall(ConfigureFETIDPMetadata(ksp, dm, &app, A));
 
   PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
   localCells = cEnd - cStart;
