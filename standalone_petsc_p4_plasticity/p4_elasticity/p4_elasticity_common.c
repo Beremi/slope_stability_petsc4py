@@ -1,7 +1,4 @@
-static char help[] = "Pure PETSc P4 tetrahedral elasticity example.\n"
-                     "Generates a DMPlex tetra cube, or reads a Gmsh mesh with -mesh.\n"
-                     "For -mesh, glues the bottom, applies side rollers, and loads by gravity.\n\n";
-
+#include "p4_elasticity_common.h"
 #include <petscdmplex.h>
 #include <petscsnes.h>
 #include <petscds.h>
@@ -17,6 +14,8 @@ typedef struct {
   char      variant[32];
   char      mesh_bc_mode[32];
   char      mesh[PETSC_MAX_PATH_LEN];
+  char      case_name[32];
+  P4ElasticityCaseKind case_kind;
   PetscBool use_mesh;
   PetscBool configure_bddc_metadata;
   PetscBool inspect_layout;
@@ -82,46 +81,53 @@ static void BoundaryNoFlux(PetscInt dim, PetscInt Nf, PetscInt NfAux, const Pets
   for (PetscInt c = 0; c < dim * dim; ++c) f1[c] = 0.0;
 }
 
-static PetscErrorCode ProcessOptions(MPI_Comm comm, AppCtx *app)
+static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec, AppCtx *app)
 {
   PetscBool flg;
   PetscBool meshSet = PETSC_FALSE, pressureSet = PETSC_FALSE, gravitySet = PETSC_FALSE;
   PetscInt  nfaces  = 3;
 
   PetscFunctionBeginUser;
+  PetscCheck(spec, comm, PETSC_ERR_ARG_NULL, "Missing elasticity case spec");
   app->faces[0] = 2;
   app->faces[1] = 2;
   app->faces[2] = 2;
   app->degree   = 4;
   app->young    = 1.0;
   app->poisson  = 0.30;
-  app->pressure = 1.0;
-  app->gravity  = 0.0;
-  app->use_mesh = PETSC_FALSE;
+  app->pressure = spec->default_pressure;
+  app->gravity  = spec->default_gravity;
+  app->case_kind = spec->kind;
+  app->use_mesh = (PetscBool)(spec->kind == P4_ELASTICITY_L1_MESH);
   app->configure_bddc_metadata = PETSC_FALSE;
   app->inspect_layout           = PETSC_FALSE;
-  app->mesh[0]  = '\0';
+  PetscCall(PetscStrncpy(app->case_name, spec->name ? spec->name : "unknown", sizeof(app->case_name)));
+  PetscCall(PetscStrncpy(app->mesh, spec->default_mesh ? spec->default_mesh : "", sizeof(app->mesh)));
   PetscCall(PetscStrncpy(app->variant, "gamg", sizeof(app->variant)));
-  PetscCall(PetscStrncpy(app->mesh_bc_mode, "rollers", sizeof(app->mesh_bc_mode)));
+  PetscCall(PetscStrncpy(app->mesh_bc_mode, spec->default_bc_mode ? spec->default_bc_mode : "rollers", sizeof(app->mesh_bc_mode)));
 
   PetscOptionsBegin(comm, NULL, "P4 elasticity options", NULL);
-  PetscCall(PetscOptionsString("-mesh", "Optional mesh file to read with DMPlexCreateFromFile", NULL, app->mesh, app->mesh, sizeof(app->mesh), &meshSet));
-  PetscCall(PetscOptionsIntArray("-cube_faces", "Hex subdivisions in x,y,z before tetrahedralization", NULL, app->faces, &nfaces, &flg));
-  PetscCheck(!flg || nfaces == 3, comm, PETSC_ERR_ARG_SIZ, "-cube_faces expects exactly three integers");
+  if (app->use_mesh) {
+    PetscCall(PetscOptionsString("-mesh", "Mesh file to read with DMPlexCreateFromFile", NULL, app->mesh, app->mesh, sizeof(app->mesh), &meshSet));
+    PetscCall(PetscOptionsString("-mesh_bc_mode", "For mesh case: rollers|base_only|full_sides", NULL, app->mesh_bc_mode, app->mesh_bc_mode, sizeof(app->mesh_bc_mode), NULL));
+  } else {
+    PetscCall(PetscOptionsIntArray("-cube_faces", "Hex subdivisions in x,y,z before tetrahedralization", NULL, app->faces, &nfaces, &flg));
+    PetscCheck(!flg || nfaces == 3, comm, PETSC_ERR_ARG_SIZ, "-cube_faces expects exactly three integers");
+  }
   PetscCall(PetscOptionsInt("-degree", "Lagrange FE degree", NULL, app->degree, &app->degree, NULL));
   PetscCall(PetscOptionsReal("-young", "Young's modulus", NULL, app->young, &app->young, NULL));
   PetscCall(PetscOptionsReal("-poisson", "Poisson ratio", NULL, app->poisson, &app->poisson, NULL));
   PetscCall(PetscOptionsReal("-pressure", "Downward top traction magnitude for generated cube", NULL, app->pressure, &app->pressure, &pressureSet));
   PetscCall(PetscOptionsReal("-gravity", "Downward body force in the mesh vertical y-direction", NULL, app->gravity, &app->gravity, &gravitySet));
   PetscCall(PetscOptionsString("-pc_variant", "gamg|bddc|fetidp|none", NULL, app->variant, app->variant, sizeof(app->variant), NULL));
-  PetscCall(PetscOptionsString("-mesh_bc_mode", "For -mesh: rollers|base_only|full_sides", NULL, app->mesh_bc_mode, app->mesh_bc_mode, sizeof(app->mesh_bc_mode), NULL));
   PetscCall(PetscOptionsBool("-configure_bddc_metadata", "Experimental local Dirichlet/splitting metadata for PCBDDC/KSPFETIDP", NULL, app->configure_bddc_metadata, &app->configure_bddc_metadata, NULL));
   PetscCall(PetscOptionsBool("-inspect_layout", "Print constrained section/MATIS layout diagnostics and exit", NULL, app->inspect_layout, &app->inspect_layout, NULL));
   PetscOptionsEnd();
 
-  app->use_mesh = (PetscBool)(meshSet && app->mesh[0]);
-  if (app->use_mesh && !pressureSet) app->pressure = 0.0;
-  if (app->use_mesh && !gravitySet) app->gravity = 1.0;
+  (void)meshSet;
+  (void)pressureSet;
+  (void)gravitySet;
+  PetscCheck(!app->use_mesh || app->mesh[0], comm, PETSC_ERR_ARG_WRONG, "Mesh case requires a non-empty -mesh path");
   for (PetscInt d = 0; d < 3; ++d) PetscCheck(app->faces[d] > 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-cube_faces entries must be positive");
   PetscCheck(app->degree >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-degree must be >= 1");
   PetscCheck(app->poisson > -1.0 && app->poisson < 0.5, comm, PETSC_ERR_ARG_OUTOFRANGE, "-poisson must lie in (-1,0.5)");
@@ -680,7 +686,7 @@ static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-int main(int argc, char **argv)
+PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *spec, const char help[])
 {
   AppCtx         app;
   DM             dm;
@@ -698,7 +704,7 @@ int main(int argc, char **argv)
   PetscFunctionBeginUser;
   PetscCall(PetscInitialize(&argc, &argv, NULL, help));
   PetscCallMPI(MPI_Comm_size(PETSC_COMM_WORLD, &ranks));
-  PetscCall(ProcessOptions(PETSC_COMM_WORLD, &app));
+  PetscCall(ProcessOptions(PETSC_COMM_WORLD, spec, &app));
   PetscCall(PetscStrcasecmp(app.variant, "bddc", &is_bddc));
   PetscCall(PetscStrcasecmp(app.variant, "fetidp", &is_fetidp));
 
@@ -723,7 +729,7 @@ int main(int argc, char **argv)
     PetscCall(MatDestroy(&A));
     PetscCall(DMDestroy(&dm));
     PetscCall(PetscFinalize());
-    return 0;
+    PetscFunctionReturn(PETSC_SUCCESS);
   }
 
   PetscCall(SNESCreate(PETSC_COMM_WORLD, &snes));
@@ -776,5 +782,5 @@ int main(int argc, char **argv)
   PetscCall(SNESDestroy(&snes));
   PetscCall(DMDestroy(&dm));
   PetscCall(PetscFinalize());
-  return 0;
+  PetscFunctionReturn(PETSC_SUCCESS);
 }
