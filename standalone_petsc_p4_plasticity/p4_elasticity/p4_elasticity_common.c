@@ -130,7 +130,7 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   app->use_mesh = (PetscBool)(spec->kind == P4_ELASTICITY_L1_MESH);
   app->configure_bddc_metadata = PETSC_FALSE;
   app->inspect_layout           = PETSC_FALSE;
-  app->pmg_coarse_redundant_group_size        = 16;
+  app->pmg_coarse_redundant_group_size        = 64;
   app->pmg_coarse_gamg_aggressive_square_graph = PETSC_FALSE;
   app->matis_duplication_limit  = 1.25;
   PetscCall(PetscStrncpy(app->case_name, spec->name ? spec->name : "unknown", sizeof(app->case_name)));
