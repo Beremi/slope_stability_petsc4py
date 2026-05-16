@@ -59,6 +59,7 @@ rss_to_gib() {
     printf ''
     return 0
   fi
+  # Karolina's default sacct -P can emit bare AveRSS values in bytes.
   awk -v s="$value" '
     BEGIN {
       unit = substr(s, length(s), 1)
@@ -67,7 +68,7 @@ rss_to_gib() {
       else if (unit == "M") kib = val * 1024.0
       else if (unit == "G") kib = val * 1024.0 * 1024.0
       else if (unit == "T") kib = val * 1024.0 * 1024.0 * 1024.0
-      else kib = val
+      else kib = val / 1024.0
       printf "%.6g", kib / (1024.0 * 1024.0)
     }
   '
@@ -119,8 +120,8 @@ event_time() {
     maxrss=""
     averss=""
     maxvmsize=""
-    if [[ ! -f "$sacct_file" && -n "$job_id" ]] && command -v sacct >/dev/null 2>&1; then
-      sacct -j "$job_id" --format=JobID,JobName%48,State,Elapsed,AllocNodes,AllocCPUS,NTasks,MaxRSS,AveRSS,MaxVMSize,ExitCode -P >"$sacct_file" 2>/dev/null || true
+    if [[ -n "$job_id" ]] && command -v sacct >/dev/null 2>&1; then
+      sacct --units=M -j "$job_id" --format=JobID,JobName%48,State,Elapsed,AllocNodes,AllocCPUS,NTasks,MaxRSS,AveRSS,MaxVMSize,ExitCode -P >"$sacct_file" 2>/dev/null || true
     fi
     if [[ -f "$sacct_file" ]]; then
       state="$(sacct_value "$sacct_file" State)"

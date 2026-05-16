@@ -155,7 +155,7 @@ grep '^SWEEP_RESULT ' "$run_log" >"$RESULT_DIR/sweep_results.txt" || true
 grep -E '^(RESULT|SWEEP_CONFIG|SWEEP_RESULT|PMG_COARSE_SOLVE|BOUNDARY_COUNT)' "$run_log" >"$RESULT_DIR/diagnostics.txt" || true
 
 if command -v sacct >/dev/null 2>&1 && [[ "$JOB_ID" != manual_* ]]; then
-  sacct -j "$JOB_ID" --format=JobID,JobName%48,State,Elapsed,AllocNodes,AllocCPUS,NTasks,MaxRSS,AveRSS,MaxVMSize,ExitCode -P >"$RESULT_DIR/sacct.txt" 2>/dev/null || true
+  sacct --units=M -j "$JOB_ID" --format=JobID,JobName%48,State,Elapsed,AllocNodes,AllocCPUS,NTasks,MaxRSS,AveRSS,MaxVMSize,ExitCode -P >"$RESULT_DIR/sacct.txt" 2>/dev/null || true
 fi
 
 {
