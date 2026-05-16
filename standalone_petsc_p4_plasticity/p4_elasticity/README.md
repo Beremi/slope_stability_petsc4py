@@ -138,7 +138,53 @@ Useful PMG coarse-solve knobs:
 -pmg_coarse_gamg_aggressive_square_graph false
 ```
 
-This variant intentionally avoids MATIS, BDDC, and FETI-DP interface
+## Material Sweep / Preconditioner Reuse
+
+Both drivers can run a deterministic random sweep of elastic material
+parameters on the same mesh and solver objects:
+
+```bash
+mpiexec -n 2 ./cube_elasticity \
+  -cube_faces 2,2,2 \
+  -pc_variant pmg \
+  -ksp_type fgmres \
+  -ksp_rtol 1e-6 \
+  -material_sweep_count 100 \
+  -material_sweep_reuse_pc true \
+  -log_view
+```
+
+The sweep samples valid isotropic materials with positive Young's modulus and
+Poisson ratio in `(-1,0.5)`. Defaults are:
+
+```text
+-material_sweep_young_min 0.5
+-material_sweep_young_max 2.0
+-material_sweep_poisson_min 0.20
+-material_sweep_poisson_max 0.45
+-material_sweep_seed 1729
+```
+
+Each sample prints a `SWEEP_RESULT` line with `E`, `nu`, `lambda`, `mu`,
+iteration count, convergence reason, solve time, and max displacement. The final
+`RESULT` line summarizes first-solve time, repeated-solve average, total
+iterations, and convergence count.
+
+Two reuse modes are useful:
+
+- `-material_sweep_reuse_pc false`: rebuild/refresh the preconditioner when
+  SNES assembles a new matrix. For PMG, PETSc reuses the fixed interpolation and
+  Galerkin sparsity pattern, so repeated setup drops `MatMatMatMultSym` but
+  still pays `PCSetUp` and `MatMatMatMultNum` for numeric coarse operators.
+- `-material_sweep_reuse_pc true`: use `SNESSetLagPreconditioner(-2)` with
+  persistent lagging, so the first preconditioner is kept for later material
+  samples. In PETSc logs the repeated stage should have no `PCSetUp` and no
+  Galerkin matrix-product setup; only the fine matrix assembly and Krylov
+  applications remain. This is an intentionally stale approximate
+  preconditioner, so use a flexible Krylov method such as FGMRES when testing
+  broad material variation.
+
+The PMG variant intentionally avoids MATIS, BDDC, and FETI-DP interface
 duplication. It currently requires `-degree 4`; very small toy meshes can have
 an empty constrained P1 space, in which case the driver asks for a larger mesh.
 
