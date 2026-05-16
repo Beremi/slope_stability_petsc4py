@@ -18,6 +18,7 @@ TOTAL_RANKS="${SLURM_NTASKS:-${RANKS:?Set RANKS or submit with --ntasks}}"
 NODES="${SLURM_JOB_NUM_NODES:-1}"
 JOB_ID="${SLURM_JOB_ID:-manual_$$}"
 JOB_NAME="${SLURM_JOB_NAME:-p4e_ms_${CASE}_${MATERIAL_SWEEP_MODE}_${TOTAL_RANKS}r}"
+RUN_LABEL="${RUN_LABEL:-}"
 
 export PETSC_ARCH="${PETSC_ARCH:-linux-c-opt}"
 if [[ -z "${PETSC_DIR:-}" ]]; then
@@ -44,23 +45,34 @@ for libdir in "$KAROLINA_BZIP2_ROOT/lib64" "$KAROLINA_BZIP2_ROOT/lib"; do
   fi
 done
 
-RESULT_DIR="$CAMPAIGN_DIR/results/${JOB_ID}_${CASE}_pmg_${MATERIAL_SWEEP_MODE}_${TOTAL_RANKS}r"
+safe_label=""
+if [[ -n "$RUN_LABEL" ]]; then
+  safe_label="_${RUN_LABEL//[^A-Za-z0-9_.-]/_}"
+fi
+RESULT_DIR="$CAMPAIGN_DIR/results/${JOB_ID}_${CASE}_pmg_${MATERIAL_SWEEP_MODE}_${TOTAL_RANKS}r${safe_label}"
 mkdir -p "$RESULT_DIR"
 
 metadata="$RESULT_DIR/job.env"
 {
   echo "JOB_ID=$JOB_ID"
   echo "JOB_NAME=$JOB_NAME"
+  echo "RUN_LABEL=$RUN_LABEL"
   echo "CASE=$CASE"
   echo "VARIANT=pmg"
   echo "MATERIAL_SWEEP_MODE=$MATERIAL_SWEEP_MODE"
   echo "MATERIAL_SWEEP_COUNT=${MATERIAL_SWEEP_COUNT:-100}"
   echo "RANKS=$TOTAL_RANKS"
   echo "NODES=$NODES"
+  echo "TASKS_PER_NODE=${SLURM_NTASKS_PER_NODE:-${TASKS_PER_NODE:-unknown}}"
   echo "NODELIST=${SLURM_JOB_NODELIST:-unknown}"
   echo "PARTITION=${SLURM_JOB_PARTITION:-${PARTITION:-unknown}}"
   echo "ACCOUNT=${SLURM_JOB_ACCOUNT:-${ACCOUNT:-unknown}}"
   echo "QOS=${SLURM_JOB_QOS:-${QOS:-unknown}}"
+  echo "PMG_GROUP_SIZE=${PMG_GROUP_SIZE:-16}"
+  echo "PMG_COARSE_TELESCOPE_FACTOR=${PMG_COARSE_TELESCOPE_FACTOR:-}"
+  echo "PMG_COARSE_TELESCOPE_ACTIVE_RANKS=${PMG_COARSE_TELESCOPE_ACTIVE_RANKS:-}"
+  echo "PMG_COARSE_TELESCOPE_SUBCOMM_TYPE=${PMG_COARSE_TELESCOPE_SUBCOMM_TYPE:-}"
+  echo "EXTRA_PETSC_OPTIONS=${EXTRA_PETSC_OPTIONS:-}"
   echo "PETSC_DIR=$PETSC_DIR"
   echo "PETSC_ARCH=$PETSC_ARCH"
   echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
@@ -114,6 +126,19 @@ BASE_ARGS=(
   -material_sweep_seed "${MATERIAL_SWEEP_SEED:-1729}"
   -material_sweep_mode "$MATERIAL_SWEEP_MODE"
 )
+
+if [[ -n "${PMG_COARSE_TELESCOPE_FACTOR:-}" ]]; then
+  BASE_ARGS+=(
+    -mg_coarse_pc_type telescope
+    -mg_coarse_pc_telescope_reduction_factor "$PMG_COARSE_TELESCOPE_FACTOR"
+    -mg_coarse_pc_telescope_subcomm_type "${PMG_COARSE_TELESCOPE_SUBCOMM_TYPE:-interlaced}"
+    -mg_coarse_telescope_ksp_type "${PMG_COARSE_TELESCOPE_KSP_TYPE:-fgmres}"
+    -mg_coarse_telescope_ksp_rtol "${PMG_COARSE_TELESCOPE_KSP_RTOL:-1e-3}"
+    -mg_coarse_telescope_ksp_max_it "${PMG_COARSE_TELESCOPE_KSP_MAX_IT:-100}"
+    -mg_coarse_telescope_ksp_gmres_restart "${PMG_COARSE_TELESCOPE_KSP_GMRES_RESTART:-100}"
+    -mg_coarse_telescope_pc_type "${PMG_COARSE_TELESCOPE_PC_TYPE:-gamg}"
+  )
+fi
 
 if [[ "${LOG_VIEW:-1}" == "1" ]]; then
   BASE_ARGS+=(-log_view)

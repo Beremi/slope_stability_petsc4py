@@ -158,3 +158,45 @@ material_sweep_samples.csv
 memory/accounting fields, and PETSc `-log_view` timing columns for the first
 and repeated sweep stages, including `SNESSolve`, `DMPlexJacobianFE`, `KSPSolve`,
 `PCSetUp`, PMG Galerkin products, and fresh DM/matrix setup events.
+
+## PMG Telescope Refresh Sweep
+
+`submit_telescope_refresh.sh` is a narrower campaign for the L1 PMG material
+refresh path. It runs only `-material_sweep_mode refresh`, uses 10 material
+samples by default, and compares the three current coarse-rank agglomeration
+choices:
+
+```text
+NODES=2
+TASKS_PER_NODE_LIST="64 128"        # 128 and 256 total MPI ranks
+ACTIVE_COARSE_RANKS_LIST="8 16 32"  # telescope factors total_ranks/active
+MATERIAL_SWEEP_COUNT=10
+TELESCOPE_SUBCOMM_TYPE=interlaced
+```
+
+Preview:
+
+```bash
+cd standalone_petsc_p4_plasticity/p4_elasticity/karolina
+DRY_RUN=1 ./submit_telescope_refresh.sh
+```
+
+Submit to the short queue:
+
+```bash
+PARTITION=qcpu_exp \
+TIME_LIMIT=00:15:00 \
+./submit_telescope_refresh.sh
+```
+
+This creates six jobs: `2x64` and `2x128` ranks-per-node, each with active P1
+coarse ranks `8`, `16`, and `32`. The collector used for the material sweep also
+handles this campaign:
+
+```bash
+./collect_material_sweep.sh runs/telescope_refresh_<timestamp>
+```
+
+The resulting `material_sweep_summary.csv` includes `run_label`,
+`tasks_per_node`, `pmg_telescope_factor`, `pmg_telescope_active_ranks`, and all
+the existing PETSc timing columns.
