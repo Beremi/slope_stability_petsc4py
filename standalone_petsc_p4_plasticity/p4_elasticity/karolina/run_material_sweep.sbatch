@@ -73,6 +73,7 @@ metadata="$RESULT_DIR/job.env"
   echo "PMG_COARSE_TELESCOPE_FACTOR=${PMG_COARSE_TELESCOPE_FACTOR:-}"
   echo "PMG_COARSE_TELESCOPE_ACTIVE_RANKS=${PMG_COARSE_TELESCOPE_ACTIVE_RANKS:-}"
   echo "PMG_COARSE_TELESCOPE_SUBCOMM_TYPE=${PMG_COARSE_TELESCOPE_SUBCOMM_TYPE:-}"
+  echo "PLEX_PARTITION_BALANCE=${PLEX_PARTITION_BALANCE:-false}"
   echo "EXTRA_PETSC_OPTIONS=${EXTRA_PETSC_OPTIONS:-}"
   echo "PETSC_DIR=$PETSC_DIR"
   echo "PETSC_ARCH=$PETSC_ARCH"
@@ -127,6 +128,13 @@ BASE_ARGS=(
   -material_sweep_seed "${MATERIAL_SWEEP_SEED:-1729}"
   -material_sweep_mode "$MATERIAL_SWEEP_MODE"
 )
+
+if [[ "${PLEX_PARTITION_BALANCE:-false}" == "true" ]]; then
+  BASE_ARGS+=(-dm_plex_partition_balance true)
+elif [[ "${PLEX_PARTITION_BALANCE:-false}" != "false" ]]; then
+  echo "ERROR: PLEX_PARTITION_BALANCE must be true or false, got ${PLEX_PARTITION_BALANCE:-}" >&2
+  exit 2
+fi
 
 if [[ -n "${PMG_COARSE_TELESCOPE_FACTOR:-}" ]]; then
   BASE_ARGS+=(
@@ -189,7 +197,16 @@ run_log="$RESULT_DIR/run.log"
 time_log="$RESULT_DIR/time.txt"
 
 set +e
-/usr/bin/time -v -o "$time_log" "$LAUNCHER" "${LAUNCH_ARGS[@]}" "${BASE_ARGS[@]}" >"$run_log" 2>&1
+TIME_BIN="${TIME_BIN:-/usr/bin/time}"
+if [[ -x "$TIME_BIN" ]]; then
+  "$TIME_BIN" -v -o "$time_log" "$LAUNCHER" "${LAUNCH_ARGS[@]}" "${BASE_ARGS[@]}" >"$run_log" 2>&1
+else
+  {
+    echo "TIME_BIN=$TIME_BIN unavailable; running without /usr/bin/time -v accounting"
+    date --iso-8601=seconds
+  } >"$time_log"
+  "$LAUNCHER" "${LAUNCH_ARGS[@]}" "${BASE_ARGS[@]}" >"$run_log" 2>&1
+fi
 exit_code=$?
 set -e
 

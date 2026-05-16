@@ -96,7 +96,7 @@ event_time() {
 }
 
 {
-  echo "job_id,run_label,case,sweep_mode,ranks,nodes,tasks_per_node,partition,qos,pmg_group_size,pmg_telescope_factor,pmg_telescope_active_ranks,pmg_telescope_subcomm_type,state,exit_code,elapsed,maxrss,averss,maxvmsize,maxrss_gib_per_rank,averss_gib_per_rank,approx_total_averss_gib,global_dofs,sweep_count,converged,total_ksp_its,first_ksp_its,repeated_ksp_its,max_ksp_its,first_solve_time,repeated_avg_solve_time,min_solve_time,max_solve_time,total_solve_time,first_snes,first_jacobian,first_ksp,first_pcsetup,first_matmatmatsym,first_matmatmatnum,repeated_snes,repeated_jacobian,repeated_ksp,repeated_pcsetup,repeated_pcapply,repeated_matmatmatsym,repeated_matmatmatnum,repeated_dmcreateinterp,repeated_dmcreatemat,repeated_dmprealloc,result_line,log"
+  echo "job_id,run_label,case,sweep_mode,ranks,nodes,tasks_per_node,partition,qos,pmg_group_size,pmg_telescope_factor,pmg_telescope_active_ranks,pmg_telescope_subcomm_type,plex_partition_balance,state,exit_code,elapsed,maxrss,averss,maxvmsize,maxrss_gib_per_rank,averss_gib_per_rank,approx_total_averss_gib,global_dofs,sweep_count,converged,total_ksp_its,first_ksp_its,repeated_ksp_its,max_ksp_its,first_solve_time,repeated_avg_solve_time,min_solve_time,max_solve_time,total_solve_time,first_snes,first_jacobian,first_ksp,first_pcsetup,first_matmatmatsym,first_matmatmatnum,repeated_snes,repeated_jacobian,repeated_ksp,repeated_pcsetup,repeated_pcapply,repeated_matmatmatsym,repeated_matmatmatnum,repeated_dmcreateinterp,repeated_dmcreatemat,repeated_dmprealloc,result_line,log"
   find "$RESULTS_DIR" -mindepth 1 -maxdepth 1 -type d | sort | while read -r dir; do
     env_file="$dir/job.env"
     result_file="$dir/result_line.txt"
@@ -119,6 +119,7 @@ event_time() {
     pmg_telescope_factor="$(env_value "$env_file" PMG_COARSE_TELESCOPE_FACTOR)"
     pmg_telescope_active_ranks="$(env_value "$env_file" PMG_COARSE_TELESCOPE_ACTIVE_RANKS)"
     pmg_telescope_subcomm_type="$(env_value "$env_file" PMG_COARSE_TELESCOPE_SUBCOMM_TYPE)"
+    plex_partition_balance="$(env_value "$env_file" PLEX_PARTITION_BALANCE)"
     exit_code="$(env_value "$env_file" EXIT_CODE)"
 
     state=""
@@ -160,6 +161,7 @@ event_time() {
     csv_escape "$pmg_telescope_factor"; printf ','
     csv_escape "$pmg_telescope_active_ranks"; printf ','
     csv_escape "$pmg_telescope_subcomm_type"; printf ','
+    csv_escape "$plex_partition_balance"; printf ','
     csv_escape "$state"; printf ','
     csv_escape "$exit_code"; printf ','
     csv_escape "$elapsed"; printf ','
@@ -203,7 +205,7 @@ event_time() {
 } >"$SUMMARY_OUT"
 
 {
-  echo "job_id,run_label,case,sweep_mode,ranks,nodes,tasks_per_node,pmg_telescope_factor,pmg_telescope_active_ranks,pmg_telescope_subcomm_type,sample,E,nu,lambda,mu,ksp_its,ksp_reason,solve_time,max_abs_u,log"
+  echo "job_id,run_label,case,sweep_mode,ranks,nodes,tasks_per_node,pmg_telescope_factor,pmg_telescope_active_ranks,pmg_telescope_subcomm_type,plex_partition_balance,sample,E,nu,lambda,mu,ksp_its,ksp_reason,solve_time,max_abs_u,log"
   find "$RESULTS_DIR" -mindepth 1 -maxdepth 1 -type d | sort | while read -r dir; do
     env_file="$dir/job.env"
     run_log="$dir/run.log"
@@ -218,6 +220,7 @@ event_time() {
     pmg_telescope_factor="$(env_value "$env_file" PMG_COARSE_TELESCOPE_FACTOR)"
     pmg_telescope_active_ranks="$(env_value "$env_file" PMG_COARSE_TELESCOPE_ACTIVE_RANKS)"
     pmg_telescope_subcomm_type="$(env_value "$env_file" PMG_COARSE_TELESCOPE_SUBCOMM_TYPE)"
+    plex_partition_balance="$(env_value "$env_file" PLEX_PARTITION_BALANCE)"
     while read -r line; do
       csv_escape "$job_id"; printf ','
       csv_escape "$run_label"; printf ','
@@ -229,6 +232,7 @@ event_time() {
       csv_escape "$pmg_telescope_factor"; printf ','
       csv_escape "$pmg_telescope_active_ranks"; printf ','
       csv_escape "$pmg_telescope_subcomm_type"; printf ','
+      csv_escape "$plex_partition_balance"; printf ','
       csv_escape "$(result_value "$line" sample)"; printf ','
       csv_escape "$(result_value "$line" E)"; printf ','
       csv_escape "$(result_value "$line" nu)"; printf ','

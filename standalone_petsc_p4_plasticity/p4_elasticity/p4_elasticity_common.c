@@ -370,6 +370,7 @@ static PetscErrorCode CreateMesh(MPI_Comm comm, const AppCtx *app, DM *dm)
   PetscCall(PetscFree(cells));
   PetscCall(PetscFree(coords));
   PetscCall(PetscObjectSetName((PetscObject)*dm, "tetra_cube"));
+  PetscCall(DMSetFromOptions(*dm));
   PetscCall(DMPlexGetPartitioner(*dm, &part));
   PetscCall(PetscPartitionerSetFromOptions(part));
   PetscCall(DMPlexDistribute(*dm, 0, NULL, &dist));

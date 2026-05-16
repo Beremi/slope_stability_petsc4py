@@ -200,3 +200,37 @@ handles this campaign:
 The resulting `material_sweep_summary.csv` includes `run_label`,
 `tasks_per_node`, `pmg_telescope_factor`, `pmg_telescope_active_ranks`, and all
 the existing PETSc timing columns.
+
+## PMG Partition-Balanced Full-Occupancy Sweep
+
+`submit_partition_balance_full.sh` is the follow-up PMG refresh campaign for
+fully occupied Karolina CPU nodes. It keeps the proven P1 coarse-solve telescope
+path, adds PETSc's DMPlex partition-boundary balancing
+(`-dm_plex_partition_balance true`), and tests the current active coarse-rank
+candidates on two and four full nodes:
+
+```text
+NODES_LIST="2 4"
+TASKS_PER_NODE=128
+ACTIVE_COARSE_RANKS_LIST="16 32 64"
+PLEX_PARTITION_BALANCE=true
+MATERIAL_SWEEP_COUNT=10
+```
+
+Preview:
+
+```bash
+cd standalone_petsc_p4_plasticity/p4_elasticity/karolina
+DRY_RUN=1 ./submit_partition_balance_full.sh
+```
+
+Submit:
+
+```bash
+./submit_partition_balance_full.sh
+```
+
+By default the script uses `qcpu_exp` for two-node jobs and `qcpu` for four-node
+jobs. Set `PARTITION=...` to override both, or `PARTITION_2NODES` /
+`PARTITION_4NODES` to override them separately. The material-sweep collector
+adds `plex_partition_balance` to both summary CSV files.
