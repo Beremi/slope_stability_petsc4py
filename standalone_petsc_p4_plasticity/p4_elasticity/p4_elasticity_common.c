@@ -31,6 +31,7 @@ typedef struct {
   PetscReal material_sweep_poisson_min;
   PetscReal material_sweep_poisson_max;
   PetscBool material_sweep_reuse_pc;
+  char      material_sweep_mode[32];
 } AppCtx;
 
 enum {
@@ -115,6 +116,13 @@ static PetscErrorCode IsPMGVariant(const AppCtx *app, PetscBool *is_pmg)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode IsSweepMode(const AppCtx *app, const char mode[], PetscBool *match)
+{
+  PetscFunctionBeginUser;
+  PetscCall(PetscStrcasecmp(app->material_sweep_mode, mode, match));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static const char *BoundaryLabelName(const AppCtx *app)
 {
   return app->use_mesh ? "boundary_marker" : "marker";
@@ -173,6 +181,7 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
 {
   PetscBool flg;
   PetscBool meshSet = PETSC_FALSE, pressureSet = PETSC_FALSE, gravitySet = PETSC_FALSE;
+  PetscBool sweepModeSet = PETSC_FALSE, sweepReuseSet = PETSC_FALSE;
   PetscInt  nfaces  = 3;
 
   PetscFunctionBeginUser;
@@ -199,6 +208,7 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   app->material_sweep_poisson_min = 0.20;
   app->material_sweep_poisson_max = 0.45;
   app->material_sweep_reuse_pc    = PETSC_TRUE;
+  PetscCall(PetscStrncpy(app->material_sweep_mode, "reuse_pc", sizeof(app->material_sweep_mode)));
   PetscCall(PetscStrncpy(app->case_name, spec->name ? spec->name : "unknown", sizeof(app->case_name)));
   PetscCall(PetscStrncpy(app->mesh, spec->default_mesh ? spec->default_mesh : "", sizeof(app->mesh)));
   PetscCall(PetscStrncpy(app->variant, "gamg", sizeof(app->variant)));
@@ -229,8 +239,11 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
   PetscCall(PetscOptionsReal("-material_sweep_young_max", "Maximum Young's modulus for the material sweep", NULL, app->material_sweep_young_max, &app->material_sweep_young_max, NULL));
   PetscCall(PetscOptionsReal("-material_sweep_poisson_min", "Minimum Poisson ratio for the material sweep", NULL, app->material_sweep_poisson_min, &app->material_sweep_poisson_min, NULL));
   PetscCall(PetscOptionsReal("-material_sweep_poisson_max", "Maximum Poisson ratio for the material sweep", NULL, app->material_sweep_poisson_max, &app->material_sweep_poisson_max, NULL));
-  PetscCall(PetscOptionsBool("-material_sweep_reuse_pc", "After the first material sample, reuse the first preconditioner instead of refreshing numeric coarse operators", NULL, app->material_sweep_reuse_pc, &app->material_sweep_reuse_pc, NULL));
+  PetscCall(PetscOptionsBool("-material_sweep_reuse_pc", "Compatibility shortcut: false maps to -material_sweep_mode refresh, true maps to reuse_pc unless -material_sweep_mode is set", NULL, app->material_sweep_reuse_pc, &app->material_sweep_reuse_pc, &sweepReuseSet));
+  PetscCall(PetscOptionsString("-material_sweep_mode", "Material sweep setup mode: fresh|refresh|reuse_pc", NULL, app->material_sweep_mode, app->material_sweep_mode, sizeof(app->material_sweep_mode), &sweepModeSet));
   PetscOptionsEnd();
+
+  if (!sweepModeSet && sweepReuseSet) PetscCall(PetscStrncpy(app->material_sweep_mode, app->material_sweep_reuse_pc ? "reuse_pc" : "refresh", sizeof(app->material_sweep_mode)));
 
   (void)meshSet;
   (void)pressureSet;
@@ -245,6 +258,15 @@ static PetscErrorCode ProcessOptions(MPI_Comm comm, const P4ElasticityCase *spec
              "-material_sweep_young_min/max must be positive and ordered");
   PetscCheck(app->material_sweep_poisson_min > -1.0 && app->material_sweep_poisson_max < 0.5 && app->material_sweep_poisson_max >= app->material_sweep_poisson_min, comm,
              PETSC_ERR_ARG_OUTOFRANGE, "-material_sweep_poisson_min/max must lie in (-1,0.5) and be ordered");
+  {
+    PetscBool sweepFresh, sweepRefresh, sweepReuse;
+
+    PetscCall(IsSweepMode(app, "fresh", &sweepFresh));
+    PetscCall(IsSweepMode(app, "refresh", &sweepRefresh));
+    PetscCall(IsSweepMode(app, "reuse_pc", &sweepReuse));
+    PetscCheck(sweepFresh || sweepRefresh || sweepReuse, comm, PETSC_ERR_ARG_WRONG, "-material_sweep_mode must be fresh, refresh, or reuse_pc");
+    app->material_sweep_reuse_pc = sweepReuse;
+  }
   if (app->use_mesh) {
     PetscBool isRollers, isBaseOnly, isFullSides;
     PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &isRollers));
@@ -1032,13 +1054,42 @@ static PetscErrorCode ReportLayoutStats(DM dm, Mat A, const AppCtx *app, PetscRe
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode CreateElasticityMatrix(DM dm, Mat *A)
+{
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateMatrix(dm, A));
+  PetscCall(MatSetOption(*A, MAT_SYMMETRIC, PETSC_TRUE));
+  PetscCall(MatSetOption(*A, MAT_SYMMETRY_ETERNAL, PETSC_TRUE));
+  PetscCall(MatSetOption(*A, MAT_SPD, PETSC_TRUE));
+  PetscCall(MatSetOption(*A, MAT_SPD_ETERNAL, PETSC_TRUE));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CreateConfiguredSNES(DM dm, Mat A, const AppCtx *app, PetscBool is_bddc, PetscBool is_fetidp, SNES *snes)
+{
+  KSP ksp;
+  PC  pc;
+
+  PetscFunctionBeginUser;
+  PetscCall(SNESCreate(PETSC_COMM_WORLD, snes));
+  PetscCall(SNESSetDM(*snes, dm));
+  PetscCall(DMPlexSetSNESLocalFEM(dm, PETSC_FALSE, NULL));
+  PetscCall(SNESSetJacobian(*snes, A, A, NULL, NULL));
+  PetscCall(ConfigureSolver(*snes, dm, A, app));
+  PetscCall(SNESSetFromOptions(*snes));
+  PetscCall(SNESGetKSP(*snes, &ksp));
+  PetscCall(KSPGetPC(ksp, &pc));
+  if (is_bddc) PetscCall(ConfigureBDDCComponentSplitting(pc, dm, A));
+  if (is_fetidp) PetscCall(ConfigureFETIDPComponentSplitting(ksp, dm, A));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *spec, const char help[])
 {
   AppCtx         app;
   DM             dm;
   SNES           snes;
   KSP            ksp;
-  PC             pc;
   Mat            A;
   Vec            u, rhs;
   PetscInt       cStart, cEnd, localCells, globalCells, localSize, globalSize, minLocalSize, maxLocalSize, its;
@@ -1071,11 +1122,7 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
   }
   PetscCall(DMCreateGlobalVector(dm, &u));
   PetscCall(VecDuplicate(u, &rhs));
-  PetscCall(DMCreateMatrix(dm, &A));
-  PetscCall(MatSetOption(A, MAT_SYMMETRIC, PETSC_TRUE));
-  PetscCall(MatSetOption(A, MAT_SYMMETRY_ETERNAL, PETSC_TRUE));
-  PetscCall(MatSetOption(A, MAT_SPD, PETSC_TRUE));
-  PetscCall(MatSetOption(A, MAT_SPD_ETERNAL, PETSC_TRUE));
+  PetscCall(CreateElasticityMatrix(dm, &A));
   if (app.inspect_layout) {
     PetscCall(ReportLayoutStats(dm, A, &app, NULL));
     PetscCall(VecDestroy(&rhs));
@@ -1094,16 +1141,8 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
                (double)duplication, (double)app.matis_duplication_limit);
   }
 
-  PetscCall(SNESCreate(PETSC_COMM_WORLD, &snes));
-  PetscCall(SNESSetDM(snes, dm));
-  PetscCall(DMPlexSetSNESLocalFEM(dm, PETSC_FALSE, NULL));
-  PetscCall(SNESSetJacobian(snes, A, A, NULL, NULL));
-  PetscCall(ConfigureSolver(snes, dm, A, &app));
-  PetscCall(SNESSetFromOptions(snes));
+  PetscCall(CreateConfiguredSNES(dm, A, &app, is_bddc, is_fetidp, &snes));
   PetscCall(SNESGetKSP(snes, &ksp));
-  PetscCall(KSPGetPC(ksp, &pc));
-  if (is_bddc) PetscCall(ConfigureBDDCComponentSplitting(pc, dm, A));
-  if (is_fetidp) PetscCall(ConfigureFETIDPComponentSplitting(ksp, dm, A));
 
   PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
   localCells = cEnd - cStart;
@@ -1126,14 +1165,20 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
     PetscReal firstSolveTime = 0.0, repeatedSolveTime = 0.0, minSolveTime = PETSC_MAX_REAL, maxSolveTime = 0.0;
     PetscInt  firstIts = 0, repeatedIts = 0, totalIts = 0, maxIts = 0;
     PetscInt  converged = 0;
+    PetscBool sweepFresh, sweepReuse;
 
+    PetscCall(IsSweepMode(&app, "fresh", &sweepFresh));
+    PetscCall(IsSweepMode(&app, "reuse_pc", &sweepReuse));
     PetscCall(PetscLogStageRegister("material_sweep_first_setup", &sweepFirstStage));
     PetscCall(PetscLogStageRegister("material_sweep_repeated_solves", &sweepRepeatedStage));
     PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                          "SWEEP_CONFIG count=%" PetscInt_FMT " seed=%" PetscInt_FMT " E_range=%.6g,%.6g nu_range=%.6g,%.6g reuse_pc=%s\n",
+                          "SWEEP_CONFIG count=%" PetscInt_FMT " seed=%" PetscInt_FMT " E_range=%.6g,%.6g nu_range=%.6g,%.6g mode=%s reuse_pc=%s\n",
                           app.material_sweep_count, app.material_sweep_seed, (double)app.material_sweep_young_min, (double)app.material_sweep_young_max,
-                          (double)app.material_sweep_poisson_min, (double)app.material_sweep_poisson_max, app.material_sweep_reuse_pc ? "true" : "false"));
-    if (app.material_sweep_reuse_pc) {
+                          (double)app.material_sweep_poisson_min, (double)app.material_sweep_poisson_max, app.material_sweep_mode, sweepReuse ? "true" : "false"));
+    if (sweepFresh) {
+      PetscCall(SNESDestroy(&snes));
+      PetscCall(MatDestroy(&A));
+    } else if (sweepReuse) {
       PetscCall(SNESSetLagPreconditioner(snes, -2));
       PetscCall(SNESSetLagPreconditionerPersists(snes, PETSC_TRUE));
     } else {
@@ -1150,13 +1195,22 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
       PetscCall(VecZeroEntries(rhs));
       PetscCall(PetscLogStagePush(sample == 0 ? sweepFirstStage : sweepRepeatedStage));
       PetscCall(PetscTime(&t0));
+      if (sweepFresh) {
+        PetscCall(CreateElasticityMatrix(dm, &A));
+        PetscCall(CreateConfiguredSNES(dm, A, &app, is_bddc, is_fetidp, &snes));
+      }
       PetscCall(SNESSolve(snes, rhs, u));
       PetscCall(PetscTime(&t1));
       PetscCall(PetscLogStagePop());
       solveTime = t1 - t0;
       PetscCall(VecNorm(u, NORM_INFINITY, &unorm));
+      PetscCall(SNESGetKSP(snes, &ksp));
       PetscCall(KSPGetIterationNumber(ksp, &its));
       PetscCall(KSPGetConvergedReason(ksp, &reason));
+      if (sweepFresh) {
+        PetscCall(SNESDestroy(&snes));
+        PetscCall(MatDestroy(&A));
+      }
       if (reason > 0) ++converged;
       totalIts += its;
       maxIts = PetscMax(maxIts, its);
@@ -1170,14 +1224,14 @@ PetscErrorCode P4ElasticityRun(int argc, char **argv, const P4ElasticityCase *sp
         repeatedIts += its;
       }
       PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                            "SWEEP_RESULT sample=%" PetscInt_FMT " variant=%s ranks=%d degree=%" PetscInt_FMT " E=%.12g nu=%.12g lambda=%.12g mu=%.12g reuse_pc_active=%s ksp_its=%" PetscInt_FMT " ksp_reason=%d solve_time=%.6g max_abs_u=%.6e\n",
+                            "SWEEP_RESULT sample=%" PetscInt_FMT " variant=%s ranks=%d degree=%" PetscInt_FMT " E=%.12g nu=%.12g lambda=%.12g mu=%.12g mode=%s reuse_pc_active=%s ksp_its=%" PetscInt_FMT " ksp_reason=%d solve_time=%.6g max_abs_u=%.6e\n",
                             sample, app.variant, ranks, app.degree, (double)sampleYoung, (double)samplePoisson, (double)g_lambda, (double)g_mu,
-                            (sample > 0 && app.material_sweep_reuse_pc) ? "true" : "false", its, (int)reason, (double)solveTime, (double)unorm));
+                            app.material_sweep_mode, (sample > 0 && sweepReuse) ? "true" : "false", its, (int)reason, (double)solveTime, (double)unorm));
     }
     PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                          "RESULT variant=%s ranks=%d degree=%" PetscInt_FMT " mesh=%s bc=%s faces=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " sweep_count=%" PetscInt_FMT " sweep_reuse_pc=%s converged=%" PetscInt_FMT " total_ksp_its=%" PetscInt_FMT " first_ksp_its=%" PetscInt_FMT " repeated_ksp_its=%" PetscInt_FMT " max_ksp_its=%" PetscInt_FMT " first_solve_time=%.6g repeated_avg_solve_time=%.6g min_solve_time=%.6g max_solve_time=%.6g total_solve_time=%.6g\n",
+                          "RESULT variant=%s ranks=%d degree=%" PetscInt_FMT " mesh=%s bc=%s faces=%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " sweep_count=%" PetscInt_FMT " sweep_mode=%s sweep_reuse_pc=%s converged=%" PetscInt_FMT " total_ksp_its=%" PetscInt_FMT " first_ksp_its=%" PetscInt_FMT " repeated_ksp_its=%" PetscInt_FMT " max_ksp_its=%" PetscInt_FMT " first_solve_time=%.6g repeated_avg_solve_time=%.6g min_solve_time=%.6g max_solve_time=%.6g total_solve_time=%.6g\n",
                           app.variant, ranks, app.degree, app.use_mesh ? app.mesh : "generated_cube", app.use_mesh ? app.mesh_bc_mode : "cube_clamped_bottom", app.faces[0], app.faces[1], app.faces[2], globalSize,
-                          app.material_sweep_count, app.material_sweep_reuse_pc ? "true" : "false", converged, totalIts, firstIts, repeatedIts, maxIts, (double)firstSolveTime,
+                          app.material_sweep_count, app.material_sweep_mode, sweepReuse ? "true" : "false", converged, totalIts, firstIts, repeatedIts, maxIts, (double)firstSolveTime,
                           (double)(repeatedSolveTime / (PetscReal)(app.material_sweep_count - 1)), (double)minSolveTime, (double)maxSolveTime, (double)(firstSolveTime + repeatedSolveTime)));
   } else {
     PetscCall(VecZeroEntries(u));

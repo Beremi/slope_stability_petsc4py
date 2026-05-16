@@ -141,7 +141,7 @@ Useful PMG coarse-solve knobs:
 ## Material Sweep / Preconditioner Reuse
 
 Both drivers can run a deterministic random sweep of elastic material
-parameters on the same mesh and solver objects:
+parameters on the same mesh:
 
 ```bash
 mpiexec -n 2 ./cube_elasticity \
@@ -150,7 +150,7 @@ mpiexec -n 2 ./cube_elasticity \
   -ksp_type fgmres \
   -ksp_rtol 1e-6 \
   -material_sweep_count 100 \
-  -material_sweep_reuse_pc true \
+  -material_sweep_mode refresh \
   -log_view
 ```
 
@@ -170,19 +170,26 @@ iteration count, convergence reason, solve time, and max displacement. The final
 `RESULT` line summarizes first-solve time, repeated-solve average, total
 iterations, and convergence count.
 
-Two reuse modes are useful:
+Three setup/reuse modes are useful:
 
-- `-material_sweep_reuse_pc false`: rebuild/refresh the preconditioner when
+- `-material_sweep_mode fresh`: create a new matrix, SNES, KSP, and PC for
+  every sample. The DM, mesh, FE spaces, vectors, and PMG interpolation
+  hierarchy are still reused, but solver and preconditioner setup is measured
+  inside every sample timing.
+- `-material_sweep_mode refresh`: rebuild/refresh the preconditioner when
   SNES assembles a new matrix. For PMG, PETSc reuses the fixed interpolation and
   Galerkin sparsity pattern, so repeated setup drops `MatMatMatMultSym` but
   still pays `PCSetUp` and `MatMatMatMultNum` for numeric coarse operators.
-- `-material_sweep_reuse_pc true`: use `SNESSetLagPreconditioner(-2)` with
+- `-material_sweep_mode reuse_pc`: use `SNESSetLagPreconditioner(-2)` with
   persistent lagging, so the first preconditioner is kept for later material
   samples. In PETSc logs the repeated stage should have no `PCSetUp` and no
   Galerkin matrix-product setup; only the fine matrix assembly and Krylov
   applications remain. This is an intentionally stale approximate
   preconditioner, so use a flexible Krylov method such as FGMRES when testing
   broad material variation.
+
+The older `-material_sweep_reuse_pc false|true` option is kept as a compatibility
+shortcut for `refresh|reuse_pc` when `-material_sweep_mode` is not set.
 
 The PMG variant intentionally avoids MATIS, BDDC, and FETI-DP interface
 duplication. It currently requires `-degree 4`; very small toy meshes can have
