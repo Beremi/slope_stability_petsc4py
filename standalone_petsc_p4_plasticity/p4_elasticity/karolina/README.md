@@ -106,3 +106,55 @@ collector also adds GiB conversions and `approx_total_averss_gib = AveRSS *
 ranks` as a quick aggregate-memory estimate. Raw logs, PETSc output, command
 lines, environment snapshots, and `sacct` output are kept under
 `runs/<campaign>/results/<job...>/`.
+
+## Material Sweep Jobs
+
+The material-sweep harness submits one PMG L1 elasticity job per setup mode on
+fully occupied Karolina CPU nodes. By default it runs:
+
+```text
+CASE=l1
+NODE_COUNTS="1 2"          # 128 and 256 MPI ranks when NODE_CORES=128
+MATERIAL_SWEEP_MODES="fresh refresh reuse_pc"
+MATERIAL_SWEEP_COUNT=100
+PMG_GROUP_SIZE=16          # redundant P1 coarse GAMG groups
+KSP_RTOL=1e-3
+```
+
+Preview the exact Slurm commands:
+
+```bash
+cd standalone_petsc_p4_plasticity/p4_elasticity/karolina
+DRY_RUN=1 ./submit_material_sweep.sh
+```
+
+Submit the one-node and two-node campaign:
+
+```bash
+PARTITION=qcpu_exp \
+TIME_LIMIT=00:30:00 \
+./submit_material_sweep.sh
+```
+
+This creates six jobs: `fresh`, `refresh`, and `reuse_pc` on 1 full node
+(`128` ranks) and 2 full nodes (`256` ranks). Use `PARTITION=qcpu` for the
+regular queue, or override `NODE_COUNTS`, `MATERIAL_SWEEP_COUNT`, and
+`MATERIAL_SWEEP_MODES` if needed.
+
+Collect the sweep results after the jobs finish:
+
+```bash
+./collect_material_sweep.sh runs/material_<timestamp>
+```
+
+The collector writes:
+
+```text
+material_sweep_summary.csv
+material_sweep_samples.csv
+```
+
+`material_sweep_summary.csv` includes the parsed sweep `RESULT` line, Slurm
+memory/accounting fields, and PETSc `-log_view` timing columns for the first
+and repeated sweep stages, including `SNESSolve`, `DMPlexJacobianFE`, `KSPSolve`,
+`PCSetUp`, PMG Galerkin products, and fresh DM/matrix setup events.
