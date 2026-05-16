@@ -68,6 +68,7 @@ metadata="$RESULT_DIR/job.env"
   echo "PARTITION=${SLURM_JOB_PARTITION:-${PARTITION:-unknown}}"
   echo "ACCOUNT=${SLURM_JOB_ACCOUNT:-${ACCOUNT:-unknown}}"
   echo "QOS=${SLURM_JOB_QOS:-${QOS:-unknown}}"
+  echo "LAUNCHER=${LAUNCHER:-mpiexec}"
   echo "PMG_GROUP_SIZE=${PMG_GROUP_SIZE:-16}"
   echo "PMG_COARSE_TELESCOPE_FACTOR=${PMG_COARSE_TELESCOPE_FACTOR:-}"
   echo "PMG_COARSE_TELESCOPE_ACTIVE_RANKS=${PMG_COARSE_TELESCOPE_ACTIVE_RANKS:-}"
@@ -150,17 +151,34 @@ if [[ -n "${EXTRA_PETSC_OPTIONS:-}" ]]; then
   BASE_ARGS+=("${EXTRA_ARGS[@]}")
 fi
 
-SRUN_ARGS=(-n "$TOTAL_RANKS" --cpu-bind="${SRUN_CPU_BIND:-cores}" --distribution="${SRUN_DISTRIBUTION:-block:block}")
-if [[ -n "${SRUN_EXTRA_ARGS:-}" ]]; then
-  # shellcheck disable=SC2206
-  MORE_SRUN_ARGS=($SRUN_EXTRA_ARGS)
-  SRUN_ARGS+=("${MORE_SRUN_ARGS[@]}")
-fi
+LAUNCHER="${LAUNCHER:-mpiexec}"
+case "$LAUNCHER" in
+  srun)
+    LAUNCH_ARGS=(-n "$TOTAL_RANKS" --cpu-bind="${SRUN_CPU_BIND:-cores}" --distribution="${SRUN_DISTRIBUTION:-block:block}")
+    if [[ -n "${SRUN_EXTRA_ARGS:-}" ]]; then
+      # shellcheck disable=SC2206
+      MORE_LAUNCH_ARGS=($SRUN_EXTRA_ARGS)
+      LAUNCH_ARGS+=("${MORE_LAUNCH_ARGS[@]}")
+    fi
+    ;;
+  mpiexec)
+    LAUNCH_ARGS=(-n "$TOTAL_RANKS")
+    if [[ -n "${MPIEXEC_EXTRA_ARGS:-}" ]]; then
+      # shellcheck disable=SC2206
+      MORE_LAUNCH_ARGS=($MPIEXEC_EXTRA_ARGS)
+      LAUNCH_ARGS+=("${MORE_LAUNCH_ARGS[@]}")
+    fi
+    ;;
+  *)
+    echo "ERROR: unknown LAUNCHER=$LAUNCHER, expected mpiexec or srun." >&2
+    exit 2
+    ;;
+esac
 
 {
   printf 'cd %q\n' "$ELASTICITY_DIR"
-  printf 'srun'
-  printf ' %q' "${SRUN_ARGS[@]}"
+  printf '%q' "$LAUNCHER"
+  printf ' %q' "${LAUNCH_ARGS[@]}"
   printf ' '
   printf '%q ' "${BASE_ARGS[@]}"
   printf '\n'
@@ -171,7 +189,7 @@ run_log="$RESULT_DIR/run.log"
 time_log="$RESULT_DIR/time.txt"
 
 set +e
-/usr/bin/time -v -o "$time_log" srun "${SRUN_ARGS[@]}" "${BASE_ARGS[@]}" >"$run_log" 2>&1
+/usr/bin/time -v -o "$time_log" "$LAUNCHER" "${LAUNCH_ARGS[@]}" "${BASE_ARGS[@]}" >"$run_log" 2>&1
 exit_code=$?
 set -e
 
