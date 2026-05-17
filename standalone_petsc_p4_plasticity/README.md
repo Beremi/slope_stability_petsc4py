@@ -99,6 +99,12 @@ mpiexec -n 2 ./p4_plasticity \
 - `-inspect_partition` to print DMPlex/MATIS partition diagnostics and exit
 - `-reuse_linear_solver true` to keep one KSP/PC hierarchy and refresh operators
   across the elastic solve and Newton corrections
+- `-deflation false` to enable an explicit Newton-solve deflation experiment
+- `-deflation_solver fgmres|cg`
+- `-deflation_basis_tol 1e-3`
+- `-deflation_max_it 0` to use `-ksp_max_it` with a safe fallback
+- `-deflation_max_vectors 0` to keep all collected elastic/Newton corrections
+- `-deflation_monitor false`
 - `-use_box_mesh` for a tiny generated DMPlex tetra mesh smoke test
 - `-check_matrix_symmetry` to print an elastic `MatIsSymmetric()` check
 - `-ksp_view`
@@ -115,6 +121,13 @@ mpiexec -n 4 ./p4_plasticity -options_file options/fetidp.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/bddc_approx_local.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/fetidp_approx_local.opts
 ```
+
+With `-deflation true`, the elastic solve is still solved normally. Its solution
+is then stored as the first deflation vector, each Newton correction appends one
+more vector, and every Newton tangent rebuilds an A-orthonormal basis before the
+explicit deflated outer solve. The projected preconditioned vector follows the
+same core rule as the Python DFGMRES path: `z <- z - W (W^T A z)`, with
+`W^T A W = I`, so the coarse initial correction is `W (W^T b)`.
 
 For full comparisons, use the guarded runner so failed PETSc setup paths do not
 consume the workstation:
