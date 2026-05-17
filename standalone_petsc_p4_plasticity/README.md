@@ -97,6 +97,8 @@ mpiexec -n 2 ./p4_plasticity \
 - `-bddc_exact_local_max_dofs 8000`
 - `-debug_bddc_dirichlet_rows`
 - `-inspect_partition` to print DMPlex/MATIS partition diagnostics and exit
+- `-reuse_linear_solver true` to keep one KSP/PC hierarchy and refresh operators
+  across the elastic solve and Newton corrections
 - `-use_box_mesh` for a tiny generated DMPlex tetra mesh smoke test
 - `-check_matrix_symmetry` to print an elastic `MatIsSymmetric()` check
 - `-ksp_view`
@@ -208,6 +210,12 @@ Use `options/pmg_telescope_final.opts` for this combined profile. On the local
 32-rank L1 probe, adding the P2-level telescope converged but was slower than
 the P1-only telescope; it is kept as an explicit high-rank scaling option rather
 than a hard-coded default.
+
+By default the linear solver is now persistent across the elastic predictor and
+Newton corrections. This reuses the KSP/PCMG object, same-mesh P1/P2/P4 DMs, and
+interpolation matrices while still calling `KSPSetOperators()` and refreshing the
+preconditioner for each newly assembled tangent. Use `-reuse_linear_solver false`
+to recover the old fresh-KSP-per-solve path for A/B comparisons.
 
 The BDDC path supplies PETSc's MATIS solver with component-wise local dof
 splitting recovered from MATIS local-to-global rows, global and local

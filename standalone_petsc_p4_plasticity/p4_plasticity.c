@@ -52,6 +52,7 @@ typedef struct {
   PetscInt  bddc_exact_local_max_dofs;
   PetscBool debug_bddc_dirichlet_rows;
   PetscBool inspect_partition;
+  PetscBool reuse_linear_solver;
 } AppCtx;
 
 typedef struct {
@@ -61,6 +62,15 @@ typedef struct {
   PetscLogDouble assembly_time;
   PetscLogDouble solve_time;
 } NewtonStats;
+
+typedef struct {
+  DM           dm;
+  AssemblyCtx *actx;
+  AppCtx      *app;
+  Mat          A;
+  KSP          ksp;
+  PetscBool    reuse;
+} LinearSolverCtx;
 
 static PetscErrorCode RigidTx(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
 {
@@ -150,6 +160,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->bddc_exact_local_max_dofs = 8000;
   app->debug_bddc_dirichlet_rows = PETSC_FALSE;
   app->inspect_partition         = PETSC_FALSE;
+  app->reuse_linear_solver       = PETSC_TRUE;
 
   PetscOptionsBegin(comm, NULL, "Standalone P4 plasticity options", NULL);
   PetscCall(PetscOptionsString("-mesh", "Gmsh mesh path", NULL, app->mesh, app->mesh, sizeof(app->mesh), NULL));
@@ -190,6 +201,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsInt("-bddc_exact_local_max_dofs", "Maximum local MATIS rows before switching BDDC subsolves away from LU", NULL, app->bddc_exact_local_max_dofs, &app->bddc_exact_local_max_dofs, NULL));
   PetscCall(PetscOptionsBool("-debug_bddc_dirichlet_rows", "Check local MATIS rows marked as BDDC Dirichlet rows", NULL, app->debug_bddc_dirichlet_rows, &app->debug_bddc_dirichlet_rows, NULL));
   PetscCall(PetscOptionsBool("-inspect_partition", "Print DMPlex/MATIS partition diagnostics and exit before assembly", NULL, app->inspect_partition, &app->inspect_partition, NULL));
+  PetscCall(PetscOptionsBool("-reuse_linear_solver", "Keep one KSP/PC hierarchy and refresh operators for repeated elastic/Newton solves", NULL, app->reuse_linear_solver, &app->reuse_linear_solver, NULL));
   PetscOptionsEnd();
 
   PetscCall(PetscStrcasecmp(app->variant_name, "gamg", &flg));
@@ -1794,18 +1806,31 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, PetscBool nonlinear_tangent)
+static PetscErrorCode RefreshKSPOperators(KSP ksp, AppCtx *app, Mat A, PetscBool report_effective_tolerance)
 {
-  PC pc;
   PetscReal solver_rtol = app->ksp_rtol;
 
   PetscFunctionBeginUser;
   PetscCall(KSPSetOperators(ksp, A, A));
   if (app->variant == VARIANT_FETIDP) solver_rtol *= 1.0e-2;
   PetscCall(KSPSetTolerances(ksp, solver_rtol, PETSC_CURRENT, PETSC_CURRENT, PETSC_CURRENT));
-  if (solver_rtol != app->ksp_rtol) {
+  if (report_effective_tolerance && solver_rtol != app->ksp_rtol) {
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)ksp), "FETI-DP effective multiplier-space rtol=%.6e requested_primal_rtol=%.6e\n", (double)solver_rtol, (double)app->ksp_rtol));
   }
+  PetscCall(KSPSetInitialGuessNonzero(ksp, PETSC_FALSE));
+  PetscCall(KSPSetReusePreconditioner(ksp, PETSC_FALSE));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, PetscBool nonlinear_tangent)
+{
+  PC        pc;
+  PetscReal solver_rtol = app->ksp_rtol;
+
+  (void)nonlinear_tangent;
+  PetscFunctionBeginUser;
+  if (app->variant == VARIANT_FETIDP) solver_rtol *= 1.0e-2;
+  PetscCall(RefreshKSPOperators(ksp, app, A, PETSC_TRUE));
   if (app->variant == VARIANT_BDDC) {
     PetscCall(SetBDDCConstraintDefaults(app, "pc_bddc_"));
     PetscCall(ConfigureBDDCAutoSolvers(app, A, "pc_bddc_"));
@@ -1877,18 +1902,33 @@ static PetscErrorCode ResidualNormFree(AssemblyCtx *actx, Vec residual, PetscRea
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode SolveWithFreshKSP(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, Vec rhs, Vec x, const char *label, PetscBool nonlinear_tangent, PetscInt *its)
+static PetscErrorCode LinearSolverInit(LinearSolverCtx *solver, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A)
 {
-  KSP       ksp;
-  Vec       check = NULL;
-  PetscReal rhs_norm, true_norm, true_rel, true_limit;
-  PetscBool reuse_nonzero = PETSC_TRUE;
+  PetscFunctionBeginUser;
+  PetscCall(PetscMemzero(solver, sizeof(*solver)));
+  solver->dm    = dm;
+  solver->actx  = actx;
+  solver->app   = app;
+  solver->A     = A;
+  solver->reuse = app->reuse_linear_solver;
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "LINEAR_SOLVER_REUSE enabled=%s\n", solver->reuse ? "true" : "false"));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverDestroy(LinearSolverCtx *solver)
+{
+  PetscFunctionBeginUser;
+  PetscCall(KSPDestroy(&solver->ksp));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CheckLinearSolve(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, Vec rhs, Vec x, const char *label, KSP ksp, PetscInt *its)
+{
+  Vec                check = NULL;
+  PetscReal          rhs_norm, true_norm, true_rel, true_limit;
   KSPConvergedReason reason;
 
   PetscFunctionBeginUser;
-  PetscCall(KSPCreate(PetscObjectComm((PetscObject)dm), &ksp));
-  PetscCall(ConfigureKSP(ksp, dm, actx, app, A, nonlinear_tangent));
-  PetscCall(KSPSolve(ksp, rhs, x));
   PetscCall(KSPGetIterationNumber(ksp, its));
   PetscCall(KSPGetConvergedReason(ksp, &reason));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "%s KSP iterations=%" PetscInt_FMT " reason=%D\n", label, *its, (PetscInt)reason));
@@ -1904,13 +1944,35 @@ static PetscErrorCode SolveWithFreshKSP(DM dm, AssemblyCtx *actx, AppCtx *app, M
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "%s true_residual_rel=%.6e limit=%.6e\n", label, (double)true_rel, (double)true_limit));
   PetscCheck(true_rel <= true_limit, PetscObjectComm((PetscObject)dm), PETSC_ERR_NOT_CONVERGED,
              "%s true residual %.6e exceeds verification limit %.6e despite KSP reason %D", label, (double)true_rel, (double)true_limit, (PetscInt)reason);
-  PetscCall(PetscOptionsGetBool(NULL, NULL, "-reuse_linear_solver", &reuse_nonzero, NULL));
-  (void)reuse_nonzero;
-  PetscCall(KSPDestroy(&ksp));
+  (void)actx;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode NewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, Vec f_ext, Vec u, PetscReal rhs_norm, NewtonStats *stats)
+static PetscErrorCode SolveLinearSystem(LinearSolverCtx *solver, Vec rhs, Vec x, const char *label, PetscBool nonlinear_tangent, PetscInt *its)
+{
+  KSP ksp = NULL;
+
+  PetscFunctionBeginUser;
+  if (solver->reuse) {
+    if (!solver->ksp) {
+      PetscCall(KSPCreate(PetscObjectComm((PetscObject)solver->dm), &solver->ksp));
+      PetscCall(ConfigureKSP(solver->ksp, solver->dm, solver->actx, solver->app, solver->A, nonlinear_tangent));
+      PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm), "LINEAR_SOLVER_REUSE configured persistent KSP/PC hierarchy\n"));
+    } else {
+      PetscCall(RefreshKSPOperators(solver->ksp, solver->app, solver->A, PETSC_FALSE));
+    }
+    ksp = solver->ksp;
+  } else {
+    PetscCall(KSPCreate(PetscObjectComm((PetscObject)solver->dm), &ksp));
+    PetscCall(ConfigureKSP(ksp, solver->dm, solver->actx, solver->app, solver->A, nonlinear_tangent));
+  }
+  PetscCall(KSPSolve(ksp, rhs, x));
+  PetscCall(CheckLinearSolve(solver->dm, solver->actx, solver->app, solver->A, rhs, x, label, ksp, its));
+  if (!solver->reuse) PetscCall(KSPDestroy(&ksp));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode NewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver, Mat A, Vec f_ext, Vec u, PetscReal rhs_norm, NewtonStats *stats)
 {
   Vec            residual, rhs, du, u_trial, r_trial;
   PetscReal      rel = -1.0, trial_rel;
@@ -1941,7 +2003,7 @@ static PetscErrorCode NewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, 
     PetscCall(ApplyZeroDirichlet(actx->constrained_is, A, rhs));
     PetscCall(VecZeroEntries(du));
     PetscCall(PetscTime(&t0));
-    PetscCall(SolveWithFreshKSP(dm, actx, app, A, rhs, du, "Newton correction", PETSC_TRUE, &linear_its));
+    PetscCall(SolveLinearSystem(solver, rhs, du, "Newton correction", PETSC_TRUE, &linear_its));
     PetscCall(PetscTime(&t1));
     solve_time += t1 - t0;
     total_linear_its += linear_its;
@@ -1990,6 +2052,7 @@ int main(int argc, char **argv)
   P4Basis        basis;
   DM             dm = NULL;
   AssemblyCtx    actx;
+  LinearSolverCtx lsolver;
   NewtonStats    newton_stats;
   Mat            A = NULL;
   Vec            u = NULL, f_ext = NULL;
@@ -2013,12 +2076,14 @@ int main(int argc, char **argv)
   PetscCall(VecGetLocalSize(u, &local_dofs));
   PetscCall(VecGetSize(u, &global_dofs));
   PetscCall(AssemblyCtxCreate(dm, &basis, &actx));
+  PetscCall(LinearSolverInit(&lsolver, dm, &actx, &app, A));
 
   PetscCall(PetscPrintf(PETSC_COMM_WORLD,
                         "mesh=%s%s refine_levels=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " local_dofs=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " P4_basis=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " pc_variant=%s bc=%s lambda=%.6g\n",
                         app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, cEnd - cStart, nEnd - nStart, local_dofs, global_dofs, basis.n_basis, actx.n_constrained_local, actx.n_constrained_all, app.variant_name, app.mesh_bc_mode, (double)app.lambda));
   if (app.inspect_partition) {
     PetscCall(ReportPartitionDiagnostics(dm, A, u, &actx, &app));
+    PetscCall(LinearSolverDestroy(&lsolver));
     PetscCall(AssemblyCtxDestroy(&actx));
     PetscCall(VecDestroy(&f_ext));
     PetscCall(VecDestroy(&u));
@@ -2050,13 +2115,13 @@ int main(int argc, char **argv)
   }
   PetscCall(VecZeroEntries(u));
   PetscCall(PetscTime(&t0));
-  PetscCall(SolveWithFreshKSP(dm, &actx, &app, A, f_ext, u, "Elastic initial", PETSC_FALSE, &elastic_its));
+  PetscCall(SolveLinearSystem(&lsolver, f_ext, u, "Elastic initial", PETSC_FALSE, &elastic_its));
   PetscCall(PetscTime(&t1));
   elastic_solve_time = t1 - t0;
   PetscCall(VecNorm(u, NORM_2, &u_norm));
   PetscCall(PetscPrintf(PETSC_COMM_WORLD, "elastic solve_time=%.6g u_norm=%.6e\n", (double)elastic_solve_time, (double)u_norm));
 
-  PetscCall(NewtonSolve(dm, &actx, &app, A, f_ext, u, rhs_norm, &newton_stats));
+  PetscCall(NewtonSolve(dm, &actx, &app, &lsolver, A, f_ext, u, rhs_norm, &newton_stats));
   PetscCall(VecNorm(u, NORM_2, &u_norm));
   PetscCall(PetscTime(&t_end));
   PetscCall(PetscPrintf(PETSC_COMM_WORLD, "final displacement_norm=%.8e total_wall_time=%.6g\n", (double)u_norm, (double)(t_end - t_start)));
@@ -2075,6 +2140,7 @@ int main(int argc, char **argv)
                           (double)newton_stats.final_rel));
   }
 
+  PetscCall(LinearSolverDestroy(&lsolver));
   PetscCall(AssemblyCtxDestroy(&actx));
   PetscCall(VecDestroy(&f_ext));
   PetscCall(VecDestroy(&u));
