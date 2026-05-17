@@ -69,13 +69,22 @@ mpiexec -n 2 ./p4_plasticity \
 - `-pc_variant gamg|pmg|bddc|fetidp|none`
 - `-pmg_coarse_pc_type auto|hypre|gamg|lu`
 - `-pmg_coarse_lu_max_dofs 50000`
+- `-pmg_coarse_redundant_group_size 16`
+- `-pmg_coarse_gamg_aggressive_square_graph false`
+- `-pmg_coarse_telescope_active_ranks 0`
+- `-pmg_coarse_telescope_subcomm_type interlaced`
+- `-pmg_coarse_telescope_ksp_type fgmres`
+- `-pmg_coarse_telescope_ksp_rtol 1e-3`
+- `-pmg_coarse_telescope_ksp_max_it 100`
+- `-pmg_coarse_telescope_pc_type gamg`
 - `-pmg_smoother_ksp_type chebyshev`
 - `-pmg_smoother_pc_type jacobi`
 - `-pmg_smoother_max_it 2`
 - `-bddc_graph petsc|topology`
 - `-bddc_coordinates scalar|blocked|none`
 - `-bddc_collapse_shared true|false`
-- `-bddc_local_solver_auto true`
+- `-bddc_local_solver_auto false`
+- `-bddc_use_local_dirichlet false`
 - `-bddc_exact_local_max_dofs 8000`
 - `-debug_bddc_dirichlet_rows`
 - `-inspect_partition` to print DMPlex/MATIS partition diagnostics and exit
@@ -106,9 +115,14 @@ MEM_LIMIT_GB=120 TIME_LIMIT_SEC=600 OMP_NUM_THREADS=1 \
 The guarded runner does not force a partitioner. PETSc's MPI default is a graph
 partitioner when available; on the local PETSc build this is ParMETIS, with
 PT-Scotch also available. Use `PARTITIONER=parmetis` or `PARTITIONER=ptscotch`
-when reproducible layout comparisons are needed. Avoid `PARTITIONER=simple` for
+when reproducible layout comparisons are needed. Its default variant list is
+`gamg pmg bddc fetidp`; `none` is still available as a manual negative control
+but is not part of the comparison sweep. Avoid `PARTITIONER=simple` for
 full BDDC/FETI-DP runs; on the P4(L1) mesh it creates much larger duplicated
-MATIS interfaces than graph partitioners. A layout-only check is cheap and safe:
+MATIS interfaces than graph partitioners. The driver verifies every linear solve
+with an explicit true residual check, and GAMG defaults to
+`KSP_NORM_UNPRECONDITIONED` so the reported tolerance is not just the
+left-preconditioned residual. A layout-only check is cheap and safe:
 
 ```bash
 mpiexec -n 16 ./p4_plasticity -pc_variant bddc -inspect_partition \
@@ -145,12 +159,24 @@ The GAMG variant attaches six projected rigid-body-like near-nullspace vectors
 with constrained entries zeroed and supplies owned P4 block coordinates to
 PETSc. The PMG variant builds same-mesh P1, P2, and P4 DMs, evaluates coarse FE
 basis functions at fine dual points to form P1 -> P2 and P2 -> P4 interpolation,
-and lets PETSc build Galerkin operators inside `PCMG`.
+and lets PETSc build Galerkin operators inside `PCMG`. Its P1 bottom solve now
+matches the L1 elasticity experiments: GAMG by default, aggressive square-graph
+coarsening disabled, optional `PCREDUNDANT` grouping through
+`-pmg_coarse_redundant_group_size`, and optional PETSc `PCTELESCOPE` activation
+through `-pmg_coarse_telescope_active_ranks`. For example, on high-rank L1 runs
+the elasticity best setting kept about 32 active P1 coarse ranks:
 
-The BDDC path supplies PETSc's MATIS solver with local Dirichlet boundaries,
-component-wise local dof splitting, global and local rigid-body near-nullspace
-data, and scalable default subsolvers for large local MATIS matrices. FETI-DP
-configures its internal BDDC object explicitly; PETSc 3.24 expects the inner
+```bash
+mpiexec -n 256 ./p4_plasticity -pc_variant pmg \
+  -pmg_coarse_telescope_active_ranks 32 \
+  -pmg_coarse_telescope_subcomm_type interlaced
+```
+
+The BDDC path supplies PETSc's MATIS solver with component-wise local dof
+splitting recovered from MATIS local-to-global rows, global and local
+rigid-body near-nullspace data, and optional scalable subsolvers for large
+local MATIS matrices. FETI-DP configures its internal BDDC object explicitly;
+PETSc 3.24 expects the inner
 BDDC options as `-fetidp_bddc_pc_bddc_*`. Although public `PCSetCoordinates()`
 documentation describes blocked vector coordinates, PETSc 3.24 BDDC still has a
 local import check marked `TODO: support for blocked`, so BDDC/FETI-DP must use
@@ -165,11 +191,21 @@ interfaces: on the P4(L1) mesh at 16 ranks, `simple` duplicated MATIS rows by
 about 1.92x with a max rank interface of 83k rows, while ParMETIS/PT-Scotch were
 about 1.06x with max interfaces near 7k rows.
 
-When BDDC local MATIS matrices exceed `-bddc_exact_local_max_dofs`, the automatic
-large-subdomain path marks Dirichlet/Neumann subsolves as approximate and uses
-HYPRE BoomerAMG when available, otherwise GAMG. Because these approximate
-subsolves are not a guaranteed CG-symmetric preconditioner, outer BDDC defaults
-to flexible GMRES unless the user explicitly sets `-ksp_type`.
+The default BDDC/FETI-DP comparison path keeps PETSc's exact/default local
+subsolves, matching the L1 elasticity driver that converged. The plasticity
+driver keeps CG for the symmetric elastic BDDC solve but switches top-level BDDC
+Newton tangent corrections to flexible GMRES, because the tangent can make the
+BDDC-preconditioned operator indefinite even when the elastic step is symmetric.
+As in the elasticity repair, local Dirichlet metadata is not sent to BDDC by
+default: plasticity keeps constrained DOFs as unit rows, and those local-section
+indices can give misleading BDDC convergence on the imported L1 mesh. The debug
+checker remains available through `-debug_bddc_dirichlet_rows`, and the old
+metadata path can be forced with `-bddc_use_local_dirichlet true` for diagnosis.
+When
+`-bddc_local_solver_auto true` is requested and local MATIS matrices exceed
+`-bddc_exact_local_max_dofs`, the automatic large-subdomain path marks
+Dirichlet/Neumann subsolves as approximate and uses HYPRE BoomerAMG when
+available, otherwise GAMG.
 
 Current BDDC status: tiny distributed MATIS smoke tests converge with PETSc's
 local matrix graph and vertex-only defaults. The note3-style strict

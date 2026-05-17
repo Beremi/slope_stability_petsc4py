@@ -1,10 +1,9 @@
 -pc_variant bddc
 -dm_mat_type is
 -mat_is_localmat_type aij
--ksp_type cg
 -pc_type bddc
 -bddc_graph petsc
--bddc_local_solver_auto true
+-bddc_local_solver_auto false
 -bddc_exact_local_max_dofs 8000
 -pc_bddc_use_vertices true
 -pc_bddc_use_edges false

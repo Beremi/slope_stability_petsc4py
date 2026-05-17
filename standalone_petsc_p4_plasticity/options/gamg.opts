@@ -1,5 +1,6 @@
 -pc_variant gamg
 -ksp_type cg
+-ksp_norm_type unpreconditioned
 -pc_type gamg
 -pc_gamg_type agg
 -pc_gamg_sym_graph true

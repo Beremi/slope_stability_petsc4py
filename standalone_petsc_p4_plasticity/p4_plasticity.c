@@ -27,12 +27,21 @@ typedef struct {
   char      pmg_coarse_pc_type[32];
   char      pmg_smoother_ksp_type[32];
   char      pmg_smoother_pc_type[32];
+  char      pmg_coarse_telescope_subcomm_type[32];
+  char      pmg_coarse_telescope_ksp_type[32];
+  char      pmg_coarse_telescope_pc_type[32];
+  PetscReal pmg_coarse_telescope_ksp_rtol;
   PetscInt  pmg_coarse_lu_max_dofs;
   PetscInt  pmg_smoother_max_it;
+  PetscInt  pmg_coarse_redundant_group_size;
+  PetscInt  pmg_coarse_telescope_active_ranks;
+  PetscInt  pmg_coarse_telescope_ksp_max_it;
+  PetscBool pmg_coarse_gamg_aggressive_square_graph;
   char      bddc_graph[32];
   char      bddc_coordinates[32];
   PetscBool bddc_collapse_shared;
   PetscBool bddc_local_solver_auto;
+  PetscBool bddc_use_local_dirichlet;
   PetscInt  bddc_exact_local_max_dofs;
   PetscBool debug_bddc_dirichlet_rows;
   PetscBool inspect_partition;
@@ -102,12 +111,21 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscStrncpy(app->pmg_coarse_pc_type, "auto", sizeof(app->pmg_coarse_pc_type)));
   PetscCall(PetscStrncpy(app->pmg_smoother_ksp_type, "chebyshev", sizeof(app->pmg_smoother_ksp_type)));
   PetscCall(PetscStrncpy(app->pmg_smoother_pc_type, "jacobi", sizeof(app->pmg_smoother_pc_type)));
+  PetscCall(PetscStrncpy(app->pmg_coarse_telescope_subcomm_type, "interlaced", sizeof(app->pmg_coarse_telescope_subcomm_type)));
+  PetscCall(PetscStrncpy(app->pmg_coarse_telescope_ksp_type, "fgmres", sizeof(app->pmg_coarse_telescope_ksp_type)));
+  PetscCall(PetscStrncpy(app->pmg_coarse_telescope_pc_type, "gamg", sizeof(app->pmg_coarse_telescope_pc_type)));
+  app->pmg_coarse_telescope_ksp_rtol   = 1.0e-3;
   app->pmg_coarse_lu_max_dofs = 50000;
   app->pmg_smoother_max_it    = 2;
+  app->pmg_coarse_redundant_group_size         = 16;
+  app->pmg_coarse_telescope_active_ranks       = 0;
+  app->pmg_coarse_telescope_ksp_max_it         = 100;
+  app->pmg_coarse_gamg_aggressive_square_graph = PETSC_FALSE;
   PetscCall(PetscStrncpy(app->bddc_graph, "petsc", sizeof(app->bddc_graph)));
   PetscCall(PetscStrncpy(app->bddc_coordinates, "scalar", sizeof(app->bddc_coordinates)));
   app->bddc_collapse_shared    = PETSC_FALSE;
-  app->bddc_local_solver_auto    = PETSC_TRUE;
+  app->bddc_local_solver_auto    = PETSC_FALSE;
+  app->bddc_use_local_dirichlet  = PETSC_FALSE;
   app->bddc_exact_local_max_dofs = 8000;
   app->debug_bddc_dirichlet_rows = PETSC_FALSE;
   app->inspect_partition         = PETSC_FALSE;
@@ -125,6 +143,14 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsString("-pc_variant", "gamg|bddc|fetidp|pmg|none", NULL, app->variant_name, app->variant_name, sizeof(app->variant_name), NULL));
   PetscCall(PetscOptionsString("-pmg_coarse_pc_type", "auto|hypre|gamg|lu", NULL, app->pmg_coarse_pc_type, app->pmg_coarse_pc_type, sizeof(app->pmg_coarse_pc_type), NULL));
   PetscCall(PetscOptionsInt("-pmg_coarse_lu_max_dofs", "Maximum P1 coarse-grid DOFs allowed for LU", NULL, app->pmg_coarse_lu_max_dofs, &app->pmg_coarse_lu_max_dofs, NULL));
+  PetscCall(PetscOptionsInt("-pmg_coarse_redundant_group_size", "Use PCREDUNDANT for the PMG P1 coarse solve on groups of this many ranks; 0 disables", NULL, app->pmg_coarse_redundant_group_size, &app->pmg_coarse_redundant_group_size, NULL));
+  PetscCall(PetscOptionsBool("-pmg_coarse_gamg_aggressive_square_graph", "Use PETSc GAMG square-graph aggressive coarsening on PMG P1 coarse solves", NULL, app->pmg_coarse_gamg_aggressive_square_graph, &app->pmg_coarse_gamg_aggressive_square_graph, NULL));
+  PetscCall(PetscOptionsInt("-pmg_coarse_telescope_active_ranks", "If positive, use PCTELESCOPE for the PMG P1 solve when ranks are an integer multiple larger than this", NULL, app->pmg_coarse_telescope_active_ranks, &app->pmg_coarse_telescope_active_ranks, NULL));
+  PetscCall(PetscOptionsString("-pmg_coarse_telescope_subcomm_type", "PCTELESCOPE subcomm type, usually interlaced or contiguous", NULL, app->pmg_coarse_telescope_subcomm_type, app->pmg_coarse_telescope_subcomm_type, sizeof(app->pmg_coarse_telescope_subcomm_type), NULL));
+  PetscCall(PetscOptionsString("-pmg_coarse_telescope_ksp_type", "KSP type inside PMG P1 PCTELESCOPE", NULL, app->pmg_coarse_telescope_ksp_type, app->pmg_coarse_telescope_ksp_type, sizeof(app->pmg_coarse_telescope_ksp_type), NULL));
+  PetscCall(PetscOptionsReal("-pmg_coarse_telescope_ksp_rtol", "KSP relative tolerance inside PMG P1 PCTELESCOPE", NULL, app->pmg_coarse_telescope_ksp_rtol, &app->pmg_coarse_telescope_ksp_rtol, NULL));
+  PetscCall(PetscOptionsInt("-pmg_coarse_telescope_ksp_max_it", "KSP max iterations inside PMG P1 PCTELESCOPE", NULL, app->pmg_coarse_telescope_ksp_max_it, &app->pmg_coarse_telescope_ksp_max_it, NULL));
+  PetscCall(PetscOptionsString("-pmg_coarse_telescope_pc_type", "PC type inside PMG P1 PCTELESCOPE", NULL, app->pmg_coarse_telescope_pc_type, app->pmg_coarse_telescope_pc_type, sizeof(app->pmg_coarse_telescope_pc_type), NULL));
   PetscCall(PetscOptionsString("-pmg_smoother_ksp_type", "PMG smoother KSP type", NULL, app->pmg_smoother_ksp_type, app->pmg_smoother_ksp_type, sizeof(app->pmg_smoother_ksp_type), NULL));
   PetscCall(PetscOptionsString("-pmg_smoother_pc_type", "PMG smoother PC type", NULL, app->pmg_smoother_pc_type, app->pmg_smoother_pc_type, sizeof(app->pmg_smoother_pc_type), NULL));
   PetscCall(PetscOptionsInt("-pmg_smoother_max_it", "PMG smoother iterations per V-cycle", NULL, app->pmg_smoother_max_it, &app->pmg_smoother_max_it, NULL));
@@ -132,6 +158,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsString("-bddc_coordinates", "scalar|blocked|none", NULL, app->bddc_coordinates, app->bddc_coordinates, sizeof(app->bddc_coordinates), NULL));
   PetscCall(PetscOptionsBool("-bddc_collapse_shared", "With -bddc_graph topology, connect local DOFs sharing the same neighboring rank set", NULL, app->bddc_collapse_shared, &app->bddc_collapse_shared, NULL));
   PetscCall(PetscOptionsBool("-bddc_local_solver_auto", "Choose scalable BDDC local/coarse solvers for large subdomains", NULL, app->bddc_local_solver_auto, &app->bddc_local_solver_auto, NULL));
+  PetscCall(PetscOptionsBool("-bddc_use_local_dirichlet", "Pass local constrained unit rows to PCBDDCSetDirichletBoundariesLocal", NULL, app->bddc_use_local_dirichlet, &app->bddc_use_local_dirichlet, NULL));
   PetscCall(PetscOptionsInt("-bddc_exact_local_max_dofs", "Maximum local MATIS rows before switching BDDC subsolves away from LU", NULL, app->bddc_exact_local_max_dofs, &app->bddc_exact_local_max_dofs, NULL));
   PetscCall(PetscOptionsBool("-debug_bddc_dirichlet_rows", "Check local MATIS rows marked as BDDC Dirichlet rows", NULL, app->debug_bddc_dirichlet_rows, &app->debug_bddc_dirichlet_rows, NULL));
   PetscCall(PetscOptionsBool("-inspect_partition", "Print DMPlex/MATIS partition diagnostics and exit before assembly", NULL, app->inspect_partition, &app->inspect_partition, NULL));
@@ -156,6 +183,9 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
       }
     }
   }
+  PetscCheck(app->pmg_coarse_redundant_group_size >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_redundant_group_size must be nonnegative");
+  PetscCheck(app->pmg_coarse_telescope_active_ranks >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_telescope_active_ranks must be nonnegative");
+  PetscCheck(app->pmg_coarse_telescope_ksp_max_it >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_telescope_ksp_max_it must be positive");
   PetscCall(PetscStrcasecmp(app->bddc_graph, "topology", &flg));
   if (!flg) {
     PetscCall(PetscStrcasecmp(app->bddc_graph, "petsc", &flg));
@@ -811,23 +841,99 @@ static PetscErrorCode ConfigureBDDCAutoSolvers(AppCtx *app, Mat A, const char pr
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode SetBDDCDofSplittingLocal(PC pc, Mat A)
+static PetscErrorCode BuildGlobalComponentMap(DM dm, PetscInt *ngids, PetscInt **gids, PetscInt **comps)
 {
-  PetscBool ismatis = PETSC_FALSE;
-  Mat       local_mat = NULL;
-  IS        fields[3] = {NULL, NULL, NULL};
-  PetscInt  nloc;
+  PetscSection lsec, gsec;
+  PetscInt     pStart, pEnd, n = 0, cap = 0, *gid = NULL, *comp = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLocalSection(dm, &lsec));
+  PetscCall(DMGetGlobalSection(dm, &gsec));
+  PetscCall(PetscSectionGetChart(lsec, &pStart, &pEnd));
+  for (PetscInt p = pStart; p < pEnd; ++p) {
+    PetscInt dof, off;
+
+    PetscCall(PetscSectionGetDof(lsec, p, &dof));
+    if (!dof) continue;
+    PetscCheck(dof % 3 == 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Expected vector dofs in blocks of 3 on point %" PetscInt_FMT, p);
+    PetscCall(PetscSectionGetOffset(gsec, p, &off));
+    if (off < 0) off = -(off + 1);
+    for (PetscInt c = 0; c < dof; ++c) {
+      if (n == cap) {
+        cap = cap ? 2 * cap : 1024;
+        PetscCall(PetscRealloc((size_t)cap * sizeof(PetscInt), &gid));
+        PetscCall(PetscRealloc((size_t)cap * sizeof(PetscInt), &comp));
+      }
+      gid[n]    = off + c;
+      comp[n++] = c % 3;
+    }
+  }
+
+  PetscCall(PetscSortIntWithArray(n, gid, comp));
+  if (n) {
+    PetscInt w = 1;
+
+    for (PetscInt r = 1; r < n; ++r) {
+      if (gid[r] == gid[w - 1]) {
+        PetscCheck(comp[r] == comp[w - 1], PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
+                   "Global dof %" PetscInt_FMT " was assigned components %" PetscInt_FMT " and %" PetscInt_FMT, gid[r], comp[w - 1], comp[r]);
+        continue;
+      }
+      gid[w]  = gid[r];
+      comp[w] = comp[r];
+      ++w;
+    }
+    n = w;
+  }
+
+  *ngids = n;
+  *gids  = gid;
+  *comps = comp;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetBDDCDofSplittingLocal(PC pc, DM dm, Mat A)
+{
+  PetscBool              ismatis = PETSC_FALSE;
+  Mat                    local_mat = NULL;
+  ISLocalToGlobalMapping rmap;
+  const PetscInt        *ridx;
+  IS                     fields[3] = {NULL, NULL, NULL};
+  PetscInt               nloc, nrows, ngids, *gids = NULL, *comps = NULL;
+  PetscInt               nfield[3] = {0, 0, 0};
+  PetscInt              *field_idx[3] = {NULL, NULL, NULL};
 
   PetscFunctionBeginUser;
   PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &ismatis));
   if (!ismatis) PetscFunctionReturn(PETSC_SUCCESS);
   PetscCall(MatISGetLocalMat(A, &local_mat));
-  PetscCall(MatGetSize(local_mat, &nloc, NULL));
-  PetscCheck(nloc % 3 == 0, PetscObjectComm((PetscObject)pc), PETSC_ERR_PLIB, "Expected MATIS local rows divisible by 3");
-  for (PetscInt comp = 0; comp < 3; ++comp) PetscCall(ISCreateStride(PetscObjectComm((PetscObject)pc), nloc / 3, comp, 3, &fields[comp]));
+  PetscCall(MatGetSize(local_mat, &nrows, NULL));
+  PetscCall(MatISRestoreLocalMat(A, &local_mat));
+  PetscCall(MatISGetLocalToGlobalMapping(A, &rmap, NULL));
+  PetscCall(ISLocalToGlobalMappingGetSize(rmap, &nloc));
+  PetscCheck(nloc == nrows, PetscObjectComm((PetscObject)pc), PETSC_ERR_PLIB, "MATIS local map size %" PetscInt_FMT " differs from local matrix rows %" PetscInt_FMT, nloc, nrows);
+
+  PetscCall(BuildGlobalComponentMap(dm, &ngids, &gids, &comps));
+  PetscCall(PetscMalloc3(nloc, &field_idx[0], nloc, &field_idx[1], nloc, &field_idx[2]));
+  PetscCall(ISLocalToGlobalMappingGetIndices(rmap, &ridx));
+  for (PetscInt i = 0; i < nloc; ++i) {
+    PetscInt loc, comp;
+
+    PetscCheck(ridx[i] >= 0, PetscObjectComm((PetscObject)pc), PETSC_ERR_PLIB, "MATIS cleaned local-to-global map contains negative index %" PetscInt_FMT, ridx[i]);
+    PetscCall(PetscFindInt(ridx[i], ngids, gids, &loc));
+    PetscCheck(loc >= 0, PetscObjectComm((PetscObject)pc), PETSC_ERR_PLIB, "Could not recover displacement component for MATIS local row %" PetscInt_FMT " global dof %" PetscInt_FMT, i, ridx[i]);
+    comp = comps[loc];
+    PetscCheck(comp >= 0 && comp < 3, PetscObjectComm((PetscObject)pc), PETSC_ERR_PLIB, "Invalid component %" PetscInt_FMT " for MATIS local row %" PetscInt_FMT, comp, i);
+    field_idx[comp][nfield[comp]++] = i;
+  }
+  PetscCall(ISLocalToGlobalMappingRestoreIndices(rmap, &ridx));
+
+  for (PetscInt comp = 0; comp < 3; ++comp) PetscCall(ISCreateGeneral(PETSC_COMM_SELF, nfield[comp], field_idx[comp], PETSC_COPY_VALUES, &fields[comp]));
   PetscCall(PCBDDCSetDofsSplittingLocal(pc, 3, fields));
   for (PetscInt comp = 0; comp < 3; ++comp) PetscCall(ISDestroy(&fields[comp]));
-  PetscCall(MatISRestoreLocalMat(A, &local_mat));
+  PetscCall(PetscFree3(field_idx[0], field_idx[1], field_idx[2]));
+  PetscCall(PetscFree(gids));
+  PetscCall(PetscFree(comps));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -1159,10 +1265,12 @@ static PetscErrorCode ConfigureBDDC(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app
 
   PetscFunctionBeginUser;
   PetscCall(PCSetType(pc, PCBDDC));
-  PetscCall(BuildLocalConstrainedIS(dm, actx, &dirichlet_local));
-  if (app->debug_bddc_dirichlet_rows) PetscCall(CheckLocalDirichletRows(A, dirichlet_local));
-  PetscCall(PCBDDCSetDirichletBoundariesLocal(pc, dirichlet_local));
-  PetscCall(ISDestroy(&dirichlet_local));
+  if (app->bddc_use_local_dirichlet || app->debug_bddc_dirichlet_rows) {
+    PetscCall(BuildLocalConstrainedIS(dm, actx, &dirichlet_local));
+    if (app->debug_bddc_dirichlet_rows) PetscCall(CheckLocalDirichletRows(A, dirichlet_local));
+    if (app->bddc_use_local_dirichlet) PetscCall(PCBDDCSetDirichletBoundariesLocal(pc, dirichlet_local));
+    PetscCall(ISDestroy(&dirichlet_local));
+  }
   {
     PetscBool use_scalar, use_blocked, use_none;
 
@@ -1186,7 +1294,7 @@ static PetscErrorCode ConfigureBDDC(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app
       PetscCheck(use_none, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONG, "Unknown -bddc_coordinates value %s", app->bddc_coordinates);
     }
   }
-  PetscCall(SetBDDCDofSplittingLocal(pc, A));
+  PetscCall(SetBDDCDofSplittingLocal(pc, dm, A));
   PetscCall(PetscStrcasecmp(app->bddc_graph, "topology", &use_topology_graph));
   if (use_topology_graph) {
     PetscCall(ConfigureBDDCTopologyGraph(pc, dm, actx->basis, A, app->bddc_collapse_shared));
@@ -1332,16 +1440,20 @@ static PetscErrorCode ChoosePMGCoarsePC(AppCtx *app, DM coarse_dm, char coarse_p
     PetscCall(PetscStrcasecmp(direct_pc, "lu", &flg));
     PetscCheck(!flg || coarse_dofs <= app->pmg_coarse_lu_max_dofs, comm, PETSC_ERR_ARG_WRONG,
                "Refusing PMG coarse LU for %" PetscInt_FMT " coarse DOFs above -pmg_coarse_lu_max_dofs %" PetscInt_FMT, coarse_dofs, app->pmg_coarse_lu_max_dofs);
+#if !defined(PETSC_HAVE_HYPRE)
+    PetscCall(PetscStrcasecmp(direct_pc, "hypre", &flg));
+    PetscCheck(!flg, comm, PETSC_ERR_SUP, "This PETSc build has no HYPRE support");
+#endif
+    PetscCall(PetscStrncpy(coarse_pc, direct_pc, coarse_pc_len));
+    PetscCall(PetscPrintf(comm, "PMG coarse space: dofs=%" PetscInt_FMT " selected_pc=%s source=mg_coarse_pc_type lu_limit=%" PetscInt_FMT "\n", coarse_dofs, coarse_pc,
+                          app->pmg_coarse_lu_max_dofs));
+    PetscFunctionReturn(PETSC_SUCCESS);
   }
 
   PetscCall(PetscStrcasecmp(app->pmg_coarse_pc_type, "auto", &flg));
   if (flg) {
     if (size == 1 && coarse_dofs <= app->pmg_coarse_lu_max_dofs) PetscCall(PetscStrncpy(coarse_pc, "lu", coarse_pc_len));
-#if defined(PETSC_HAVE_HYPRE)
-    else PetscCall(PetscStrncpy(coarse_pc, "hypre", coarse_pc_len));
-#else
     else PetscCall(PetscStrncpy(coarse_pc, "gamg", coarse_pc_len));
-#endif
   } else {
     PetscBool is_lu, is_hypre, is_gamg;
 
@@ -1360,6 +1472,57 @@ static PetscErrorCode ChoosePMGCoarsePC(AppCtx *app, DM coarse_dm, char coarse_p
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode ConfigurePMGBasePC(PC pc, const char pc_type[], PetscBool aggressive_square_graph)
+{
+  PetscBool is_gamg, is_hypre;
+
+  PetscFunctionBeginUser;
+  PetscCall(PCSetType(pc, pc_type));
+  PetscCall(PetscStrcasecmp(pc_type, "gamg", &is_gamg));
+  PetscCall(PetscStrcasecmp(pc_type, "hypre", &is_hypre));
+  if (is_gamg) {
+    PetscCall(PCGAMGSetType(pc, PCGAMGAGG));
+    PetscCall(PCGAMGSetAggressiveSquareGraph(pc, aggressive_square_graph));
+  }
+#if defined(PETSC_HAVE_HYPRE)
+  if (is_hypre) PetscCall(PCHYPRESetType(pc, "boomeramg"));
+#else
+  PetscCheck(!is_hypre, PetscObjectComm((PetscObject)pc), PETSC_ERR_SUP, "This PETSc build has no HYPRE support");
+#endif
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
+{
+  PetscMPIInt ranks;
+  PetscBool   pc_set;
+  char        value[64];
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &ranks));
+  if (app->pmg_coarse_telescope_active_ranks <= 0 || ranks <= app->pmg_coarse_telescope_active_ranks) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &pc_set));
+  if (pc_set) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCheck(ranks % app->pmg_coarse_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
+             "-pmg_coarse_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", app->pmg_coarse_telescope_active_ranks, ranks);
+
+  PetscCall(SetDefaultOption("-mg_coarse_pc_type", "telescope"));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks));
+  PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_reduction_factor", value));
+  PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_subcomm_type", app->pmg_coarse_telescope_subcomm_type));
+  PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_type", app->pmg_coarse_telescope_ksp_type));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)app->pmg_coarse_telescope_ksp_rtol));
+  PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_rtol", value));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, app->pmg_coarse_telescope_ksp_max_it));
+  PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_max_it", value));
+  PetscCall(SetDefaultOption("-mg_coarse_telescope_pc_type", app->pmg_coarse_telescope_pc_type));
+  PetscCall(PetscPrintf(comm,
+                        "PMG_TELESCOPE active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
+                        app->pmg_coarse_telescope_active_ranks, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type,
+                        app->pmg_coarse_telescope_ksp_type, app->pmg_coarse_telescope_pc_type));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
 {
   P4Basis p1_basis, p2_basis;
@@ -1368,15 +1531,23 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   KSP     coarse = NULL, smoother = NULL;
   PC      coarse_pc = NULL, smoother_pc = NULL;
   char    coarse_pc_type[32];
+  MPI_Comm comm = PetscObjectComm((PetscObject)dm);
+  PetscMPIInt ranks;
+  PetscBool coarse_pc_from_options = PETSC_FALSE, coarse_is_lu = PETSC_FALSE, coarse_is_telescope = PETSC_FALSE;
 
   PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &ranks));
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 1, &p1_basis));
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 2, &p2_basis));
   PetscCall(CreateSameMeshLevelDM(dm, &p1_basis, &dm_p1));
   PetscCall(CreateSameMeshLevelDM(dm, &p2_basis, &dm_p2));
   PetscCall(BuildInterpolationMatrix(dm_p2, &p2_basis, dm_p1, &p1_basis, &P21));
   PetscCall(BuildInterpolationMatrix(dm, actx->basis, dm_p2, &p2_basis, &P42));
+  PetscCall(SetPMGTelescopeDefaults(app, comm));
   PetscCall(ChoosePMGCoarsePC(app, dm_p1, coarse_pc_type, sizeof(coarse_pc_type)));
+  PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &coarse_pc_from_options));
+  PetscCall(PetscStrcasecmp(coarse_pc_type, "lu", &coarse_is_lu));
+  PetscCall(PetscStrcasecmp(coarse_pc_type, "telescope", &coarse_is_telescope));
 
   PetscCall(PCSetType(pc, PCMG));
   PetscCall(PCMGSetLevels(pc, 3, NULL));
@@ -1387,16 +1558,35 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscCall(PCMGSetGalerkin(pc, PC_MG_GALERKIN_BOTH));
 
   PetscCall(PCMGGetCoarseSolve(pc, &coarse));
-  PetscCall(KSPSetType(coarse, KSPPREONLY));
   PetscCall(KSPGetPC(coarse, &coarse_pc));
-  PetscCall(PCSetType(coarse_pc, coarse_pc_type));
-#if defined(PETSC_HAVE_HYPRE)
-  {
-    PetscBool is_hypre;
-    PetscCall(PetscStrcasecmp(coarse_pc_type, "hypre", &is_hypre));
-    if (is_hypre) PetscCall(PCHYPRESetType(coarse_pc, "boomeramg"));
+  if (!coarse_pc_from_options && !coarse_is_lu && app->pmg_coarse_redundant_group_size > 0 && ranks > app->pmg_coarse_redundant_group_size) {
+    KSP      inner_ksp;
+    PC       inner_pc;
+    PetscInt copies = ((PetscInt)ranks + app->pmg_coarse_redundant_group_size - 1) / app->pmg_coarse_redundant_group_size;
+
+    PetscCall(KSPSetType(coarse, KSPPREONLY));
+    PetscCall(PCSetType(coarse_pc, PCREDUNDANT));
+    PetscCall(PCRedundantSetNumber(coarse_pc, copies));
+    PetscCall(PCRedundantGetKSP(coarse_pc, &inner_ksp));
+    PetscCall(KSPSetType(inner_ksp, KSPFGMRES));
+    PetscCall(KSPSetTolerances(inner_ksp, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 100));
+    PetscCall(KSPGetPC(inner_ksp, &inner_pc));
+    PetscCall(ConfigurePMGBasePC(inner_pc, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
+    PetscCall(PetscPrintf(comm,
+                          "PMG_COARSE_SOLVE type=redundant group_size=%" PetscInt_FMT " copies=%" PetscInt_FMT " inner_pc=%s aggressive_square_graph=%s\n",
+                          app->pmg_coarse_redundant_group_size, copies, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
+  } else {
+    if (coarse_is_lu || coarse_is_telescope) {
+      PetscCall(KSPSetType(coarse, KSPPREONLY));
+    } else {
+      PetscCall(KSPSetType(coarse, KSPFGMRES));
+      PetscCall(KSPSetTolerances(coarse, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 100));
+      PetscCall(KSPGMRESSetRestart(coarse, 100));
+    }
+    PetscCall(ConfigurePMGBasePC(coarse_pc, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
+    PetscCall(PetscPrintf(comm, "PMG_COARSE_SOLVE type=%s group_size=%" PetscInt_FMT " aggressive_square_graph=%s\n", coarse_pc_type,
+                          app->pmg_coarse_redundant_group_size, app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
   }
-#endif
   for (PetscInt level = 1; level < 3; ++level) {
     PetscCall(PCMGGetSmoother(pc, level, &smoother));
     PetscCall(KSPSetType(smoother, app->pmg_smoother_ksp_type));
@@ -1414,7 +1604,7 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A)
+static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, PetscBool nonlinear_tangent)
 {
   PC pc;
 
@@ -1431,7 +1621,8 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
   if (app->variant == VARIANT_FETIDP) {
     PetscCall(KSPSetType(ksp, KSPFETIDP));
   } else {
-    PetscCall(KSPSetType(ksp, app->variant == VARIANT_PMG ? KSPFGMRES : KSPCG));
+    PetscCall(KSPSetType(ksp, (app->variant == VARIANT_PMG || (app->variant == VARIANT_BDDC && nonlinear_tangent)) ? KSPFGMRES : KSPCG));
+    if (app->variant == VARIANT_GAMG) PetscCall(KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED));
     PetscCall(KSPGetPC(ksp, &pc));
     if (app->variant == VARIANT_GAMG) {
       PetscCall(PCSetType(pc, PCGAMG));
@@ -1495,20 +1686,33 @@ static PetscErrorCode ResidualNormFree(AssemblyCtx *actx, Vec residual, PetscRea
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode SolveWithFreshKSP(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, Vec rhs, Vec x, const char *label, PetscInt *its)
+static PetscErrorCode SolveWithFreshKSP(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, Vec rhs, Vec x, const char *label, PetscBool nonlinear_tangent, PetscInt *its)
 {
   KSP       ksp;
+  Vec       check = NULL;
+  PetscReal rhs_norm, true_norm, true_rel, true_limit;
   PetscBool reuse_nonzero = PETSC_TRUE;
   KSPConvergedReason reason;
 
   PetscFunctionBeginUser;
   PetscCall(KSPCreate(PetscObjectComm((PetscObject)dm), &ksp));
-  PetscCall(ConfigureKSP(ksp, dm, actx, app, A));
+  PetscCall(ConfigureKSP(ksp, dm, actx, app, A, nonlinear_tangent));
   PetscCall(KSPSolve(ksp, rhs, x));
   PetscCall(KSPGetIterationNumber(ksp, its));
   PetscCall(KSPGetConvergedReason(ksp, &reason));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "%s KSP iterations=%" PetscInt_FMT " reason=%D\n", label, *its, (PetscInt)reason));
   PetscCheck(reason > 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_NOT_CONVERGED, "%s KSP did not converge, reason %D", label, (PetscInt)reason);
+  PetscCall(VecDuplicate(rhs, &check));
+  PetscCall(MatMult(A, x, check));
+  PetscCall(VecAXPY(check, -1.0, rhs));
+  PetscCall(VecNorm(rhs, NORM_2, &rhs_norm));
+  PetscCall(VecNorm(check, NORM_2, &true_norm));
+  PetscCall(VecDestroy(&check));
+  true_rel   = rhs_norm > 0.0 ? true_norm / rhs_norm : true_norm;
+  true_limit = PetscMax(10.0 * app->ksp_rtol, 1.0e-10);
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "%s true_residual_rel=%.6e limit=%.6e\n", label, (double)true_rel, (double)true_limit));
+  PetscCheck(true_rel <= true_limit, PetscObjectComm((PetscObject)dm), PETSC_ERR_NOT_CONVERGED,
+             "%s true residual %.6e exceeds verification limit %.6e despite KSP reason %D", label, (double)true_rel, (double)true_limit, (PetscInt)reason);
   PetscCall(PetscOptionsGetBool(NULL, NULL, "-reuse_linear_solver", &reuse_nonzero, NULL));
   (void)reuse_nonzero;
   PetscCall(KSPDestroy(&ksp));
@@ -1546,7 +1750,7 @@ static PetscErrorCode NewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, 
     PetscCall(ApplyZeroDirichlet(actx->constrained_is, A, rhs));
     PetscCall(VecZeroEntries(du));
     PetscCall(PetscTime(&t0));
-    PetscCall(SolveWithFreshKSP(dm, actx, app, A, rhs, du, "Newton correction", &linear_its));
+    PetscCall(SolveWithFreshKSP(dm, actx, app, A, rhs, du, "Newton correction", PETSC_TRUE, &linear_its));
     PetscCall(PetscTime(&t1));
     solve_time += t1 - t0;
     total_linear_its += linear_its;
@@ -1653,7 +1857,7 @@ int main(int argc, char **argv)
   }
   PetscCall(VecZeroEntries(u));
   PetscCall(PetscTime(&t0));
-  PetscCall(SolveWithFreshKSP(dm, &actx, &app, A, f_ext, u, "Elastic initial", &elastic_its));
+  PetscCall(SolveWithFreshKSP(dm, &actx, &app, A, f_ext, u, "Elastic initial", PETSC_FALSE, &elastic_its));
   PetscCall(PetscTime(&t1));
   elastic_solve_time = t1 - t0;
   PetscCall(VecNorm(u, NORM_2, &u_norm));

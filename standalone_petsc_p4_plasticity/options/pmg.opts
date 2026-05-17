@@ -1,8 +1,16 @@
 -pc_variant pmg
 -ksp_type fgmres
 -pc_type mg
--pmg_coarse_pc_type auto
+-pmg_coarse_pc_type gamg
 -pmg_coarse_lu_max_dofs 50000
+-pmg_coarse_redundant_group_size 16
+-pmg_coarse_gamg_aggressive_square_graph false
+-pmg_coarse_telescope_active_ranks 32
+-pmg_coarse_telescope_subcomm_type interlaced
+-pmg_coarse_telescope_ksp_type fgmres
+-pmg_coarse_telescope_ksp_rtol 1e-3
+-pmg_coarse_telescope_ksp_max_it 100
+-pmg_coarse_telescope_pc_type gamg
 -pmg_smoother_ksp_type chebyshev
 -pmg_smoother_pc_type jacobi
 -pmg_smoother_max_it 2
