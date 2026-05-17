@@ -64,7 +64,10 @@ mpiexec -n 2 ./p4_plasticity \
 ## Runtime Switches
 
 - `-lambda 1.2`
-- `-refine_levels N`
+- `-refine_levels N` uniformly refines the imported or generated DMPlex mesh
+  before the P4/P2/P1 hierarchy is built. One tetrahedral refinement level
+  creates roughly 8x as many base cells, so all PMG levels grow from the refined
+  mesh.
 - `-newton_rtol 1e-4`
 - `-newton_max_it 20`
 - `-linear_rtol 1e-8`

@@ -1,6 +1,7 @@
 #include "assembly.h"
 #include "p4_basis.h"
 
+#include <petscdmplex.h>
 #include <petscksp.h>
 #include <stdlib.h>
 
@@ -526,8 +527,11 @@ static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *app, P4Basis *basis, DM 
   PetscCall(DMSetFromOptions(cur));
   for (PetscInt r = 0; r < app->refine_levels; ++r) {
     DM refined = NULL;
+
+    PetscCall(DMPlexSetRefinementUniform(cur, PETSC_TRUE));
     PetscCall(DMRefine(cur, comm, &refined));
     PetscCheck(refined, comm, PETSC_ERR_SUP, "DMRefine did not produce a refined mesh at level %" PetscInt_FMT, r);
+    PetscCall(PetscPrintf(comm, "UNIFORM_REFINE level=%" PetscInt_FMT " complete=true\n", r + 1));
     PetscCall(DMDestroy(&cur));
     cur = refined;
     PetscCall(DMSetFromOptions(cur));
