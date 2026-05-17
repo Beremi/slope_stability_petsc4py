@@ -12,8 +12,10 @@ vectors with `DMCreateMatrix()` / `DMCreateGlobalVector()`, and assembles
 directly into PETSc objects. Element vectors are added to DM local vectors with
 `DMPlexVecSetClosure()` and then accumulated with `DMLocalToGlobal()`. Element
 matrices use `DMPlexGetClosureIndices()` to obtain PETSc's closure ordering, then
-insert unconstrained rows/columns explicitly with `MatSetValues()` for AIJ and
-`MatSetValuesLocal()` for MATIS.
+insert unconstrained rows/columns explicitly with PETSc global `MatSetValues()`
+for both AIJ and MATIS. Essential boundary conditions are represented in the
+PETSc section with `DMAddBoundary()`, so constrained dofs are removed from the
+algebraic problem instead of being kept as artificial unit rows.
 
 ## Build
 
@@ -66,6 +68,7 @@ mpiexec -n 2 ./p4_plasticity \
 - `-newton_rtol 1e-4`
 - `-newton_max_it 20`
 - `-linear_rtol 1e-8`
+- `-mesh_bc_mode rollers|base_only|full_sides`
 - `-pc_variant gamg|pmg|bddc|fetidp|none`
 - `-pmg_coarse_pc_type auto|hypre|gamg|lu`
 - `-pmg_coarse_lu_max_dofs 50000`
@@ -141,25 +144,28 @@ The material table is copied from the heterogenous 3D slope asset:
 The strength reduction is Davis-B at a fixed `lambda`. The Newton initial guess
 is the elastic gravity solution. The 24-point tetrahedral quadrature rule is
 stored in unit-simplex coordinates and converted to PETSc's biunit simplex
-before tabulating the PETSc P4 basis. Boundary elimination is symmetric:
+before tabulating the PETSc P4 basis.
+
+The imported L1 mesh uses PETSc's Gmsh `Face Sets` label. The driver copies the
+physical face ids into `boundary_marker`, completes the label, prints
+`BOUNDARY_COUNT ...` diagnostics, and applies essential constraints through
+`DMAddBoundary()`. The default `-mesh_bc_mode rollers` matches the L1 elasticity
+runner:
 
 - `u_x = 0` on physical faces `x_max` and `x_min`
 - `u_y = 0` on physical face `base`
 - `u_z = 0` on physical faces `z_min` and `z_max`
 
-The constrained global dofs are reconstructed after mesh creation from the
-distributed mesh geometry, all-gathered, sorted, and used during element matrix
-insertion. Constrained rows and columns are skipped during assembly and unit
-diagonal entries are inserted afterward: owned global diagonals for AIJ, local
-subdomain diagonals for MATIS. The residual/RHS path still zeroes owned
-constrained vector entries, but the solve path does not call
-`MatZeroRowsColumnsIS()`.
+`base_only` keeps only the glued base, and `full_sides` clamps all components on
+the side faces. The old manual constrained-dof list is now empty by design:
+PETSc's constrained local/global sections provide the negative closure indices
+used to skip eliminated rows and columns during element insertion.
 
-The GAMG variant attaches six projected rigid-body-like near-nullspace vectors
-with constrained entries zeroed and supplies owned P4 block coordinates to
-PETSc. The PMG variant builds same-mesh P1, P2, and P4 DMs, evaluates coarse FE
-basis functions at fine dual points to form P1 -> P2 and P2 -> P4 interpolation,
-and lets PETSc build Galerkin operators inside `PCMG`. Its P1 bottom solve now
+The GAMG, PMG, BDDC, and FETI-DP paths attach PETSc's rigid-body
+near-nullspace. The PMG variant builds same-mesh P1, P2, and P4 DMs with the
+same boundary constraints, evaluates coarse FE basis functions at fine dual
+points to form P1 -> P2 and P2 -> P4 interpolation, and lets PETSc build
+Galerkin operators inside `PCMG`. Its P1 bottom solve now
 matches the L1 elasticity experiments: GAMG by default, aggressive square-graph
 coarsening disabled, optional `PCREDUNDANT` grouping through
 `-pmg_coarse_redundant_group_size`, and optional PETSc `PCTELESCOPE` activation
@@ -180,8 +186,7 @@ PETSc 3.24 expects the inner
 BDDC options as `-fetidp_bddc_pc_bddc_*`. Although public `PCSetCoordinates()`
 documentation describes blocked vector coordinates, PETSc 3.24 BDDC still has a
 local import check marked `TODO: support for blocked`, so BDDC/FETI-DP must use
-scalar-equation coordinates in this build. GAMG continues to use blocked
-coordinates.
+scalar-equation coordinates in this build.
 
 For BDDC/FETI-DP on more than one rank, if the user has not explicitly supplied
 `-petscpartitioner_type`, the program asks PETSc for ParMETIS when compiled in,
@@ -192,36 +197,39 @@ about 1.92x with a max rank interface of 83k rows, while ParMETIS/PT-Scotch were
 about 1.06x with max interfaces near 7k rows.
 
 The default BDDC/FETI-DP comparison path keeps PETSc's exact/default local
-subsolves, matching the L1 elasticity driver that converged. The plasticity
-driver keeps CG for the symmetric elastic BDDC solve but switches top-level BDDC
-Newton tangent corrections to flexible GMRES, because the tangent can make the
-BDDC-preconditioned operator indefinite even when the elastic step is symmetric.
+subsolves, matching the L1 elasticity driver that converged. For P4 L1, vertex
+constraints alone are too weak and can give misleading one-iteration
+preconditioned-residual convergence, so the default BDDC/FETI-DP setup uses
+vertices, edges, and change-of-basis, with faces disabled to keep the coarse
+problem smaller. Top-level BDDC uses flexible GMRES with an unpreconditioned
+residual norm so the explicit primal true-residual check agrees with the KSP
+stopping test. FETI-DP defaults its inner multiplier KSP to GMRES and applies a
+stricter multiplier tolerance than the requested primal verification tolerance.
+
 As in the elasticity repair, local Dirichlet metadata is not sent to BDDC by
-default: plasticity keeps constrained DOFs as unit rows, and those local-section
-indices can give misleading BDDC convergence on the imported L1 mesh. The debug
-checker remains available through `-debug_bddc_dirichlet_rows`, and the old
-metadata path can be forced with `-bddc_use_local_dirichlet true` for diagnosis.
-When
-`-bddc_local_solver_auto true` is requested and local MATIS matrices exceed
+default. The constrained `PetscSection` removes those rows already, and the old
+full local-section offsets are not valid MATIS local matrix row ids. The debug
+checker remains available through `-debug_bddc_dirichlet_rows`; forcing
+`-bddc_use_local_dirichlet true` is intentionally rejected until that path is
+rewritten in MATIS local-row space. When `-bddc_local_solver_auto true` is
+requested and local MATIS matrices exceed
 `-bddc_exact_local_max_dofs`, the automatic large-subdomain path marks
 Dirichlet/Neumann subsolves as approximate and uses HYPRE BoomerAMG when
 available, otherwise GAMG.
 
-Current BDDC status: tiny distributed MATIS smoke tests converge with PETSc's
-local matrix graph and vertex-only defaults. The note3-style strict
-`-pc_bddc_use_local_mat_graph false` presets are kept in
-`options/bddc_safe.opts`, `options/bddc_edges.opts`, and the matching FETI-DP
-files, but they still expose singular local Neumann solves on the tiny mesh.
-The usable tiny BDDC/FETI-DP configuration is the topology graph plus
-approximate GAMG local Dirichlet/Neumann solvers in
-`options/bddc_approx_local.opts` and `options/fetidp_approx_local.opts`.
+Current BDDC/FETI-DP status after the elasticity-style boundary repair:
 
-On the full P4(L1) mesh, 16- and 32-rank BDDC/FETI-DP setup still remains too
-large under the 120 GiB guarded validation runs when edge/change-of-basis
-constraints are enabled. `-pc_bddc_graph_maxcount 2` bounds memory by producing
-no coarse problem, but then BDDC fails with `DIVERGED_PC_FAILED` and FETI-DP
-with `DIVERGED_NANORINF`. Oversubscribed 64-rank BDDC reduced peak memory to
-about 22 GiB but timed out before reaching an elastic result on this workstation,
-so it is only evidence that smaller subdomains help memory, not a valid
-convergence result. These PETSc failures are left visible rather than hidden
-behind fallbacks.
+```text
+ranks variant  partitioner status peak_GiB elastic_its newton_its newton_linear_its elastic_solve_s newton_solve_s
+16    bddc     parmetis    pass   31.293   27          0          0                 94.2148         0
+16    fetidp   parmetis    pass   31.416   36          0          0                 108.633         0
+32    bddc     parmetis    pass   28.650   19          0          0                 26.6822         0
+32    fetidp   parmetis    pass   28.789   24          0          0                 32.5585         0
+32    bddc     parmetis    pass   29.153   19          1          25                26.9916         27.6169
+32    fetidp   parmetis    pass   29.234   24          1          25                32.6922         32.7397
+```
+
+These are guarded local workstation runs at `-linear_rtol 1e-3` on the full
+P4(L1) mesh with the default `rollers` boundary mode and a 120 GiB aggregate RSS
+limit. Full nonlinear sweeps should still be run through the guarded runner or
+on Karolina, because BDDC/FETI-DP exact local/coarse setup is memory-heavy.

@@ -115,115 +115,9 @@ static PetscBool IsConstrainedGlobalDof(const AssemblyCtx *ctx, PetscInt idx)
 
 PetscErrorCode BuildConstrainedGlobalIS(DM dm, IS *is, PetscInt *nlocal)
 {
-  MPI_Comm     comm;
-  DM           cdm;
-  PetscSection csec, gsec;
-  Vec          coords;
-  PetscReal    local_min[3] = {PETSC_MAX_REAL, PETSC_MAX_REAL, PETSC_MAX_REAL};
-  PetscReal    local_max[3] = {-PETSC_MAX_REAL, -PETSC_MAX_REAL, -PETSC_MAX_REAL};
-  PetscReal    global_min[3], global_max[3], scale = 1.0, tol;
-  PetscInt     vStart, vEnd, pStart, pEnd;
-  PetscInt    *idx = NULL, nidx = 0, cap = 0;
-
   PetscFunctionBeginUser;
-  comm = PetscObjectComm((PetscObject)dm);
-  PetscCall(DMGetCoordinateDM(dm, &cdm));
-  PetscCall(DMGetCoordinateSection(dm, &csec));
-  PetscCall(DMGetCoordinatesLocal(dm, &coords));
-  PetscCheck(coords, comm, PETSC_ERR_ARG_WRONGSTATE, "Mesh has no local coordinates");
-  PetscCall(DMGetGlobalSection(dm, &gsec));
-
-  PetscCall(DMPlexGetDepthStratum(dm, 0, &vStart, &vEnd));
-  for (PetscInt v = vStart; v < vEnd; ++v) {
-    PetscScalar *xyz = NULL;
-    PetscInt     size = 0;
-
-    PetscCall(DMPlexVecGetClosure(cdm, csec, coords, v, &size, &xyz));
-    if (size == 3) {
-      for (PetscInt d = 0; d < 3; ++d) {
-        const PetscReal xd = PetscRealPart(xyz[d]);
-        local_min[d]       = PetscMin(local_min[d], xd);
-        local_max[d]       = PetscMax(local_max[d], xd);
-      }
-    }
-    PetscCall(DMPlexVecRestoreClosure(cdm, csec, coords, v, &size, &xyz));
-  }
-  PetscCallMPI(MPI_Allreduce(local_min, global_min, 3, MPIU_REAL, MPI_MIN, comm));
-  PetscCallMPI(MPI_Allreduce(local_max, global_max, 3, MPIU_REAL, MPI_MAX, comm));
-  for (PetscInt d = 0; d < 3; ++d) scale = PetscMax(scale, global_max[d] - global_min[d]);
-  tol = 1.0e-9 * scale;
-
-  PetscCall(PetscSectionGetChart(gsec, &pStart, &pEnd));
-  for (PetscInt p = pStart; p < pEnd; ++p) {
-    PetscBool on_xmin = PETSC_TRUE, on_xmax = PETSC_TRUE, on_ymin = PETSC_TRUE, on_zmin = PETSC_TRUE, on_zmax = PETSC_TRUE;
-    PetscInt *closure = NULL, nclosure = 0, nverts = 0;
-    PetscInt  dof, off;
-
-    PetscCall(PetscSectionGetDof(gsec, p, &dof));
-    if (dof <= 0) continue;
-    PetscCall(PetscSectionGetOffset(gsec, p, &off));
-    if (off < 0) off = -(off + 1);
-    PetscCheck(dof % 3 == 0, comm, PETSC_ERR_PLIB, "Expected vector dofs divisible by 3");
-
-    PetscCall(DMPlexGetTransitiveClosure(dm, p, PETSC_TRUE, &nclosure, &closure));
-    for (PetscInt c = 0; c < nclosure; ++c) {
-      PetscScalar *xyz = NULL;
-      PetscInt     depth, size = 0;
-      const PetscInt q = closure[2 * c];
-
-      PetscCall(DMPlexGetPointDepth(dm, q, &depth));
-      if (depth != 0) continue;
-      PetscCall(DMPlexVecGetClosure(cdm, csec, coords, q, &size, &xyz));
-      if (size == 3) {
-        const PetscReal x = PetscRealPart(xyz[0]);
-        const PetscReal y = PetscRealPart(xyz[1]);
-        const PetscReal z = PetscRealPart(xyz[2]);
-        on_xmin           = (PetscBool)(on_xmin && PetscAbsReal(x - global_min[0]) <= tol);
-        on_xmax           = (PetscBool)(on_xmax && PetscAbsReal(x - global_max[0]) <= tol);
-        on_ymin           = (PetscBool)(on_ymin && PetscAbsReal(y - global_min[1]) <= tol);
-        on_zmin           = (PetscBool)(on_zmin && PetscAbsReal(z - global_min[2]) <= tol);
-        on_zmax           = (PetscBool)(on_zmax && PetscAbsReal(z - global_max[2]) <= tol);
-        ++nverts;
-      }
-      PetscCall(DMPlexVecRestoreClosure(cdm, csec, coords, q, &size, &xyz));
-    }
-    PetscCall(DMPlexRestoreTransitiveClosure(dm, p, PETSC_TRUE, &nclosure, &closure));
-    if (!nverts) continue;
-
-    for (PetscInt j = 0; j < dof / 3; ++j) {
-      if (on_xmin || on_xmax) {
-        if (nidx == cap) {
-          cap = cap ? 2 * cap : 1024;
-          PetscCall(PetscRealloc(cap * sizeof(PetscInt), &idx));
-        }
-        idx[nidx++] = off + 3 * j + 0;
-      }
-      if (on_ymin) {
-        if (nidx == cap) {
-          cap = cap ? 2 * cap : 1024;
-          PetscCall(PetscRealloc(cap * sizeof(PetscInt), &idx));
-        }
-        idx[nidx++] = off + 3 * j + 1;
-      }
-      if (on_zmin || on_zmax) {
-        if (nidx == cap) {
-          cap = cap ? 2 * cap : 1024;
-          PetscCall(PetscRealloc(cap * sizeof(PetscInt), &idx));
-        }
-        idx[nidx++] = off + 3 * j + 2;
-      }
-    }
-  }
-  {
-    PetscInt w = 0;
-    for (PetscInt i = 0; i < nidx; ++i) {
-      if (idx[i] >= 0) idx[w++] = idx[i];
-    }
-    nidx = w;
-  }
-  PetscCall(PetscSortRemoveDupsInt(&nidx, idx));
-  PetscCall(ISCreateGeneral(PetscObjectComm((PetscObject)dm), nidx, idx, PETSC_OWN_POINTER, is));
-  if (nlocal) *nlocal = nidx;
+  PetscCall(ISCreateGeneral(PetscObjectComm((PetscObject)dm), 0, NULL, PETSC_COPY_VALUES, is));
+  if (nlocal) *nlocal = 0;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -287,32 +181,22 @@ PetscErrorCode ApplyZeroDirichlet(IS is, Mat A, Vec rhs)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode MatSetClosureFreeDofs(AssemblyCtx *ctx, PetscBool use_local_indices, PetscSection lsec, PetscSection gsec, Mat A, PetscInt cell, PetscScalar elem_mat[], PetscScalar free_mat[], PetscInt free_idx[], PetscInt free_pos[])
+static PetscErrorCode MatSetClosureFreeDofs(AssemblyCtx *ctx, PetscSection lsec, PetscSection gsec, Mat A, PetscInt cell, PetscScalar elem_mat[], PetscScalar free_mat[], PetscInt free_idx[], PetscInt free_pos[])
 {
   DM           dm = ctx->dm;
-  PetscInt    num_indices = 0, num_local_indices = 0, *global_indices = NULL, *local_indices = NULL, nfree = 0;
+  PetscInt    num_indices = 0, *global_indices = NULL, nfree = 0;
   PetscScalar *values = elem_mat, *values_orig = elem_mat;
 
   PetscFunctionBeginUser;
   PetscCall(DMPlexGetClosureIndices(dm, lsec, gsec, cell, PETSC_TRUE, &num_indices, &global_indices, NULL, &values));
   PetscCheck(num_indices == ctx->cell_dofs, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
              "Unexpected matrix closure size %" PetscInt_FMT " != %" PetscInt_FMT " on cell %" PetscInt_FMT, num_indices, ctx->cell_dofs, cell);
-  if (use_local_indices) {
-    PetscCall(DMPlexGetClosureIndices(dm, lsec, lsec, cell, PETSC_TRUE, &num_local_indices, &local_indices, NULL, NULL));
-    PetscCheck(num_local_indices == num_indices, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
-               "Unexpected local matrix closure size %" PetscInt_FMT " != %" PetscInt_FMT " on cell %" PetscInt_FMT, num_local_indices, num_indices, cell);
-  }
 
   for (PetscInt i = 0; i < num_indices; ++i) {
-    PetscCheck(global_indices[i] >= 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
-               "Unexpected negative global closure index %" PetscInt_FMT " on cell %" PetscInt_FMT, global_indices[i], cell);
-    if (!IsConstrainedGlobalDof(ctx, global_indices[i])) {
-      free_pos[nfree] = i;
-      free_idx[nfree] = use_local_indices ? local_indices[i] : global_indices[i];
-      PetscCheck(free_idx[nfree] >= 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB,
-                 "Unexpected negative local closure index %" PetscInt_FMT " on cell %" PetscInt_FMT, free_idx[nfree], cell);
-      ++nfree;
-    }
+    if (global_indices[i] < 0 || IsConstrainedGlobalDof(ctx, global_indices[i])) continue;
+    free_pos[nfree] = i;
+    free_idx[nfree] = global_indices[i];
+    ++nfree;
   }
 
   if (nfree > 0) {
@@ -323,11 +207,9 @@ static PetscErrorCode MatSetClosureFreeDofs(AssemblyCtx *ctx, PetscBool use_loca
         free_mat[i * nfree + j] = values[ii * num_indices + jj];
       }
     }
-    if (use_local_indices) PetscCall(MatSetValuesLocal(A, nfree, free_idx, nfree, free_idx, free_mat, ADD_VALUES));
-    else PetscCall(MatSetValues(A, nfree, free_idx, nfree, free_idx, free_mat, ADD_VALUES));
+    PetscCall(MatSetValues(A, nfree, free_idx, nfree, free_idx, free_mat, ADD_VALUES));
   }
 
-  if (use_local_indices) PetscCall(DMPlexRestoreClosureIndices(dm, lsec, lsec, cell, PETSC_TRUE, &num_local_indices, &local_indices, NULL, NULL));
   PetscCall(DMPlexRestoreClosureIndices(dm, lsec, gsec, cell, PETSC_TRUE, &num_indices, &global_indices, NULL, &values));
   if (values != values_orig) PetscCall(DMRestoreWorkArray(dm, 0, MPIU_SCALAR, &values));
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -336,38 +218,11 @@ static PetscErrorCode MatSetClosureFreeDofs(AssemblyCtx *ctx, PetscBool use_loca
 static PetscErrorCode MatSetConstrainedDiagonals(AssemblyCtx *ctx, PetscBool use_local_indices, PetscSection lsec, PetscSection gsec, Mat A)
 {
   PetscFunctionBeginUser;
-  if (use_local_indices) {
-    PetscInt     pStart, pEnd;
-    PetscScalar  one = 1.0;
-
-    PetscCall(PetscSectionGetChart(lsec, &pStart, &pEnd));
-    for (PetscInt p = pStart; p < pEnd; ++p) {
-      PetscInt ldof, gdof, loff, goff;
-
-      PetscCall(PetscSectionGetDof(lsec, p, &ldof));
-      PetscCall(PetscSectionGetDof(gsec, p, &gdof));
-      if (ldof <= 0 || gdof <= 0) continue;
-      PetscCheck(ldof == gdof, PetscObjectComm((PetscObject)ctx->dm), PETSC_ERR_PLIB, "Local/global section dof mismatch on point %" PetscInt_FMT, p);
-      PetscCall(PetscSectionGetOffset(lsec, p, &loff));
-      PetscCall(PetscSectionGetOffset(gsec, p, &goff));
-      if (goff < 0) goff = -(goff + 1);
-      for (PetscInt d = 0; d < gdof; ++d) {
-        if (IsConstrainedGlobalDof(ctx, goff + d)) {
-          const PetscInt local = loff + d;
-          PetscCall(MatSetValuesLocal(A, 1, &local, 1, &local, &one, ADD_VALUES));
-        }
-      }
-    }
-  } else {
-    const PetscInt *idx;
-    PetscInt        n;
-    PetscScalar     one = 1.0;
-
-    PetscCall(ISGetLocalSize(ctx->constrained_is, &n));
-    PetscCall(ISGetIndices(ctx->constrained_is, &idx));
-    for (PetscInt i = 0; i < n; ++i) PetscCall(MatSetValues(A, 1, &idx[i], 1, &idx[i], &one, ADD_VALUES));
-    PetscCall(ISRestoreIndices(ctx->constrained_is, &idx));
-  }
+  (void)ctx;
+  (void)use_local_indices;
+  (void)lsec;
+  (void)gsec;
+  (void)A;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -376,13 +231,10 @@ static PetscErrorCode MatEnsureDiagonalSlots(DM dm, PetscBool use_local_indices,
   PetscScalar zero = 0.0;
 
   PetscFunctionBeginUser;
-  if (use_local_indices) {
-    PetscInt nloc;
-
-    PetscCall(PetscSectionGetStorageSize(lsec, &nloc));
-    for (PetscInt i = 0; i < nloc; ++i) PetscCall(MatSetValuesLocal(A, 1, &i, 1, &i, &zero, ADD_VALUES));
-  } else {
-    Vec      v;
+  (void)use_local_indices;
+  (void)lsec;
+  {
+    Vec      v = NULL;
     PetscInt lo, hi;
 
     PetscCall(DMCreateGlobalVector(dm, &v));
@@ -413,6 +265,7 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
     PetscCall(DMGetLocalVector(dm, &u_loc));
     PetscCall(DMGlobalToLocalBegin(dm, u, INSERT_VALUES, u_loc));
     PetscCall(DMGlobalToLocalEnd(dm, u, INSERT_VALUES, u_loc));
+    PetscCall(DMPlexInsertBoundaryValues(dm, PETSC_TRUE, u_loc, 0.0, NULL, NULL, NULL));
   } else {
     PetscCall(DMGetLocalVector(dm, &probe_loc));
     PetscCall(VecZeroEntries(probe_loc));
@@ -515,7 +368,7 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
     } else if (f_ext) {
       PetscCall(DMPlexVecSetClosure(dm, lsec, out_loc, cell, elem_vec, ADD_VALUES));
     }
-    if (elem_mat) PetscCall(MatSetClosureFreeDofs(ctx, use_local_mat_indices, lsec, gsec, A, cell, elem_mat, free_mat, free_idx, free_pos));
+    if (elem_mat) PetscCall(MatSetClosureFreeDofs(ctx, lsec, gsec, A, cell, elem_mat, free_mat, free_idx, free_pos));
   }
 
   if (out) {
@@ -524,10 +377,9 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
   }
   if (A && assemble_jacobian) {
     /*
-      Eliminated rows have no element entries, and BDDC may later extract local
-      submatrices whose diagonals were not present in the element sparsity.
-      Allocate all diagonal slots explicitly, then put unit values on constrained
-      rows and restore strict insertion for later assembly.
+      PETSc section constraints remove essential DOFs from the global algebraic
+      system. Keep owned diagonal slots explicit for preconditioners without
+      adding artificial constrained unit rows.
     */
     PetscCall(MatSetOption(A, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE));
     PetscCall(MatSetOption(A, MAT_IGNORE_ZERO_ENTRIES, PETSC_FALSE));

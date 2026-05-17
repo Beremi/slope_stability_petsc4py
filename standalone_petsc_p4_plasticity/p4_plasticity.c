@@ -24,6 +24,7 @@ typedef struct {
   PetscBool use_box_mesh;
   PCVariant variant;
   char      variant_name[32];
+  char      mesh_bc_mode[32];
   char      pmg_coarse_pc_type[32];
   char      pmg_smoother_ksp_type[32];
   char      pmg_smoother_pc_type[32];
@@ -92,6 +93,13 @@ static PetscErrorCode RigidRz(PetscInt dim, PetscReal time, const PetscReal x[],
   return PETSC_SUCCESS;
 }
 
+static PetscErrorCode ZeroDisplacement(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
+{
+  (void)dim; (void)time; (void)x; (void)ctx;
+  for (PetscInt c = 0; c < Nc; ++c) u[c] = 0.0;
+  return PETSC_SUCCESS;
+}
+
 static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
 {
   PetscBool flg;
@@ -108,6 +116,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->use_box_mesh    = PETSC_FALSE;
   app->variant        = VARIANT_GAMG;
   PetscCall(PetscStrncpy(app->variant_name, "gamg", sizeof(app->variant_name)));
+  PetscCall(PetscStrncpy(app->mesh_bc_mode, "rollers", sizeof(app->mesh_bc_mode)));
   PetscCall(PetscStrncpy(app->pmg_coarse_pc_type, "auto", sizeof(app->pmg_coarse_pc_type)));
   PetscCall(PetscStrncpy(app->pmg_smoother_ksp_type, "chebyshev", sizeof(app->pmg_smoother_ksp_type)));
   PetscCall(PetscStrncpy(app->pmg_smoother_pc_type, "jacobi", sizeof(app->pmg_smoother_pc_type)));
@@ -139,6 +148,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsReal("-linear_rtol", "Default KSP relative tolerance", NULL, app->ksp_rtol, &app->ksp_rtol, NULL));
   PetscCall(PetscOptionsBool("-line_search", "Use residual backtracking", NULL, app->line_search, &app->line_search, NULL));
   PetscCall(PetscOptionsBool("-use_box_mesh", "Use a tiny generated unit-box tetra mesh for smoke tests", NULL, app->use_box_mesh, &app->use_box_mesh, NULL));
+  PetscCall(PetscOptionsString("-mesh_bc_mode", "Boundary mode for imported meshes: rollers|base_only|full_sides", NULL, app->mesh_bc_mode, app->mesh_bc_mode, sizeof(app->mesh_bc_mode), NULL));
   PetscCall(PetscOptionsReal("-damping_min", "Minimum backtracking damping", NULL, app->damping_min, &app->damping_min, NULL));
   PetscCall(PetscOptionsString("-pc_variant", "gamg|bddc|fetidp|pmg|none", NULL, app->variant_name, app->variant_name, sizeof(app->variant_name), NULL));
   PetscCall(PetscOptionsString("-pmg_coarse_pc_type", "auto|hypre|gamg|lu", NULL, app->pmg_coarse_pc_type, app->pmg_coarse_pc_type, sizeof(app->pmg_coarse_pc_type), NULL));
@@ -199,6 +209,16 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
       PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-bddc_coordinates must be scalar, blocked, or none");
     }
   }
+  PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &flg));
+  if (!flg) {
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "base_only", &flg));
+    if (!flg) {
+      PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "full_sides", &flg));
+      PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-mesh_bc_mode must be rollers, base_only, or full_sides");
+    }
+  }
+  PetscCheck(!app->bddc_use_local_dirichlet, comm, PETSC_ERR_SUP,
+             "-bddc_use_local_dirichlet is disabled for the PETSc-constrained DMPlex plasticity driver; BDDC local Dirichlet rows must first be rebuilt in MATIS local row space");
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -242,6 +262,22 @@ static PetscErrorCode RepairBoundaryFaceSets(DM dm)
 
   PetscFunctionBeginUser;
   comm = PetscObjectComm((PetscObject)dm);
+  PetscCall(DMGetLabel(dm, "Face Sets", &faceSets));
+  if (faceSets) {
+    PetscInt imported_local = 0, imported_global = 0;
+
+    for (PetscInt tag = 1; tag <= 7; ++tag) {
+      IS       points = NULL;
+      PetscInt n = 0;
+
+      PetscCall(DMLabelGetStratumIS(faceSets, tag, &points));
+      if (points) PetscCall(ISGetLocalSize(points, &n));
+      imported_local += n;
+      PetscCall(ISDestroy(&points));
+    }
+    PetscCallMPI(MPI_Allreduce(&imported_local, &imported_global, 1, MPIU_INT, MPI_SUM, comm));
+    if (imported_global > 0) PetscFunctionReturn(PETSC_SUCCESS);
+  }
   PetscCall(DMGetCoordinateDM(dm, &cdm));
   PetscCall(DMGetCoordinateSection(dm, &csec));
   PetscCall(DMGetCoordinatesLocal(dm, &coords));
@@ -282,6 +318,95 @@ static PetscErrorCode RepairBoundaryFaceSets(DM dm)
     else if (PetscAbsReal(centroid[2] - global_min[2]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 3)); /* z_min */
     else if (PetscAbsReal(centroid[2] - global_max[2]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 4)); /* z_max */
     else if (PetscAbsReal(centroid[1] - global_min[1]) <= tol) PetscCall(DMLabelSetValue(faceSets, f, 5)); /* base */
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode BuildBoundaryMarkerFromFaceSets(DM dm)
+{
+  DMLabel faceSets = NULL, marker = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLabel(dm, "Face Sets", &faceSets));
+  PetscCheck(faceSets, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE, "Mesh has no 'Face Sets' label for plasticity boundary conditions");
+  PetscCall(DMCreateLabel(dm, "boundary_marker"));
+  PetscCall(DMGetLabel(dm, "boundary_marker", &marker));
+  for (PetscInt tag = 1; tag <= 7; ++tag) {
+    IS              points = NULL;
+    const PetscInt *idx;
+    PetscInt        n;
+
+    PetscCall(DMLabelGetStratumIS(faceSets, tag, &points));
+    if (!points) continue;
+    PetscCall(ISGetLocalSize(points, &n));
+    PetscCall(ISGetIndices(points, &idx));
+    for (PetscInt i = 0; i < n; ++i) PetscCall(DMLabelSetValue(marker, idx[i], tag));
+    PetscCall(ISRestoreIndices(points, &idx));
+    PetscCall(ISDestroy(&points));
+  }
+  PetscCall(DMPlexLabelComplete(dm, marker));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ReportBoundaryCounts(DM dm, const AppCtx *app)
+{
+  MPI_Comm        comm = PetscObjectComm((PetscObject)dm);
+  DMLabel         label = NULL;
+  const char     *names[6] = {"x_max", "x_min", "z_min", "z_max", "base", "y_max"};
+  const PetscInt  tags[6] = {1, 2, 3, 4, 5, 6};
+  PetscInt        counts[6];
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLabel(dm, "boundary_marker", &label));
+  PetscCheck(label, comm, PETSC_ERR_ARG_WRONGSTATE, "Missing boundary_marker label");
+  for (PetscInt k = 0; k < 6; ++k) {
+    IS       points = NULL;
+    PetscInt nloc = 0;
+
+    PetscCall(DMLabelGetStratumIS(label, tags[k], &points));
+    if (points) PetscCall(ISGetLocalSize(points, &nloc));
+    PetscCallMPI(MPI_Allreduce(&nloc, &counts[k], 1, MPIU_INT, MPI_SUM, comm));
+    PetscCall(PetscPrintf(comm, "BOUNDARY_COUNT name=%s tag=%" PetscInt_FMT " points=%" PetscInt_FMT "\n", names[k], tags[k], counts[k]));
+    PetscCall(ISDestroy(&points));
+  }
+  PetscCheck(counts[4] > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "Plasticity boundary label has no base points");
+  if (!app->use_box_mesh) {
+    PetscBool is_rollers, is_full_sides;
+
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &is_rollers));
+    PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "full_sides", &is_full_sides));
+    if (is_rollers || is_full_sides) {
+      PetscCheck(counts[0] > 0 && counts[1] > 0 && counts[2] > 0 && counts[3] > 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+                 "Plasticity boundary label is missing at least one side group: x_max=%" PetscInt_FMT " x_min=%" PetscInt_FMT " z_min=%" PetscInt_FMT " z_max=%" PetscInt_FMT,
+                 counts[0], counts[1], counts[2], counts[3]);
+    }
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode AddPlasticityBoundaryConditions(DM dm, const AppCtx *app)
+{
+  DMLabel        label = NULL;
+  const PetscInt components[3] = {0, 1, 2};
+  const PetscInt base = 5, x_rollers[2] = {2, 1}, z_rollers[2] = {3, 4};
+  const PetscInt x_comp[1] = {0}, z_comp[1] = {2};
+  PetscBool      is_rollers, is_base_only, is_full_sides;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetLabel(dm, "boundary_marker", &label));
+  PetscCheck(label, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE, "Missing boundary_marker label");
+  PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "glued_base", label, 1, &base, 0, 3, components, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+  PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &is_rollers));
+  PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "base_only", &is_base_only));
+  PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "full_sides", &is_full_sides));
+  if (app->use_box_mesh || is_rollers) {
+    PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "x_side_rollers", label, 2, x_rollers, 0, 1, x_comp, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+    PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "z_side_rollers", label, 2, z_rollers, 0, 1, z_comp, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+  } else if (is_full_sides) {
+    PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "x_side_clamps", label, 2, x_rollers, 0, 3, components, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+    PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, "z_side_clamps", label, 2, z_rollers, 0, 3, components, (PetscVoidFn *)ZeroDisplacement, NULL, NULL, NULL));
+  } else {
+    PetscCheck(is_base_only, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONG, "Unknown -mesh_bc_mode %s", app->mesh_bc_mode);
   }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -327,8 +452,11 @@ static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *app, P4Basis *basis, DM 
     PetscCall(DMSetFromOptions(cur));
   }
   PetscCall(RepairBoundaryFaceSets(cur));
+  PetscCall(BuildBoundaryMarkerFromFaceSets(cur));
+  PetscCall(ReportBoundaryCounts(cur, app));
   PetscCall(DMSetField(cur, 0, NULL, (PetscObject)basis->fe_vector));
   PetscCall(DMCreateDS(cur));
+  PetscCall(AddPlasticityBoundaryConditions(cur, app));
   PetscCall(DMGetCoordinatesLocalSetUp(cur));
   if (app->variant == VARIANT_BDDC || app->variant == VARIANT_FETIDP) PetscCall(DMSetMatType(cur, MATIS));
   else PetscCall(DMSetMatType(cur, MATAIJ));
@@ -458,38 +586,17 @@ static PetscErrorCode ReportPartitionDiagnostics(DM dm, Mat A, Vec u, const Asse
 
 static PetscErrorCode AttachNearNullspace(DM dm, IS constrained, Mat A)
 {
-  PetscErrorCode (*funcs[1])(PetscInt, PetscReal, const PetscReal[], PetscInt, PetscScalar *, void *);
-  PetscErrorCode (*modes_f[6])(PetscInt, PetscReal, const PetscReal[], PetscInt, PetscScalar *, void *) = {RigidTx, RigidTy, RigidTz, RigidRx, RigidRy, RigidRz};
-  Vec          modes[6], kept[6];
-  MatNullSpace ns;
-  PetscInt     nkept = 0;
+  DM           subdm = NULL;
+  MatNullSpace ns = NULL;
+  PetscInt     field = 0;
 
   PetscFunctionBeginUser;
-  for (PetscInt i = 0; i < 6; ++i) {
-    PetscCall(DMCreateGlobalVector(dm, &modes[i]));
-    funcs[0] = modes_f[i];
-    PetscCall(DMProjectFunction(dm, 0.0, funcs, NULL, INSERT_ALL_VALUES, modes[i]));
-    PetscCall(ZeroConstrainedVector(constrained, modes[i]));
-    for (PetscInt j = 0; j < nkept; ++j) {
-      PetscScalar dot;
-      PetscCall(VecDot(modes[i], kept[j], &dot));
-      PetscCall(VecAXPY(modes[i], -dot, kept[j]));
-    }
-    PetscReal norm;
-    PetscCall(VecNorm(modes[i], NORM_2, &norm));
-    if (norm > 1.0e-12) {
-      PetscCall(VecScale(modes[i], 1.0 / norm));
-      kept[nkept++] = modes[i];
-    } else {
-      PetscCall(VecDestroy(&modes[i]));
-    }
-  }
-  if (nkept > 0) {
-    PetscCall(MatNullSpaceCreate(PetscObjectComm((PetscObject)A), PETSC_FALSE, nkept, kept, &ns));
-    PetscCall(MatSetNearNullSpace(A, ns));
-    PetscCall(MatNullSpaceDestroy(&ns));
-  }
-  for (PetscInt i = 0; i < nkept; ++i) PetscCall(VecDestroy(&kept[i]));
+  (void)constrained;
+  PetscCall(DMCreateSubDM(dm, 1, &field, NULL, &subdm));
+  PetscCall(DMPlexCreateRigidBody(subdm, 0, &ns));
+  PetscCall(MatSetNearNullSpace(A, ns));
+  PetscCall(MatNullSpaceDestroy(&ns));
+  PetscCall(DMDestroy(&subdm));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -540,7 +647,6 @@ static PetscErrorCode BuildOwnedBlockCoordinates(DM dm, P4Basis *basis, PetscInt
       for (PetscInt d = 0; d < 3; ++d) x[d] = v0[d] + J[0 * 3 + d] * r[0] + J[1 * 3 + d] * r[1] + J[2 * 3 + d] * r[2];
       for (PetscInt comp = 0; comp < 3; ++comp) {
         const PetscInt row = indices[3 * b + comp];
-        PetscCheck(row >= 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected negative coordinate closure index");
         if (row >= lo && row < hi) {
           const PetscInt ib = (row - lo) / 3;
           owned_coords[3 * ib + 0] = x[0];
@@ -603,7 +709,6 @@ static PetscErrorCode BuildOwnedDofCoordinates(DM dm, P4Basis *basis, PetscInt *
       for (PetscInt comp = 0; comp < 3; ++comp) {
         const PetscInt row = indices[3 * b + comp];
 
-        PetscCheck(row >= 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected negative coordinate closure index");
         if (row >= lo && row < hi) {
           const PetscInt i = row - lo;
 
@@ -773,10 +878,30 @@ static PetscErrorCode SetBDDCConstraintDefaults(AppCtx *app, const char prefix[]
 
   PetscFunctionBeginUser;
   PetscCall(SetPrefixedDefault(prefix, "use_vertices", "true"));
-  PetscCall(SetPrefixedDefault(prefix, "use_edges", "false"));
+  PetscCall(SetPrefixedDefault(prefix, "use_edges", "true"));
   PetscCall(SetPrefixedDefault(prefix, "use_faces", "false"));
+  PetscCall(SetPrefixedDefault(prefix, "use_change_of_basis", "true"));
   PetscCall(PetscStrcasecmp(app->bddc_graph, "topology", &use_topology_graph));
   if (use_topology_graph) PetscCall(SetPrefixedDefault(prefix, "use_local_mat_graph", "false"));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode SetFETIDPDefaults(PetscReal solver_rtol)
+{
+  PetscBool max_it_set;
+  PetscInt  max_it;
+  char      value[64];
+
+  PetscFunctionBeginUser;
+  PetscCall(SetDefaultOption("-ksp_fetidp_fullyredundant", "false"));
+  PetscCall(SetDefaultOption("-fetidp_ksp_type", "gmres"));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)solver_rtol));
+  PetscCall(SetDefaultOption("-fetidp_ksp_rtol", value));
+  PetscCall(PetscOptionsGetInt(NULL, NULL, "-ksp_max_it", &max_it, &max_it_set));
+  if (max_it_set) {
+    PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, max_it));
+    PetscCall(SetDefaultOption("-fetidp_ksp_max_it", value));
+  }
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -851,20 +976,26 @@ static PetscErrorCode BuildGlobalComponentMap(DM dm, PetscInt *ngids, PetscInt *
   PetscCall(DMGetGlobalSection(dm, &gsec));
   PetscCall(PetscSectionGetChart(lsec, &pStart, &pEnd));
   for (PetscInt p = pStart; p < pEnd; ++p) {
-    PetscInt dof, off;
+    const PetscInt *cdofs = NULL;
+    PetscInt        dof, cdof, off, cind = 0;
 
     PetscCall(PetscSectionGetDof(lsec, p, &dof));
     if (!dof) continue;
     PetscCheck(dof % 3 == 0, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Expected vector dofs in blocks of 3 on point %" PetscInt_FMT, p);
+    PetscCall(PetscSectionGetConstraintDof(lsec, p, &cdof));
+    PetscCall(PetscSectionGetConstraintIndices(lsec, p, &cdofs));
     PetscCall(PetscSectionGetOffset(gsec, p, &off));
-    if (off < 0) off = -(off + 1);
     for (PetscInt c = 0; c < dof; ++c) {
+      if (cind < cdof && cdofs && c == cdofs[cind]) {
+        ++cind;
+        continue;
+      }
       if (n == cap) {
         cap = cap ? 2 * cap : 1024;
         PetscCall(PetscRealloc((size_t)cap * sizeof(PetscInt), &gid));
         PetscCall(PetscRealloc((size_t)cap * sizeof(PetscInt), &comp));
       }
-      gid[n]    = off + c;
+      gid[n]    = (off < 0 ? -(off + 1) : off) + c - cind;
       comp[n++] = c % 3;
     }
   }
@@ -1301,7 +1432,6 @@ static PetscErrorCode ConfigureBDDC(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app
     PetscCall(ConfigureBDDCPrimalVertices(pc, dm, actx->basis));
   }
   PetscCall(AttachNearNullspace(dm, actx->constrained_is, A));
-  PetscCall(AttachLocalNearNullspace(dm, actx->basis, A));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -1339,7 +1469,7 @@ static PetscErrorCode BuildBasisReferencePoints(P4Basis *basis, PetscReal **poin
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode CreateSameMeshLevelDM(DM fine_dm, P4Basis *basis, DM *level_dm)
+static PetscErrorCode CreateSameMeshLevelDM(DM fine_dm, P4Basis *basis, const AppCtx *app, DM *level_dm)
 {
   PetscFunctionBeginUser;
   PetscCall(DMClone(fine_dm, level_dm));
@@ -1347,6 +1477,7 @@ static PetscErrorCode CreateSameMeshLevelDM(DM fine_dm, P4Basis *basis, DM *leve
   PetscCall(DMClearFields(*level_dm));
   PetscCall(DMSetField(*level_dm, 0, NULL, (PetscObject)basis->fe_vector));
   PetscCall(DMCreateDS(*level_dm));
+  PetscCall(AddPlasticityBoundaryConditions(*level_dm, app));
   PetscCall(DMGetCoordinatesLocalSetUp(*level_dm));
   PetscCall(DMSetMatType(*level_dm, MATAIJ));
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -1396,13 +1527,14 @@ static PetscErrorCode BuildInterpolationMatrix(DM fine_dm, P4Basis *fine_basis, 
       for (PetscInt comp = 0; comp < 3; ++comp) {
         const PetscInt row = fine_idx[3 * fb + comp];
 
+        if (row < 0) continue;
         if (row < rlo || row >= rhi) continue;
         for (PetscInt cb = 0; cb < coarse_basis->n_basis; ++cb) {
           const PetscScalar val = phi[fb * coarse_basis->n_basis + cb];
           const PetscInt    col = coarse_idx[3 * cb + comp];
 
+          if (col < 0) continue;
           if (PetscAbsScalar(val) <= 1.0e-12) continue;
-          PetscCheck(col >= 0, comm, PETSC_ERR_PLIB, "Unexpected negative coarse interpolation column");
           PetscCall(MatSetValue(mat, row, col, val, INSERT_VALUES));
         }
       }
@@ -1539,8 +1671,8 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 1, &p1_basis));
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 2, &p2_basis));
-  PetscCall(CreateSameMeshLevelDM(dm, &p1_basis, &dm_p1));
-  PetscCall(CreateSameMeshLevelDM(dm, &p2_basis, &dm_p2));
+  PetscCall(CreateSameMeshLevelDM(dm, &p1_basis, app, &dm_p1));
+  PetscCall(CreateSameMeshLevelDM(dm, &p2_basis, app, &dm_p2));
   PetscCall(BuildInterpolationMatrix(dm_p2, &p2_basis, dm_p1, &p1_basis, &P21));
   PetscCall(BuildInterpolationMatrix(dm, actx->basis, dm_p2, &p2_basis, &P42));
   PetscCall(SetPMGTelescopeDefaults(app, comm));
@@ -1607,10 +1739,15 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
 static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, PetscBool nonlinear_tangent)
 {
   PC pc;
+  PetscReal solver_rtol = app->ksp_rtol;
 
   PetscFunctionBeginUser;
   PetscCall(KSPSetOperators(ksp, A, A));
-  PetscCall(KSPSetTolerances(ksp, app->ksp_rtol, PETSC_CURRENT, PETSC_CURRENT, PETSC_CURRENT));
+  if (app->variant == VARIANT_FETIDP) solver_rtol *= 1.0e-2;
+  PetscCall(KSPSetTolerances(ksp, solver_rtol, PETSC_CURRENT, PETSC_CURRENT, PETSC_CURRENT));
+  if (solver_rtol != app->ksp_rtol) {
+    PetscCall(PetscPrintf(PetscObjectComm((PetscObject)ksp), "FETI-DP effective multiplier-space rtol=%.6e requested_primal_rtol=%.6e\n", (double)solver_rtol, (double)app->ksp_rtol));
+  }
   if (app->variant == VARIANT_BDDC) {
     PetscCall(SetBDDCConstraintDefaults(app, "pc_bddc_"));
     PetscCall(ConfigureBDDCAutoSolvers(app, A, "pc_bddc_"));
@@ -1619,10 +1756,12 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
     PetscCall(ConfigureBDDCAutoSolvers(app, A, "fetidp_bddc_pc_bddc_"));
   }
   if (app->variant == VARIANT_FETIDP) {
+    PetscCall(SetFETIDPDefaults(solver_rtol));
     PetscCall(KSPSetType(ksp, KSPFETIDP));
   } else {
-    PetscCall(KSPSetType(ksp, (app->variant == VARIANT_PMG || (app->variant == VARIANT_BDDC && nonlinear_tangent)) ? KSPFGMRES : KSPCG));
+    PetscCall(KSPSetType(ksp, (app->variant == VARIANT_PMG || app->variant == VARIANT_BDDC) ? KSPFGMRES : KSPCG));
     if (app->variant == VARIANT_GAMG) PetscCall(KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED));
+    if (app->variant == VARIANT_BDDC) PetscCall(KSPSetNormType(ksp, KSP_NORM_UNPRECONDITIONED));
     PetscCall(KSPGetPC(ksp, &pc));
     if (app->variant == VARIANT_GAMG) {
       PetscCall(PCSetType(pc, PCGAMG));
@@ -1658,12 +1797,6 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
       PetscCall(PetscStrcmp(pctype, PCGAMG, &is_gamg));
       PetscCall(PetscStrcmp(pctype, PCBDDC, &is_bddc));
       if (is_gamg) {
-        PetscInt   ncoords;
-        PetscReal *coords = NULL;
-
-        PetscCall(BuildOwnedBlockCoordinates(dm, actx->basis, &ncoords, &coords));
-        PetscCall(PCSetCoordinates(pc, 3, ncoords, coords));
-        PetscCall(PetscFree(coords));
         PetscCall(AttachNearNullspace(dm, actx->constrained_is, A));
       } else if (is_bddc) {
         PetscCall(ConfigureBDDC(pc, dm, actx, app, A));
@@ -1764,6 +1897,7 @@ static PetscErrorCode NewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, 
         PetscCall(ResidualNormFree(actx, r_trial, rhs_norm, &trial_rel));
         if (trial_rel < rel || alpha <= app->damping_min) {
           PetscCall(VecCopy(u_trial, u));
+          rel = trial_rel;
           PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "  alpha=%8.3e trial_rel=%10.4e\n", (double)alpha, (double)trial_rel));
           break;
         }
@@ -1771,6 +1905,8 @@ static PetscErrorCode NewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, 
       }
     } else {
       PetscCall(VecAXPY(u, 1.0, du));
+      PetscCall(AssemblePlasticResidualJacobian(actx, app->lambda, u, f_ext, NULL, r_trial, PETSC_FALSE));
+      PetscCall(ResidualNormFree(actx, r_trial, rhs_norm, &rel));
     }
   }
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
@@ -1813,7 +1949,6 @@ int main(int argc, char **argv)
   PetscCall(DMPlexGetHeightStratum(dm, 0, &cStart, &cEnd));
   PetscCall(DMPlexGetDepthStratum(dm, 0, &nStart, &nEnd));
   PetscCall(DMCreateMatrix(dm, &A));
-  PetscCall(MatSetBlockSize(A, 3));
   PetscCall(MatSetOption(A, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE));
   PetscCall(DMCreateGlobalVector(dm, &u));
   PetscCall(DMCreateGlobalVector(dm, &f_ext));
@@ -1822,8 +1957,8 @@ int main(int argc, char **argv)
   PetscCall(AssemblyCtxCreate(dm, &basis, &actx));
 
   PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                        "mesh=%s%s refine_levels=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " local_dofs=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " P4_basis=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " pc_variant=%s lambda=%.6g\n",
-                        app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, cEnd - cStart, nEnd - nStart, local_dofs, global_dofs, basis.n_basis, actx.n_constrained_local, actx.n_constrained_all, app.variant_name, (double)app.lambda));
+                        "mesh=%s%s refine_levels=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " local_dofs=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " P4_basis=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " pc_variant=%s bc=%s lambda=%.6g\n",
+                        app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, cEnd - cStart, nEnd - nStart, local_dofs, global_dofs, basis.n_basis, actx.n_constrained_local, actx.n_constrained_all, app.variant_name, app.mesh_bc_mode, (double)app.lambda));
   if (app.inspect_partition) {
     PetscCall(ReportPartitionDiagnostics(dm, A, u, &actx, &app));
     PetscCall(AssemblyCtxDestroy(&actx));
