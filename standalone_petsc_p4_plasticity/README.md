@@ -80,6 +80,12 @@ mpiexec -n 2 ./p4_plasticity \
 - `-pmg_coarse_telescope_ksp_rtol 1e-3`
 - `-pmg_coarse_telescope_ksp_max_it 100`
 - `-pmg_coarse_telescope_pc_type gamg`
+- `-pmg_p2_telescope_active_ranks 0`
+- `-pmg_p2_telescope_subcomm_type interlaced`
+- `-pmg_p2_telescope_ksp_type fgmres`
+- `-pmg_p2_telescope_ksp_rtol 1e-3`
+- `-pmg_p2_telescope_ksp_max_it 50`
+- `-pmg_p2_telescope_pc_type jacobi`
 - `-pmg_smoother_ksp_type chebyshev`
 - `-pmg_smoother_pc_type jacobi`
 - `-pmg_smoother_max_it 2`
@@ -101,6 +107,7 @@ Option files are provided in `options/`:
 ```bash
 mpiexec -n 4 ./p4_plasticity -options_file options/gamg.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/pmg.opts
+mpiexec -n 64 ./p4_plasticity -options_file options/pmg_telescope_final.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/bddc.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/fetidp.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/bddc_approx_local.opts
@@ -130,6 +137,17 @@ left-preconditioned residual. A layout-only check is cheap and safe:
 ```bash
 mpiexec -n 16 ./p4_plasticity -pc_variant bddc -inspect_partition \
   -petscpartitioner_type parmetis
+```
+
+The runner can also reproduce the elasticity PMG telescope profile without
+putting long option strings into the shell history:
+
+```bash
+MEM_LIMIT_GB=120 VARIANTS=pmg RANKS="64 128 256" PARTITIONER=parmetis \
+  PLEX_PARTITION_BALANCE=true \
+  PMG_COARSE_TELESCOPE_ACTIVE_RANKS=32 \
+  PMG_P2_TELESCOPE_ACTIVE_RANKS=32 \
+  ./run_guarded_preconditioners.sh
 ```
 
 ## Model Notes
@@ -169,14 +187,27 @@ Galerkin operators inside `PCMG`. Its P1 bottom solve now
 matches the L1 elasticity experiments: GAMG by default, aggressive square-graph
 coarsening disabled, optional `PCREDUNDANT` grouping through
 `-pmg_coarse_redundant_group_size`, and optional PETSc `PCTELESCOPE` activation
-through `-pmg_coarse_telescope_active_ranks`. For example, on high-rank L1 runs
-the elasticity best setting kept about 32 active P1 coarse ranks:
+through `-pmg_coarse_telescope_active_ranks`. A second optional PETSc
+`PCTELESCOPE` can be attached to the P2-level smoother PC through
+`-pmg_p2_telescope_active_ranks`; this is the PETSc-native way to telescope the
+P2-level work in the current 3-level same-communicator `PCMG`. It does not
+redistribute the P2/P1 DMs or the P2->P4 / P1->P2 interpolation matrices onto
+smaller communicators. For example, on high-rank L1 runs the elasticity
+telescope campaign used DMPlex partition-boundary balancing, group size 16, and
+32 to 64 active coarse ranks:
 
 ```bash
 mpiexec -n 256 ./p4_plasticity -pc_variant pmg \
+  -dm_plex_partition_balance true \
   -pmg_coarse_telescope_active_ranks 32 \
+  -pmg_p2_telescope_active_ranks 32 \
   -pmg_coarse_telescope_subcomm_type interlaced
 ```
+
+Use `options/pmg_telescope_final.opts` for this combined profile. On the local
+32-rank L1 probe, adding the P2-level telescope converged but was slower than
+the P1-only telescope; it is kept as an explicit high-rank scaling option rather
+than a hard-coded default.
 
 The BDDC path supplies PETSc's MATIS solver with component-wise local dof
 splitting recovered from MATIS local-to-global rows, global and local

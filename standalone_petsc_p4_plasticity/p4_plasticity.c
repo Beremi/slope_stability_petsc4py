@@ -31,12 +31,18 @@ typedef struct {
   char      pmg_coarse_telescope_subcomm_type[32];
   char      pmg_coarse_telescope_ksp_type[32];
   char      pmg_coarse_telescope_pc_type[32];
+  char      pmg_p2_telescope_subcomm_type[32];
+  char      pmg_p2_telescope_ksp_type[32];
+  char      pmg_p2_telescope_pc_type[32];
   PetscReal pmg_coarse_telescope_ksp_rtol;
+  PetscReal pmg_p2_telescope_ksp_rtol;
   PetscInt  pmg_coarse_lu_max_dofs;
   PetscInt  pmg_smoother_max_it;
   PetscInt  pmg_coarse_redundant_group_size;
   PetscInt  pmg_coarse_telescope_active_ranks;
   PetscInt  pmg_coarse_telescope_ksp_max_it;
+  PetscInt  pmg_p2_telescope_active_ranks;
+  PetscInt  pmg_p2_telescope_ksp_max_it;
   PetscBool pmg_coarse_gamg_aggressive_square_graph;
   char      bddc_graph[32];
   char      bddc_coordinates[32];
@@ -123,12 +129,18 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscStrncpy(app->pmg_coarse_telescope_subcomm_type, "interlaced", sizeof(app->pmg_coarse_telescope_subcomm_type)));
   PetscCall(PetscStrncpy(app->pmg_coarse_telescope_ksp_type, "fgmres", sizeof(app->pmg_coarse_telescope_ksp_type)));
   PetscCall(PetscStrncpy(app->pmg_coarse_telescope_pc_type, "gamg", sizeof(app->pmg_coarse_telescope_pc_type)));
+  PetscCall(PetscStrncpy(app->pmg_p2_telescope_subcomm_type, "interlaced", sizeof(app->pmg_p2_telescope_subcomm_type)));
+  PetscCall(PetscStrncpy(app->pmg_p2_telescope_ksp_type, "fgmres", sizeof(app->pmg_p2_telescope_ksp_type)));
+  PetscCall(PetscStrncpy(app->pmg_p2_telescope_pc_type, "jacobi", sizeof(app->pmg_p2_telescope_pc_type)));
   app->pmg_coarse_telescope_ksp_rtol   = 1.0e-3;
+  app->pmg_p2_telescope_ksp_rtol       = 1.0e-3;
   app->pmg_coarse_lu_max_dofs = 50000;
   app->pmg_smoother_max_it    = 2;
   app->pmg_coarse_redundant_group_size         = 16;
   app->pmg_coarse_telescope_active_ranks       = 0;
   app->pmg_coarse_telescope_ksp_max_it         = 100;
+  app->pmg_p2_telescope_active_ranks           = 0;
+  app->pmg_p2_telescope_ksp_max_it             = 50;
   app->pmg_coarse_gamg_aggressive_square_graph = PETSC_FALSE;
   PetscCall(PetscStrncpy(app->bddc_graph, "petsc", sizeof(app->bddc_graph)));
   PetscCall(PetscStrncpy(app->bddc_coordinates, "scalar", sizeof(app->bddc_coordinates)));
@@ -161,6 +173,12 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsReal("-pmg_coarse_telescope_ksp_rtol", "KSP relative tolerance inside PMG P1 PCTELESCOPE", NULL, app->pmg_coarse_telescope_ksp_rtol, &app->pmg_coarse_telescope_ksp_rtol, NULL));
   PetscCall(PetscOptionsInt("-pmg_coarse_telescope_ksp_max_it", "KSP max iterations inside PMG P1 PCTELESCOPE", NULL, app->pmg_coarse_telescope_ksp_max_it, &app->pmg_coarse_telescope_ksp_max_it, NULL));
   PetscCall(PetscOptionsString("-pmg_coarse_telescope_pc_type", "PC type inside PMG P1 PCTELESCOPE", NULL, app->pmg_coarse_telescope_pc_type, app->pmg_coarse_telescope_pc_type, sizeof(app->pmg_coarse_telescope_pc_type), NULL));
+  PetscCall(PetscOptionsInt("-pmg_p2_telescope_active_ranks", "If positive, use PCTELESCOPE for the PMG P2-level smoother PC when ranks are an integer multiple larger than this", NULL, app->pmg_p2_telescope_active_ranks, &app->pmg_p2_telescope_active_ranks, NULL));
+  PetscCall(PetscOptionsString("-pmg_p2_telescope_subcomm_type", "PCTELESCOPE subcomm type for the PMG P2-level smoother PC", NULL, app->pmg_p2_telescope_subcomm_type, app->pmg_p2_telescope_subcomm_type, sizeof(app->pmg_p2_telescope_subcomm_type), NULL));
+  PetscCall(PetscOptionsString("-pmg_p2_telescope_ksp_type", "KSP type inside PMG P2-level PCTELESCOPE", NULL, app->pmg_p2_telescope_ksp_type, app->pmg_p2_telescope_ksp_type, sizeof(app->pmg_p2_telescope_ksp_type), NULL));
+  PetscCall(PetscOptionsReal("-pmg_p2_telescope_ksp_rtol", "KSP relative tolerance inside PMG P2-level PCTELESCOPE", NULL, app->pmg_p2_telescope_ksp_rtol, &app->pmg_p2_telescope_ksp_rtol, NULL));
+  PetscCall(PetscOptionsInt("-pmg_p2_telescope_ksp_max_it", "KSP max iterations inside PMG P2-level PCTELESCOPE", NULL, app->pmg_p2_telescope_ksp_max_it, &app->pmg_p2_telescope_ksp_max_it, NULL));
+  PetscCall(PetscOptionsString("-pmg_p2_telescope_pc_type", "PC type inside PMG P2-level PCTELESCOPE", NULL, app->pmg_p2_telescope_pc_type, app->pmg_p2_telescope_pc_type, sizeof(app->pmg_p2_telescope_pc_type), NULL));
   PetscCall(PetscOptionsString("-pmg_smoother_ksp_type", "PMG smoother KSP type", NULL, app->pmg_smoother_ksp_type, app->pmg_smoother_ksp_type, sizeof(app->pmg_smoother_ksp_type), NULL));
   PetscCall(PetscOptionsString("-pmg_smoother_pc_type", "PMG smoother PC type", NULL, app->pmg_smoother_pc_type, app->pmg_smoother_pc_type, sizeof(app->pmg_smoother_pc_type), NULL));
   PetscCall(PetscOptionsInt("-pmg_smoother_max_it", "PMG smoother iterations per V-cycle", NULL, app->pmg_smoother_max_it, &app->pmg_smoother_max_it, NULL));
@@ -196,6 +214,8 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCheck(app->pmg_coarse_redundant_group_size >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_redundant_group_size must be nonnegative");
   PetscCheck(app->pmg_coarse_telescope_active_ranks >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_telescope_active_ranks must be nonnegative");
   PetscCheck(app->pmg_coarse_telescope_ksp_max_it >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_telescope_ksp_max_it must be positive");
+  PetscCheck(app->pmg_p2_telescope_active_ranks >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_p2_telescope_active_ranks must be nonnegative");
+  PetscCheck(app->pmg_p2_telescope_ksp_max_it >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_p2_telescope_ksp_max_it must be positive");
   PetscCall(PetscStrcasecmp(app->bddc_graph, "topology", &flg));
   if (!flg) {
     PetscCall(PetscStrcasecmp(app->bddc_graph, "petsc", &flg));
@@ -1655,6 +1675,43 @@ static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode SetPMGP2TelescopeDefaults(AppCtx *app, MPI_Comm comm)
+{
+  PetscMPIInt ranks;
+  PetscBool   pc_set;
+  char        value[64];
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &ranks));
+  if (app->pmg_p2_telescope_active_ranks <= 0 || ranks <= app->pmg_p2_telescope_active_ranks) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_levels_1_pc_type", &pc_set));
+  if (pc_set) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCheck(ranks % app->pmg_p2_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
+             "-pmg_p2_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", app->pmg_p2_telescope_active_ranks, ranks);
+
+  PetscCall(SetDefaultOption("-mg_levels_1_pc_type", "telescope"));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, (PetscInt)ranks / app->pmg_p2_telescope_active_ranks));
+  PetscCall(SetDefaultOption("-mg_levels_1_pc_telescope_reduction_factor", value));
+  PetscCall(SetDefaultOption("-mg_levels_1_pc_telescope_subcomm_type", app->pmg_p2_telescope_subcomm_type));
+  PetscCall(SetDefaultOption("-mg_levels_1_telescope_ksp_type", app->pmg_p2_telescope_ksp_type));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)app->pmg_p2_telescope_ksp_rtol));
+  PetscCall(SetDefaultOption("-mg_levels_1_telescope_ksp_rtol", value));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, app->pmg_p2_telescope_ksp_max_it));
+  PetscCall(SetDefaultOption("-mg_levels_1_telescope_ksp_max_it", value));
+  PetscCall(SetDefaultOption("-mg_levels_1_telescope_pc_type", app->pmg_p2_telescope_pc_type));
+  {
+    PetscBool is_gamg = PETSC_FALSE;
+
+    PetscCall(PetscStrcasecmp(app->pmg_p2_telescope_pc_type, "gamg", &is_gamg));
+    if (is_gamg) PetscCall(SetDefaultOption("-mg_levels_1_telescope_pc_gamg_aggressive_square_graph", app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
+  }
+  PetscCall(PetscPrintf(comm,
+                        "PMG_P2_TELESCOPE active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
+                        app->pmg_p2_telescope_active_ranks, (PetscInt)ranks / app->pmg_p2_telescope_active_ranks, app->pmg_p2_telescope_subcomm_type,
+                        app->pmg_p2_telescope_ksp_type, app->pmg_p2_telescope_pc_type));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
 {
   P4Basis p1_basis, p2_basis;
@@ -1676,6 +1733,7 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscCall(BuildInterpolationMatrix(dm_p2, &p2_basis, dm_p1, &p1_basis, &P21));
   PetscCall(BuildInterpolationMatrix(dm, actx->basis, dm_p2, &p2_basis, &P42));
   PetscCall(SetPMGTelescopeDefaults(app, comm));
+  PetscCall(SetPMGP2TelescopeDefaults(app, comm));
   PetscCall(ChoosePMGCoarsePC(app, dm_p1, coarse_pc_type, sizeof(coarse_pc_type)));
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &coarse_pc_from_options));
   PetscCall(PetscStrcasecmp(coarse_pc_type, "lu", &coarse_is_lu));

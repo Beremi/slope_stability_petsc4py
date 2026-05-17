@@ -15,6 +15,12 @@ LINEAR_RTOL="${LINEAR_RTOL:-1e-3}"
 KSP_MAX_IT="${KSP_MAX_IT:-200}"
 NEWTON_MAX_IT="${NEWTON_MAX_IT:-20}"
 EXTRA_OPTS="${EXTRA_OPTS:-}"
+PLEX_PARTITION_BALANCE="${PLEX_PARTITION_BALANCE:-false}"
+PMG_COARSE_TELESCOPE_ACTIVE_RANKS="${PMG_COARSE_TELESCOPE_ACTIVE_RANKS:-}"
+PMG_P2_TELESCOPE_ACTIVE_RANKS="${PMG_P2_TELESCOPE_ACTIVE_RANKS:-}"
+PMG_TELESCOPE_SUBCOMM_TYPE="${PMG_TELESCOPE_SUBCOMM_TYPE:-interlaced}"
+PMG_COARSE_TELESCOPE_PC_TYPE="${PMG_COARSE_TELESCOPE_PC_TYPE:-gamg}"
+PMG_P2_TELESCOPE_PC_TYPE="${PMG_P2_TELESCOPE_PC_TYPE:-jacobi}"
 
 mkdir -p "$OUTDIR"
 
@@ -64,8 +70,34 @@ run_guarded() {
   local start_sec
   start_sec=$(date +%s)
   local partitioner_opts=()
+  local plex_opts=()
+  local pmg_opts=()
   if [[ -n "$PARTITIONER" ]]; then
     partitioner_opts=(-petscpartitioner_type "$PARTITIONER")
+  fi
+  case "$PLEX_PARTITION_BALANCE" in
+    true) plex_opts=(-dm_plex_partition_balance true) ;;
+    false) ;;
+    *)
+      printf 'ERROR: PLEX_PARTITION_BALANCE must be true or false, got %s\n' "$PLEX_PARTITION_BALANCE" >&2
+      exit 2
+      ;;
+  esac
+  if [[ "$variant" == "pmg" ]]; then
+    if [[ -n "$PMG_COARSE_TELESCOPE_ACTIVE_RANKS" ]]; then
+      pmg_opts+=(
+        -pmg_coarse_telescope_active_ranks "$PMG_COARSE_TELESCOPE_ACTIVE_RANKS"
+        -pmg_coarse_telescope_subcomm_type "$PMG_TELESCOPE_SUBCOMM_TYPE"
+        -pmg_coarse_telescope_pc_type "$PMG_COARSE_TELESCOPE_PC_TYPE"
+      )
+    fi
+    if [[ -n "$PMG_P2_TELESCOPE_ACTIVE_RANKS" ]]; then
+      pmg_opts+=(
+        -pmg_p2_telescope_active_ranks "$PMG_P2_TELESCOPE_ACTIVE_RANKS"
+        -pmg_p2_telescope_subcomm_type "$PMG_TELESCOPE_SUBCOMM_TYPE"
+        -pmg_p2_telescope_pc_type "$PMG_P2_TELESCOPE_PC_TYPE"
+      )
+    fi
   fi
 
   printf '\n== ranks=%s variant=%s ==\n' "$ranks" "$variant"
@@ -73,11 +105,13 @@ run_guarded() {
     $MPIEXEC -n "$ranks" ./p4_plasticity \
     -mesh "$MESH" \
     "${partitioner_opts[@]}" \
+    "${plex_opts[@]}" \
     -pc_variant "$variant" \
     -linear_rtol "$LINEAR_RTOL" \
     -ksp_max_it "$KSP_MAX_IT" \
     -newton_max_it "$NEWTON_MAX_IT" \
     -ksp_converged_reason \
+    "${pmg_opts[@]}" \
     $EXTRA_OPTS >"$log" 2>&1 &
   local pid=$!
 
