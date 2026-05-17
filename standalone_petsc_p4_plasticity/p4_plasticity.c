@@ -89,6 +89,11 @@ typedef struct {
   PetscInt     n_orth_basis;
   PetscInt     orth_basis_cap;
   PetscLogDouble deflation_orthogonalization_time;
+  PetscLogDouble deflation_coarse_time;
+  PetscLogDouble deflation_pc_apply_time;
+  PetscLogDouble deflation_projector_time;
+  PetscInt       deflation_coarse_calls;
+  PetscInt       deflation_projected_pc_calls;
 } LinearSolverCtx;
 
 static PetscErrorCode RigidTx(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
@@ -2136,7 +2141,10 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
 
 static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A, Vec rhs, Vec x, Vec r, Vec work)
 {
+  PetscLogDouble t0, t1;
+
   PetscFunctionBeginUser;
+  PetscCall(PetscTime(&t0));
   PetscCall(VecZeroEntries(x));
   for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
     PetscScalar coeff;
@@ -2149,13 +2157,23 @@ static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A
     PetscCall(MatMult(A, x, work));
     PetscCall(VecAXPY(r, -1.0, work));
   }
+  PetscCall(PetscTime(&t1));
+  solver->deflation_coarse_time += t1 - t0;
+  ++solver->deflation_coarse_calls;
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_COARSE_INITIAL basis_cols=%" PetscInt_FMT " call=%" PetscInt_FMT " time=%.6g cumulative_time=%.6g\n",
+                        solver->n_orth_basis, solver->deflation_coarse_calls, (double)(t1 - t0), (double)solver->deflation_coarse_time));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, PC pc, Vec v, Vec z, Vec Az)
 {
+  PetscLogDouble t0, t1, t2, pc_time, projector_time = 0.0;
+
   PetscFunctionBeginUser;
+  PetscCall(PetscTime(&t0));
   PetscCall(PCApply(pc, v, z));
+  PetscCall(PetscTime(&t1));
   if (solver->n_orth_basis) {
     PetscCall(MatMult(A, z, Az));
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
@@ -2165,6 +2183,12 @@ static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, 
       PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
     }
   }
+  PetscCall(PetscTime(&t2));
+  pc_time        = t1 - t0;
+  projector_time = t2 - t1;
+  solver->deflation_pc_apply_time += pc_time;
+  solver->deflation_projector_time += projector_time;
+  ++solver->deflation_projected_pc_calls;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -2618,10 +2642,16 @@ int main(int argc, char **argv)
     PetscCall(DMPlexGetPartitioner(dm, &part));
     if (part) PetscCall(PetscPartitionerGetType(part, &part_type));
     PetscCall(PetscPrintf(PETSC_COMM_WORLD,
-                          "RESULT variant=%s ranks=%d partitioner=%s global_dofs=%" PetscInt_FMT " elastic_its=%" PetscInt_FMT " newton_its=%" PetscInt_FMT " newton_linear_its=%" PetscInt_FMT " total_linear_its=%" PetscInt_FMT " elastic_assembly_time=%.6g elastic_solve_time=%.6g newton_assembly_time=%.6g newton_solve_time=%.6g wall_time=%.6g final_rel=%.6e deflation=%s deflation_solver=%s deflation_basis_cols=%" PetscInt_FMT " deflation_orthogonalization_time=%.6g\n",
+                          "DEFLATION_TIMING orthogonalization_time=%.6g coarse_initial_time=%.6g coarse_initial_calls=%" PetscInt_FMT " pc_apply_time=%.6g projector_time=%.6g projected_pc_calls=%" PetscInt_FMT "\n",
+                          (double)lsolver.deflation_orthogonalization_time, (double)lsolver.deflation_coarse_time, lsolver.deflation_coarse_calls,
+                          (double)lsolver.deflation_pc_apply_time, (double)lsolver.deflation_projector_time, lsolver.deflation_projected_pc_calls));
+    PetscCall(PetscPrintf(PETSC_COMM_WORLD,
+                          "RESULT variant=%s ranks=%d partitioner=%s global_dofs=%" PetscInt_FMT " elastic_its=%" PetscInt_FMT " newton_its=%" PetscInt_FMT " newton_linear_its=%" PetscInt_FMT " total_linear_its=%" PetscInt_FMT " elastic_assembly_time=%.6g elastic_solve_time=%.6g newton_assembly_time=%.6g newton_solve_time=%.6g wall_time=%.6g final_rel=%.6e deflation=%s deflation_solver=%s deflation_basis_cols=%" PetscInt_FMT " deflation_orthogonalization_time=%.6g deflation_coarse_initial_time=%.6g deflation_coarse_initial_calls=%" PetscInt_FMT " deflation_pc_apply_time=%.6g deflation_projector_time=%.6g deflation_projected_pc_calls=%" PetscInt_FMT "\n",
                           app.variant_name, size, part_type ? part_type : "unknown", global_dofs, elastic_its, newton_stats.newton_its, newton_stats.total_linear_its, elastic_its + newton_stats.total_linear_its,
                           (double)elastic_assembly_time, (double)elastic_solve_time, (double)newton_stats.assembly_time, (double)newton_stats.solve_time, (double)(t_end - t_start),
-                          (double)newton_stats.final_rel, app.use_deflation ? "true" : "false", app.deflation_solver_name, lsolver.n_raw_basis, (double)lsolver.deflation_orthogonalization_time));
+                          (double)newton_stats.final_rel, app.use_deflation ? "true" : "false", app.deflation_solver_name, lsolver.n_raw_basis, (double)lsolver.deflation_orthogonalization_time,
+                          (double)lsolver.deflation_coarse_time, lsolver.deflation_coarse_calls, (double)lsolver.deflation_pc_apply_time,
+                          (double)lsolver.deflation_projector_time, lsolver.deflation_projected_pc_calls));
   }
 
   PetscCall(LinearSolverDestroy(&lsolver));

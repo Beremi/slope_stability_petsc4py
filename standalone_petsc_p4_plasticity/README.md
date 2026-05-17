@@ -99,7 +99,7 @@ mpiexec -n 2 ./p4_plasticity \
 - `-inspect_partition` to print DMPlex/MATIS partition diagnostics and exit
 - `-reuse_linear_solver true` to keep one KSP/PC hierarchy and refresh operators
   across the elastic solve and Newton corrections
-- `-deflation false` to enable an explicit Newton-solve deflation experiment
+- `-deflation true` to enable an explicit Newton-solve deflation experiment
 - `-deflation_solver fgmres|cg`
 - `-deflation_basis_tol 1e-3`
 - `-deflation_max_it 0` to use `-ksp_max_it` with a safe fallback
@@ -128,6 +128,10 @@ more vector, and every Newton tangent rebuilds an A-orthonormal basis before the
 explicit deflated outer solve. The projected preconditioned vector follows the
 same core rule as the Python DFGMRES path: `z <- z - W (W^T A z)`, with
 `W^T A W = I`, so the coarse initial correction is `W (W^T b)`.
+Deflation runs print `DEFLATION_ORTHO`, `DEFLATION_COARSE_INITIAL`, and a final
+`DEFLATION_TIMING` line; the `RESULT` line also includes accumulated
+orthonormalization, coarse-initial-correction, PC-apply, and projection timings
+plus call counts.
 
 For full comparisons, use the guarded runner so failed PETSc setup paths do not
 consume the workstation:
