@@ -92,6 +92,9 @@ mpiexec -n 2 ./p4_plasticity \
 - `-pmg_smoother_ksp_type chebyshev`
 - `-pmg_smoother_pc_type jacobi`
 - `-pmg_smoother_max_it 2`
+- `-pmg_lag_preconditioner 1` to rebuild the persistent PMG preconditioner on
+  every Newton linear solve; larger values reuse PMG setup between fresh tangent
+  matrices
 - `-bddc_graph petsc|topology`
 - `-bddc_coordinates scalar|blocked|none`
 - `-bddc_collapse_shared true|false`
@@ -240,6 +243,10 @@ Newton corrections. This reuses the KSP/PCMG object, same-mesh P1/P2/P4 DMs, and
 interpolation matrices while still calling `KSPSetOperators()` and refreshing the
 preconditioner for each newly assembled tangent. Use `-reuse_linear_solver false`
 to recover the old fresh-KSP-per-solve path for A/B comparisons.
+For PMG only, `-pmg_lag_preconditioner N` can reuse the persistent PMG
+preconditioner for `N - 1` Newton corrections while still updating the fine
+tangent matrix in `KSPSetOperators()` every solve. The default `N=1` preserves
+the conservative rebuild-every-solve behavior.
 
 The BDDC path supplies PETSc's MATIS solver with component-wise local dof
 splitting recovered from MATIS local-to-global rows, global and local

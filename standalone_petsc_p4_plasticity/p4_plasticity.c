@@ -49,6 +49,7 @@ typedef struct {
   PetscInt  pmg_coarse_telescope_ksp_max_it;
   PetscInt  pmg_p2_telescope_active_ranks;
   PetscInt  pmg_p2_telescope_ksp_max_it;
+  PetscInt  pmg_lag_preconditioner;
   PetscBool pmg_coarse_gamg_aggressive_square_graph;
   char      bddc_graph[32];
   char      bddc_coordinates[32];
@@ -95,6 +96,7 @@ typedef struct {
   PetscLogDouble deflation_projector_time;
   PetscInt       deflation_coarse_calls;
   PetscInt       deflation_projected_pc_calls;
+  PetscInt       pmg_lag_solve_index;
 } LinearSolverCtx;
 
 static PetscErrorCode RigidTx(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
@@ -176,6 +178,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->pmg_coarse_telescope_ksp_max_it         = 100;
   app->pmg_p2_telescope_active_ranks           = 0;
   app->pmg_p2_telescope_ksp_max_it             = 50;
+  app->pmg_lag_preconditioner                  = 1;
   app->pmg_coarse_gamg_aggressive_square_graph = PETSC_FALSE;
   PetscCall(PetscStrncpy(app->bddc_graph, "petsc", sizeof(app->bddc_graph)));
   PetscCall(PetscStrncpy(app->bddc_coordinates, "scalar", sizeof(app->bddc_coordinates)));
@@ -225,6 +228,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsString("-pmg_smoother_ksp_type", "PMG smoother KSP type", NULL, app->pmg_smoother_ksp_type, app->pmg_smoother_ksp_type, sizeof(app->pmg_smoother_ksp_type), NULL));
   PetscCall(PetscOptionsString("-pmg_smoother_pc_type", "PMG smoother PC type", NULL, app->pmg_smoother_pc_type, app->pmg_smoother_pc_type, sizeof(app->pmg_smoother_pc_type), NULL));
   PetscCall(PetscOptionsInt("-pmg_smoother_max_it", "PMG smoother iterations per V-cycle", NULL, app->pmg_smoother_max_it, &app->pmg_smoother_max_it, NULL));
+  PetscCall(PetscOptionsInt("-pmg_lag_preconditioner", "Rebuild persistent PMG preconditioner every N Newton linear solves; 1 rebuilds every solve", NULL, app->pmg_lag_preconditioner, &app->pmg_lag_preconditioner, NULL));
   PetscCall(PetscOptionsString("-bddc_graph", "topology|petsc", NULL, app->bddc_graph, app->bddc_graph, sizeof(app->bddc_graph), NULL));
   PetscCall(PetscOptionsString("-bddc_coordinates", "scalar|blocked|none", NULL, app->bddc_coordinates, app->bddc_coordinates, sizeof(app->bddc_coordinates), NULL));
   PetscCall(PetscOptionsBool("-bddc_collapse_shared", "With -bddc_graph topology, connect local DOFs sharing the same neighboring rank set", NULL, app->bddc_collapse_shared, &app->bddc_collapse_shared, NULL));
@@ -266,6 +270,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCheck(app->pmg_coarse_telescope_ksp_max_it >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_coarse_telescope_ksp_max_it must be positive");
   PetscCheck(app->pmg_p2_telescope_active_ranks >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_p2_telescope_active_ranks must be nonnegative");
   PetscCheck(app->pmg_p2_telescope_ksp_max_it >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_p2_telescope_ksp_max_it must be positive");
+  PetscCheck(app->pmg_lag_preconditioner >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_lag_preconditioner must be >= 1");
   PetscCall(PetscStrcasecmp(app->bddc_graph, "topology", &flg));
   if (!flg) {
     PetscCall(PetscStrcasecmp(app->bddc_graph, "petsc", &flg));
@@ -1945,7 +1950,7 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode RefreshKSPOperators(KSP ksp, AppCtx *app, Mat A, PetscBool report_effective_tolerance)
+static PetscErrorCode RefreshKSPOperators(KSP ksp, AppCtx *app, Mat A, PetscBool report_effective_tolerance, PetscBool reuse_preconditioner)
 {
   PetscReal solver_rtol = app->ksp_rtol;
 
@@ -1957,7 +1962,7 @@ static PetscErrorCode RefreshKSPOperators(KSP ksp, AppCtx *app, Mat A, PetscBool
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)ksp), "FETI-DP effective multiplier-space rtol=%.6e requested_primal_rtol=%.6e\n", (double)solver_rtol, (double)app->ksp_rtol));
   }
   PetscCall(KSPSetInitialGuessNonzero(ksp, PETSC_FALSE));
-  PetscCall(KSPSetReusePreconditioner(ksp, PETSC_FALSE));
+  PetscCall(KSPSetReusePreconditioner(ksp, reuse_preconditioner));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -1969,7 +1974,7 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
   (void)nonlinear_tangent;
   PetscFunctionBeginUser;
   if (app->variant == VARIANT_FETIDP) solver_rtol *= 1.0e-2;
-  PetscCall(RefreshKSPOperators(ksp, app, A, PETSC_TRUE));
+  PetscCall(RefreshKSPOperators(ksp, app, A, PETSC_TRUE, PETSC_FALSE));
   if (app->variant == VARIANT_BDDC) {
     PetscCall(SetBDDCConstraintDefaults(app, "pc_bddc_"));
     PetscCall(ConfigureBDDCAutoSolvers(app, A, "pc_bddc_"));
@@ -2543,7 +2548,20 @@ static PetscErrorCode SolveLinearSystem(LinearSolverCtx *solver, Vec rhs, Vec x,
       PetscCall(ConfigureKSP(solver->ksp, solver->dm, solver->actx, solver->app, solver->A, nonlinear_tangent));
       PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm), "LINEAR_SOLVER_REUSE configured persistent KSP/PC hierarchy\n"));
     } else {
-      PetscCall(RefreshKSPOperators(solver->ksp, solver->app, solver->A, PETSC_FALSE));
+      PetscBool reuse_pc = PETSC_FALSE;
+
+      if (solver->app->variant == VARIANT_PMG && nonlinear_tangent) {
+        const PetscInt lag     = solver->app->pmg_lag_preconditioner;
+        const PetscInt idx     = solver->pmg_lag_solve_index;
+        const PetscBool rebuild = (PetscBool)(lag <= 1 || idx % lag == 0);
+
+        reuse_pc = (PetscBool)!rebuild;
+        PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                              "PMG_LAG_PRECONDITIONER solve_index=%" PetscInt_FMT " lag=%" PetscInt_FMT " rebuild=%s reuse_preconditioner=%s\n",
+                              idx, lag, rebuild ? "true" : "false", reuse_pc ? "true" : "false"));
+        solver->pmg_lag_solve_index++;
+      }
+      PetscCall(RefreshKSPOperators(solver->ksp, solver->app, solver->A, PETSC_FALSE, reuse_pc));
     }
     ksp = solver->ksp;
   } else {
