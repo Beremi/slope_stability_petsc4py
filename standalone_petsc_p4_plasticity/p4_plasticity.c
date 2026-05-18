@@ -40,6 +40,7 @@ typedef struct {
   char      pmg_p2_telescope_subcomm_type[32];
   char      pmg_p2_telescope_ksp_type[32];
   char      pmg_p2_telescope_pc_type[32];
+  char      pmg_coarse_telescope_mode[32];
   PetscReal pmg_coarse_telescope_ksp_rtol;
   PetscReal pmg_p2_telescope_ksp_rtol;
   PetscInt  pmg_coarse_lu_max_dofs;
@@ -51,6 +52,7 @@ typedef struct {
   PetscInt  pmg_p2_telescope_ksp_max_it;
   PetscInt  pmg_lag_preconditioner;
   PetscBool pmg_coarse_gamg_aggressive_square_graph;
+  PetscBool pmg_check_coarse_transfers;
   char      bddc_graph[32];
   char      bddc_coordinates[32];
   PetscBool bddc_collapse_shared;
@@ -97,6 +99,19 @@ typedef struct {
   PetscInt       deflation_coarse_calls;
   PetscInt       deflation_projected_pc_calls;
   PetscInt       pmg_lag_solve_index;
+  PetscBool      pmg_hierarchy_initialized;
+  PetscBool      pmg_p1_basis_created;
+  PetscBool      pmg_p2_basis_created;
+  P4Basis        pmg_p1_basis;
+  P4Basis        pmg_p2_basis;
+  DM             pmg_dm_p1;
+  DM             pmg_dm_p2;
+  Mat            pmg_inject_p4_to_p2;
+  Mat            pmg_inject_p2_to_p1;
+  PetscBool      pmg_inject_p4_to_p2_transpose;
+  PetscBool      pmg_inject_p2_to_p1_transpose;
+  Vec            pmg_u_p1;
+  Vec            pmg_u_p2;
 } LinearSolverCtx;
 
 static PetscErrorCode RigidTx(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
@@ -169,6 +184,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscStrncpy(app->pmg_p2_telescope_subcomm_type, "interlaced", sizeof(app->pmg_p2_telescope_subcomm_type)));
   PetscCall(PetscStrncpy(app->pmg_p2_telescope_ksp_type, "fgmres", sizeof(app->pmg_p2_telescope_ksp_type)));
   PetscCall(PetscStrncpy(app->pmg_p2_telescope_pc_type, "jacobi", sizeof(app->pmg_p2_telescope_pc_type)));
+  PetscCall(PetscStrncpy(app->pmg_coarse_telescope_mode, "default", sizeof(app->pmg_coarse_telescope_mode)));
   app->pmg_coarse_telescope_ksp_rtol   = 1.0e-3;
   app->pmg_p2_telescope_ksp_rtol       = 1.0e-3;
   app->pmg_coarse_lu_max_dofs = 50000;
@@ -180,6 +196,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->pmg_p2_telescope_ksp_max_it             = 50;
   app->pmg_lag_preconditioner                  = 1;
   app->pmg_coarse_gamg_aggressive_square_graph = PETSC_FALSE;
+  app->pmg_check_coarse_transfers              = PETSC_FALSE;
   PetscCall(PetscStrncpy(app->bddc_graph, "petsc", sizeof(app->bddc_graph)));
   PetscCall(PetscStrncpy(app->bddc_coordinates, "scalar", sizeof(app->bddc_coordinates)));
   app->bddc_collapse_shared    = PETSC_FALSE;
@@ -228,6 +245,8 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsString("-pmg_smoother_ksp_type", "PMG smoother KSP type", NULL, app->pmg_smoother_ksp_type, app->pmg_smoother_ksp_type, sizeof(app->pmg_smoother_ksp_type), NULL));
   PetscCall(PetscOptionsString("-pmg_smoother_pc_type", "PMG smoother PC type", NULL, app->pmg_smoother_pc_type, app->pmg_smoother_pc_type, sizeof(app->pmg_smoother_pc_type), NULL));
   PetscCall(PetscOptionsInt("-pmg_smoother_max_it", "PMG smoother iterations per V-cycle", NULL, app->pmg_smoother_max_it, &app->pmg_smoother_max_it, NULL));
+  PetscCall(PetscOptionsString("-pmg_coarse_telescope_mode", "PMG P1 telescope implementation: default|coarse_dm", NULL, app->pmg_coarse_telescope_mode, app->pmg_coarse_telescope_mode, sizeof(app->pmg_coarse_telescope_mode), NULL));
+  PetscCall(PetscOptionsBool("-pmg_check_coarse_transfers", "Check PMG P4->P2 and P2->P1 transfer matrices on exact polynomial fields", NULL, app->pmg_check_coarse_transfers, &app->pmg_check_coarse_transfers, NULL));
   PetscCall(PetscOptionsInt("-pmg_lag_preconditioner", "Rebuild persistent PMG preconditioner every N Newton linear solves; 1 rebuilds every solve", NULL, app->pmg_lag_preconditioner, &app->pmg_lag_preconditioner, NULL));
   PetscCall(PetscOptionsString("-bddc_graph", "topology|petsc", NULL, app->bddc_graph, app->bddc_graph, sizeof(app->bddc_graph), NULL));
   PetscCall(PetscOptionsString("-bddc_coordinates", "scalar|blocked|none", NULL, app->bddc_coordinates, app->bddc_coordinates, sizeof(app->bddc_coordinates), NULL));
@@ -271,6 +290,11 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCheck(app->pmg_p2_telescope_active_ranks >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_p2_telescope_active_ranks must be nonnegative");
   PetscCheck(app->pmg_p2_telescope_ksp_max_it >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_p2_telescope_ksp_max_it must be positive");
   PetscCheck(app->pmg_lag_preconditioner >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_lag_preconditioner must be >= 1");
+  PetscCall(PetscStrcasecmp(app->pmg_coarse_telescope_mode, "default", &flg));
+  if (!flg) {
+    PetscCall(PetscStrcasecmp(app->pmg_coarse_telescope_mode, "coarse_dm", &flg));
+    PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-pmg_coarse_telescope_mode must be default or coarse_dm");
+  }
   PetscCall(PetscStrcasecmp(app->bddc_graph, "topology", &flg));
   if (!flg) {
     PetscCall(PetscStrcasecmp(app->bddc_graph, "petsc", &flg));
@@ -1779,10 +1803,12 @@ static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
 {
   PetscMPIInt ranks;
   PetscBool   pc_set;
+  PetscBool   use_coarse_dm = PETSC_FALSE;
   char        value[64];
 
   PetscFunctionBeginUser;
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
+  PetscCall(PetscStrcasecmp(app->pmg_coarse_telescope_mode, "coarse_dm", &use_coarse_dm));
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &pc_set));
   if (app->pmg_coarse_telescope_active_ranks <= 0 || ranks <= app->pmg_coarse_telescope_active_ranks || pc_set) {
     PetscCall(PetscPrintf(comm,
@@ -1794,10 +1820,12 @@ static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
   PetscCheck(ranks % app->pmg_coarse_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
              "-pmg_coarse_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", app->pmg_coarse_telescope_active_ranks, ranks);
 
-  PetscCall(SetDefaultOption("-mg_coarse_pc_type", "telescope"));
+  PetscCall(SetDefaultOption("-mg_coarse_pc_type", use_coarse_dm ? "shell" : "telescope"));
   PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks));
-  PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_reduction_factor", value));
-  PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_subcomm_type", app->pmg_coarse_telescope_subcomm_type));
+  if (!use_coarse_dm) {
+    PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_reduction_factor", value));
+    PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_subcomm_type", app->pmg_coarse_telescope_subcomm_type));
+  }
   PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_type", app->pmg_coarse_telescope_ksp_type));
   PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)app->pmg_coarse_telescope_ksp_rtol));
   PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_rtol", value));
@@ -1861,7 +1889,488 @@ static PetscErrorCode SetPMGP2TelescopeDefaults(AppCtx *app, MPI_Comm comm)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
+typedef struct {
+  AppCtx          *app;
+  PetscBool       setup_done;
+  PetscBool       active;
+  PetscInt        active_ranks;
+  PetscInt        reduction_factor;
+  PetscInt        full_dofs;
+  PetscInt        reduced_local_min;
+  PetscInt        reduced_local_max;
+  PetscSubcommType subcomm_type;
+  char            subcomm_type_name[32];
+  MPI_Comm        subcomm;
+  IS              isrow;
+  VecScatter      scatter;
+  Vec             xred;
+  Vec             yred;
+  Vec             xtmp;
+  Mat             Ared;
+  KSP             subksp;
+} PMGCoarseDMShellCtx;
+
+static PetscErrorCode PMGParseSubcommType(MPI_Comm comm, const char name[], PetscSubcommType *type)
+{
+  PetscBool is_interlaced = PETSC_FALSE, is_contiguous = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscStrcasecmp(name, "interlaced", &is_interlaced));
+  PetscCall(PetscStrcasecmp(name, "contiguous", &is_contiguous));
+  PetscCheck(is_interlaced || is_contiguous, comm, PETSC_ERR_ARG_WRONG, "PMG telescope subcomm type must be interlaced or contiguous, got %s", name);
+  *type = is_interlaced ? PETSC_SUBCOMM_INTERLACED : PETSC_SUBCOMM_CONTIGUOUS;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellScatterToReduced(PMGCoarseDMShellCtx *ctx, Vec full, Vec reduced)
+{
+  const PetscScalar *tmp_array;
+
+  PetscFunctionBeginUser;
+  PetscCall(VecScatterBegin(ctx->scatter, full, ctx->xtmp, INSERT_VALUES, SCATTER_FORWARD));
+  PetscCall(VecScatterEnd(ctx->scatter, full, ctx->xtmp, INSERT_VALUES, SCATTER_FORWARD));
+  PetscCall(VecGetArrayRead(ctx->xtmp, &tmp_array));
+  if (ctx->active) {
+    PetscScalar *red_array;
+    PetscInt     nred;
+
+    PetscCall(VecGetLocalSize(reduced, &nred));
+    PetscCall(VecGetArray(reduced, &red_array));
+    for (PetscInt i = 0; i < nred; ++i) red_array[i] = tmp_array[i];
+    PetscCall(VecRestoreArray(reduced, &red_array));
+  }
+  PetscCall(VecRestoreArrayRead(ctx->xtmp, &tmp_array));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellScatterFromReduced(PMGCoarseDMShellCtx *ctx, Vec reduced, Vec full)
+{
+  PetscScalar *tmp_array;
+
+  PetscFunctionBeginUser;
+  PetscCall(VecGetArray(ctx->xtmp, &tmp_array));
+  if (ctx->active) {
+    const PetscScalar *red_array;
+    PetscInt           nred;
+
+    PetscCall(VecGetLocalSize(reduced, &nred));
+    PetscCall(VecGetArrayRead(reduced, &red_array));
+    for (PetscInt i = 0; i < nred; ++i) tmp_array[i] = red_array[i];
+    PetscCall(VecRestoreArrayRead(reduced, &red_array));
+  }
+  PetscCall(VecRestoreArray(ctx->xtmp, &tmp_array));
+  PetscCall(VecScatterBegin(ctx->scatter, ctx->xtmp, full, INSERT_VALUES, SCATTER_REVERSE));
+  PetscCall(VecScatterEnd(ctx->scatter, ctx->xtmp, full, INSERT_VALUES, SCATTER_REVERSE));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellAttachNearNullspace(PMGCoarseDMShellCtx *ctx, Mat full_mat)
+{
+  MatNullSpace full_ns = NULL;
+  PetscBool    has_const = PETSC_FALSE;
+  PetscInt     nvec = 0;
+  const Vec   *vecs = NULL;
+  Vec         *sub_vecs = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(MatGetNearNullSpace(full_mat, &full_ns));
+  if (!full_ns) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(MatNullSpaceGetVecs(full_ns, &has_const, &nvec, &vecs));
+  if (ctx->active && nvec > 0) PetscCall(VecDuplicateVecs(ctx->xred, nvec, &sub_vecs));
+  for (PetscInt i = 0; i < nvec; ++i) PetscCall(PMGCoarseDMShellScatterToReduced(ctx, vecs[i], ctx->active ? sub_vecs[i] : NULL));
+  if (ctx->active) {
+    MatNullSpace sub_ns = NULL;
+
+    PetscCall(MatNullSpaceCreate(ctx->subcomm, has_const, nvec, sub_vecs, &sub_ns));
+    PetscCall(MatSetNearNullSpace(ctx->Ared, sub_ns));
+    PetscCall(MatNullSpaceDestroy(&sub_ns));
+    if (nvec > 0) PetscCall(VecDestroyVecs(nvec, &sub_vecs));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellCreateScatters(PC pc, PMGCoarseDMShellCtx *ctx, Mat B)
+{
+  MPI_Comm  comm = PetscObjectComm((PetscObject)pc);
+  PetscMPIInt rank, size;
+  PetscInt   M, m = 0, st, ed, bs;
+  Vec        x = NULL;
+  VecType    vectype = NULL;
+  PetscInt   min_in, max_in;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_rank(comm, &rank));
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  PetscCheck(ctx->active_ranks > 0 && size > ctx->active_ranks, comm, PETSC_ERR_ARG_WRONG,
+             "PMG coarse-DM shell requires 0 < active_ranks < ranks");
+  PetscCheck(size % ctx->active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
+             "-pmg_coarse_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", ctx->active_ranks, size);
+  ctx->reduction_factor = (PetscInt)size / ctx->active_ranks;
+  if (ctx->subcomm_type == PETSC_SUBCOMM_CONTIGUOUS) ctx->active = (PetscBool)(rank < ctx->active_ranks);
+  else ctx->active = (PetscBool)(rank % ctx->reduction_factor == 0);
+  PetscCallMPI(MPI_Comm_split(comm, ctx->active ? 0 : MPI_UNDEFINED, rank, &ctx->subcomm));
+
+  PetscCall(MatGetSize(B, &M, NULL));
+  PetscCall(MatGetBlockSize(B, &bs));
+  PetscCall(MatCreateVecs(B, &x, NULL));
+  PetscCall(MatGetVecType(B, &vectype));
+  ctx->full_dofs = M;
+  if (ctx->active) {
+    PetscCall(VecCreate(ctx->subcomm, &ctx->xred));
+    PetscCall(VecSetSizes(ctx->xred, PETSC_DECIDE, M));
+    PetscCall(VecSetBlockSize(ctx->xred, bs));
+    if (vectype) PetscCall(VecSetType(ctx->xred, vectype));
+    PetscCall(VecSetFromOptions(ctx->xred));
+    PetscCall(VecDuplicate(ctx->xred, &ctx->yred));
+    PetscCall(VecGetLocalSize(ctx->xred, &m));
+    PetscCall(VecGetOwnershipRange(ctx->xred, &st, &ed));
+    PetscCall(ISCreateStride(comm, ed - st, st, 1, &ctx->isrow));
+  } else {
+    PetscCall(VecGetOwnershipRange(x, &st, &ed));
+    PetscCall(ISCreateStride(comm, 0, st, 1, &ctx->isrow));
+  }
+  PetscCall(ISSetBlockSize(ctx->isrow, bs));
+  PetscCall(VecCreate(comm, &ctx->xtmp));
+  PetscCall(VecSetSizes(ctx->xtmp, m, PETSC_DECIDE));
+  PetscCall(VecSetBlockSize(ctx->xtmp, bs));
+  if (vectype) PetscCall(VecSetType(ctx->xtmp, vectype));
+  PetscCall(VecSetFromOptions(ctx->xtmp));
+  PetscCall(VecScatterCreate(x, ctx->isrow, ctx->xtmp, NULL, &ctx->scatter));
+  min_in = ctx->active ? m : PETSC_MAX_INT;
+  max_in = ctx->active ? m : 0;
+  PetscCallMPI(MPI_Allreduce(&min_in, &ctx->reduced_local_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&max_in, &ctx->reduced_local_max, 1, MPIU_INT, MPI_MAX, comm));
+  PetscCall(VecDestroy(&x));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellUpdateOperator(PC pc, PMGCoarseDMShellCtx *ctx, Mat B)
+{
+  MPI_Comm       comm = PetscObjectComm((PetscObject)pc);
+  Mat           *submats = NULL;
+  Mat            Blocal = NULL;
+  IS             iscol = NULL;
+  PetscInt       nr, nc, bs;
+  PetscLogDouble t0, t1;
+  const char    *reuse_label = ctx->setup_done ? "reuse" : "initial";
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscTime(&t0));
+  PetscCall(MatGetSize(B, &nr, &nc));
+  PetscCall(MatGetBlockSizes(B, NULL, &bs));
+  PetscCall(ISCreateStride(PETSC_COMM_SELF, nc, 0, 1, &iscol));
+  PetscCall(ISSetIdentity(iscol));
+  PetscCall(ISSetBlockSize(iscol, bs));
+  PetscCall(MatSetOption(B, MAT_SUBMAT_SINGLEIS, PETSC_TRUE));
+  PetscCall(MatCreateSubMatrices(B, 1, &ctx->isrow, &iscol, MAT_INITIAL_MATRIX, &submats));
+  Blocal = submats[0];
+  PetscCall(PetscFree(submats));
+  if (ctx->active) {
+    PetscInt mm;
+
+    PetscCall(MatDestroy(&ctx->Ared));
+    PetscCall(MatGetSize(Blocal, &mm, NULL));
+    PetscCall(MatCreateMPIMatConcatenateSeqMat(ctx->subcomm, Blocal, mm, MAT_INITIAL_MATRIX, &ctx->Ared));
+    PetscCall(PMGCoarseDMShellAttachNearNullspace(ctx, B));
+    PetscCall(KSPSetOperators(ctx->subksp, ctx->Ared, ctx->Ared));
+  }
+  PetscCall(MatDestroy(&Blocal));
+  PetscCall(ISDestroy(&iscol));
+  PetscCall(PetscTime(&t1));
+  PetscCall(PetscPrintf(comm, "PMG_COARSE_DM_OPERATOR_UPDATE reuse=%s time=%.6g\n", reuse_label, (double)(t1 - t0)));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellSetUp(PC pc)
+{
+  PMGCoarseDMShellCtx *ctx = NULL;
+  Mat                  B = NULL;
+  MPI_Comm             comm = PetscObjectComm((PetscObject)pc);
+
+  PetscFunctionBeginUser;
+  PetscCall(PCShellGetContext(pc, (void **)&ctx));
+  PetscCall(PCGetOperators(pc, NULL, &B));
+  PetscCheck(B, comm, PETSC_ERR_ARG_WRONGSTATE, "PMG coarse-DM shell requires a P1 coarse operator");
+  if (!ctx->setup_done) {
+    const char *prefix = NULL;
+    PC          inner_pc = NULL;
+
+    PetscCall(PMGCoarseDMShellCreateScatters(pc, ctx, B));
+    if (ctx->active) {
+      PetscCall(KSPCreate(ctx->subcomm, &ctx->subksp));
+      PetscCall(KSPSetType(ctx->subksp, ctx->app->pmg_coarse_telescope_ksp_type));
+      PetscCall(KSPSetTolerances(ctx->subksp, ctx->app->pmg_coarse_telescope_ksp_rtol, PETSC_DEFAULT, PETSC_DEFAULT, ctx->app->pmg_coarse_telescope_ksp_max_it));
+      PetscCall(KSPGetPC(ctx->subksp, &inner_pc));
+      PetscCall(ConfigurePMGBasePC(inner_pc, ctx->app->pmg_coarse_telescope_pc_type, ctx->app->pmg_coarse_gamg_aggressive_square_graph));
+      PetscCall(PCGetOptionsPrefix(pc, &prefix));
+      PetscCall(KSPSetOptionsPrefix(ctx->subksp, prefix));
+      PetscCall(KSPAppendOptionsPrefix(ctx->subksp, "telescope_"));
+      PetscCall(KSPSetFromOptions(ctx->subksp));
+    }
+    PetscCall(PetscPrintf(comm,
+                          "PMG_COARSE_DM_CONFIG enabled=true mode=custom_shell_fallback active_ranks=%" PetscInt_FMT " subcomm=%s full_dofs=%" PetscInt_FMT " reduced_local_min=%" PetscInt_FMT " reduced_local_max=%" PetscInt_FMT "\n",
+                          ctx->active_ranks, ctx->subcomm_type_name, ctx->full_dofs, ctx->reduced_local_min, ctx->reduced_local_max));
+  }
+  PetscCall(PMGCoarseDMShellUpdateOperator(pc, ctx, B));
+  ctx->setup_done = PETSC_TRUE;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellApply(PC pc, Vec x, Vec y)
+{
+  PMGCoarseDMShellCtx *ctx = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(PCShellGetContext(pc, (void **)&ctx));
+  PetscCall(PMGCoarseDMShellScatterToReduced(ctx, x, ctx->xred));
+  if (ctx->active) PetscCall(KSPSolve(ctx->subksp, ctx->xred, ctx->yred));
+  PetscCall(PMGCoarseDMShellScatterFromReduced(ctx, ctx->yred, y));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGCoarseDMShellDestroy(PC pc)
+{
+  PMGCoarseDMShellCtx *ctx = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(PCShellGetContext(pc, (void **)&ctx));
+  if (!ctx) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(KSPDestroy(&ctx->subksp));
+  PetscCall(MatDestroy(&ctx->Ared));
+  PetscCall(VecDestroy(&ctx->xred));
+  PetscCall(VecDestroy(&ctx->yred));
+  PetscCall(VecDestroy(&ctx->xtmp));
+  PetscCall(VecScatterDestroy(&ctx->scatter));
+  PetscCall(ISDestroy(&ctx->isrow));
+  if (ctx->subcomm != MPI_COMM_NULL) PetscCallMPI(MPI_Comm_free(&ctx->subcomm));
+  PetscCall(PetscFree(ctx));
+  PetscCall(PCShellSetContext(pc, NULL));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigurePMGCoarseDMShell(PC pc, AppCtx *app, PetscInt active_ranks)
+{
+  PMGCoarseDMShellCtx *ctx = NULL;
+  MPI_Comm             comm = PetscObjectComm((PetscObject)pc);
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscNew(&ctx));
+  ctx->app          = app;
+  ctx->active_ranks = active_ranks;
+  ctx->subcomm      = MPI_COMM_NULL;
+  PetscCall(PMGParseSubcommType(comm, app->pmg_coarse_telescope_subcomm_type, &ctx->subcomm_type));
+  PetscCall(PetscStrncpy(ctx->subcomm_type_name, app->pmg_coarse_telescope_subcomm_type, sizeof(ctx->subcomm_type_name)));
+  PetscCall(PCSetType(pc, PCSHELL));
+  PetscCall(PCShellSetContext(pc, ctx));
+  PetscCall(PCShellSetName(pc, "pmg_coarse_dm_shell"));
+  PetscCall(PCShellSetSetUp(pc, PMGCoarseDMShellSetUp));
+  PetscCall(PCShellSetApply(pc, PMGCoarseDMShellApply));
+  PetscCall(PCShellSetDestroy(pc, PMGCoarseDMShellDestroy));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverDestroyPMGHierarchy(LinearSolverCtx *solver)
+{
+  PetscFunctionBeginUser;
+  PetscCall(VecDestroy(&solver->pmg_u_p1));
+  PetscCall(VecDestroy(&solver->pmg_u_p2));
+  PetscCall(MatDestroy(&solver->pmg_inject_p4_to_p2));
+  PetscCall(MatDestroy(&solver->pmg_inject_p2_to_p1));
+  PetscCall(DMDestroy(&solver->pmg_dm_p1));
+  PetscCall(DMDestroy(&solver->pmg_dm_p2));
+  if (solver->pmg_p1_basis_created) {
+    PetscCall(P4BasisDestroy(&solver->pmg_p1_basis));
+    solver->pmg_p1_basis_created = PETSC_FALSE;
+  }
+  if (solver->pmg_p2_basis_created) {
+    PetscCall(P4BasisDestroy(&solver->pmg_p2_basis));
+    solver->pmg_p2_basis_created = PETSC_FALSE;
+  }
+  solver->pmg_hierarchy_initialized       = PETSC_FALSE;
+  solver->pmg_inject_p4_to_p2_transpose   = PETSC_FALSE;
+  solver->pmg_inject_p2_to_p1_transpose   = PETSC_FALSE;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CheckPMGTransferShape(const char name[], Mat mat, PetscInt coarse_size, PetscInt fine_size, PetscBool *use_transpose)
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)mat);
+  PetscInt rows, cols;
+
+  PetscFunctionBeginUser;
+  PetscCall(MatGetSize(mat, &rows, &cols));
+  if (rows == coarse_size && cols == fine_size) {
+    *use_transpose = PETSC_FALSE;
+  } else if (rows == fine_size && cols == coarse_size) {
+    *use_transpose = PETSC_TRUE;
+  } else {
+    PetscCheck(PETSC_FALSE, comm, PETSC_ERR_PLIB,
+               "%s coarse transfer has shape %" PetscInt_FMT "x%" PetscInt_FMT ", expected %" PetscInt_FMT "x%" PetscInt_FMT " or transpose",
+               name, rows, cols, coarse_size, fine_size);
+  }
+  PetscCall(PetscPrintf(comm,
+                        "PMG_COARSE_TRANSFER name=%s rows=%" PetscInt_FMT " cols=%" PetscInt_FMT " coarse_dofs=%" PetscInt_FMT " fine_dofs=%" PetscInt_FMT " use_transpose=%s\n",
+                        name, rows, cols, coarse_size, fine_size, *use_transpose ? "true" : "false"));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGTransferConstant(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
+{
+  (void)dim; (void)time; (void)x; (void)ctx;
+  PetscCheck(Nc == 3, PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Expected three displacement components");
+  u[0] = 1.25;
+  u[1] = -2.0;
+  u[2] = 0.5;
+  return PETSC_SUCCESS;
+}
+
+static PetscErrorCode PMGTransferAffine(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
+{
+  (void)dim; (void)time; (void)ctx;
+  PetscCheck(Nc == 3, PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Expected three displacement components");
+  u[0] = 1.0 + 2.0 * x[0] - 0.5 * x[1] + 0.25 * x[2];
+  u[1] = -0.25 + x[0] + 0.75 * x[1] - 0.1 * x[2];
+  u[2] = 0.5 - 0.2 * x[0] + 0.4 * x[1] + 1.3 * x[2];
+  return PETSC_SUCCESS;
+}
+
+static PetscErrorCode PMGTransferQuadratic(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
+{
+  (void)dim; (void)time; (void)ctx;
+  PetscCheck(Nc == 3, PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Expected three displacement components");
+  u[0] = 1.0 + x[0] * x[0] + 2.0 * x[1] * x[2];
+  u[1] = -0.3 + x[0] * x[1] + x[2] * x[2];
+  u[2] = x[0] * x[2] + x[1] * x[1];
+  return PETSC_SUCCESS;
+}
+
+static PetscErrorCode ApplyPMGTransfer(Mat transfer, PetscBool use_transpose, Vec fine, Vec coarse)
+{
+  PetscFunctionBeginUser;
+  if (use_transpose) {
+    PetscCall(MatMultTranspose(transfer, fine, coarse));
+  } else {
+    PetscCall(MatMult(transfer, fine, coarse));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CheckOnePMGTransfer(const char name[], const char test[], DM fine_dm, DM coarse_dm, Mat transfer, PetscBool use_transpose,
+                                          PetscErrorCode (*func)(PetscInt, PetscReal, const PetscReal[], PetscInt, PetscScalar *, void *))
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)fine_dm);
+  PetscErrorCode (*funcs[1])(PetscInt, PetscReal, const PetscReal[], PetscInt, PetscScalar *, void *) = {func};
+  Vec       fine = NULL, coarse_exact = NULL, coarse_actual = NULL, diff = NULL;
+  PetscReal exact_l2, diff_l2, diff_inf, rel_l2;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateGlobalVector(fine_dm, &fine));
+  PetscCall(DMCreateGlobalVector(coarse_dm, &coarse_exact));
+  PetscCall(VecDuplicate(coarse_exact, &coarse_actual));
+  PetscCall(VecDuplicate(coarse_exact, &diff));
+  PetscCall(DMProjectFunction(fine_dm, 0.0, funcs, NULL, INSERT_ALL_VALUES, fine));
+  PetscCall(DMProjectFunction(coarse_dm, 0.0, funcs, NULL, INSERT_ALL_VALUES, coarse_exact));
+  PetscCall(ApplyPMGTransfer(transfer, use_transpose, fine, coarse_actual));
+  PetscCall(VecCopy(coarse_actual, diff));
+  PetscCall(VecAXPY(diff, -1.0, coarse_exact));
+  PetscCall(VecNorm(coarse_exact, NORM_2, &exact_l2));
+  PetscCall(VecNorm(diff, NORM_2, &diff_l2));
+  PetscCall(VecNorm(diff, NORM_INFINITY, &diff_inf));
+  rel_l2 = exact_l2 > 0.0 ? diff_l2 / exact_l2 : diff_l2;
+  PetscCall(PetscPrintf(comm,
+                        "PMG_COARSE_TRANSFER_CHECK name=%s test=%s abs_l2=%.6e rel_l2=%.6e abs_inf=%.6e\n",
+                        name, test, (double)diff_l2, (double)rel_l2, (double)diff_inf));
+  PetscCall(VecDestroy(&diff));
+  PetscCall(VecDestroy(&coarse_actual));
+  PetscCall(VecDestroy(&coarse_exact));
+  PetscCall(VecDestroy(&fine));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CheckCompositePMGTransfer(LinearSolverCtx *solver, const char test[],
+                                                PetscErrorCode (*func)(PetscInt, PetscReal, const PetscReal[], PetscInt, PetscScalar *, void *))
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)solver->dm);
+  PetscErrorCode (*funcs[1])(PetscInt, PetscReal, const PetscReal[], PetscInt, PetscScalar *, void *) = {func};
+  Vec       fine = NULL, coarse_exact = NULL, diff = NULL;
+  PetscReal exact_l2, diff_l2, diff_inf, rel_l2;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateGlobalVector(solver->dm, &fine));
+  PetscCall(DMCreateGlobalVector(solver->pmg_dm_p1, &coarse_exact));
+  PetscCall(VecDuplicate(coarse_exact, &diff));
+  PetscCall(DMProjectFunction(solver->dm, 0.0, funcs, NULL, INSERT_ALL_VALUES, fine));
+  PetscCall(DMProjectFunction(solver->pmg_dm_p1, 0.0, funcs, NULL, INSERT_ALL_VALUES, coarse_exact));
+  PetscCall(ApplyPMGTransfer(solver->pmg_inject_p4_to_p2, solver->pmg_inject_p4_to_p2_transpose, fine, solver->pmg_u_p2));
+  PetscCall(ApplyPMGTransfer(solver->pmg_inject_p2_to_p1, solver->pmg_inject_p2_to_p1_transpose, solver->pmg_u_p2, solver->pmg_u_p1));
+  PetscCall(VecCopy(solver->pmg_u_p1, diff));
+  PetscCall(VecAXPY(diff, -1.0, coarse_exact));
+  PetscCall(VecNorm(coarse_exact, NORM_2, &exact_l2));
+  PetscCall(VecNorm(diff, NORM_2, &diff_l2));
+  PetscCall(VecNorm(diff, NORM_INFINITY, &diff_inf));
+  rel_l2 = exact_l2 > 0.0 ? diff_l2 / exact_l2 : diff_l2;
+  PetscCall(PetscPrintf(comm,
+                        "PMG_COARSE_TRANSFER_CHECK name=p4_to_p1_composite test=%s abs_l2=%.6e rel_l2=%.6e abs_inf=%.6e\n",
+                        test, (double)diff_l2, (double)rel_l2, (double)diff_inf));
+  PetscCall(VecDestroy(&diff));
+  PetscCall(VecDestroy(&coarse_exact));
+  PetscCall(VecDestroy(&fine));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CheckPMGCoarseTransfers(LinearSolverCtx *solver)
+{
+  PetscFunctionBeginUser;
+  PetscCall(CheckOnePMGTransfer("p4_to_p2", "constant", solver->dm, solver->pmg_dm_p2, solver->pmg_inject_p4_to_p2, solver->pmg_inject_p4_to_p2_transpose, PMGTransferConstant));
+  PetscCall(CheckOnePMGTransfer("p4_to_p2", "affine", solver->dm, solver->pmg_dm_p2, solver->pmg_inject_p4_to_p2, solver->pmg_inject_p4_to_p2_transpose, PMGTransferAffine));
+  PetscCall(CheckOnePMGTransfer("p4_to_p2", "quadratic", solver->dm, solver->pmg_dm_p2, solver->pmg_inject_p4_to_p2, solver->pmg_inject_p4_to_p2_transpose, PMGTransferQuadratic));
+  PetscCall(CheckOnePMGTransfer("p2_to_p1", "constant", solver->pmg_dm_p2, solver->pmg_dm_p1, solver->pmg_inject_p2_to_p1, solver->pmg_inject_p2_to_p1_transpose, PMGTransferConstant));
+  PetscCall(CheckOnePMGTransfer("p2_to_p1", "affine", solver->pmg_dm_p2, solver->pmg_dm_p1, solver->pmg_inject_p2_to_p1, solver->pmg_inject_p2_to_p1_transpose, PMGTransferAffine));
+  PetscCall(CheckCompositePMGTransfer(solver, "constant", PMGTransferConstant));
+  PetscCall(CheckCompositePMGTransfer(solver, "affine", PMGTransferAffine));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverSetupPMGTransferChecks(LinearSolverCtx *solver, DM dm, const AppCtx *app)
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)dm);
+  Vec      v4 = NULL, v2 = NULL, v1 = NULL;
+  PetscInt n4, n2, n1;
+
+  PetscFunctionBeginUser;
+  PetscCall(LinearSolverDestroyPMGHierarchy(solver));
+  PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 1, &solver->pmg_p1_basis));
+  solver->pmg_p1_basis_created = PETSC_TRUE;
+  PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 2, &solver->pmg_p2_basis));
+  solver->pmg_p2_basis_created = PETSC_TRUE;
+  PetscCall(CreateSameMeshLevelDM(dm, &solver->pmg_p1_basis, app, &solver->pmg_dm_p1));
+  PetscCall(CreateSameMeshLevelDM(dm, &solver->pmg_p2_basis, app, &solver->pmg_dm_p2));
+  PetscCall(DMCreateGlobalVector(solver->pmg_dm_p1, &solver->pmg_u_p1));
+  PetscCall(DMCreateGlobalVector(solver->pmg_dm_p2, &solver->pmg_u_p2));
+  PetscCall(BuildInterpolationMatrix(solver->pmg_dm_p2, &solver->pmg_p2_basis, dm, solver->actx->basis, &solver->pmg_inject_p4_to_p2));
+  PetscCall(BuildInterpolationMatrix(solver->pmg_dm_p1, &solver->pmg_p1_basis, solver->pmg_dm_p2, &solver->pmg_p2_basis, &solver->pmg_inject_p2_to_p1));
+
+  PetscCall(DMCreateGlobalVector(dm, &v4));
+  PetscCall(DMCreateGlobalVector(solver->pmg_dm_p2, &v2));
+  PetscCall(DMCreateGlobalVector(solver->pmg_dm_p1, &v1));
+  PetscCall(VecGetSize(v4, &n4));
+  PetscCall(VecGetSize(v2, &n2));
+  PetscCall(VecGetSize(v1, &n1));
+  PetscCall(CheckPMGTransferShape("p4_to_p2", solver->pmg_inject_p4_to_p2, n2, n4, &solver->pmg_inject_p4_to_p2_transpose));
+  PetscCall(CheckPMGTransferShape("p2_to_p1", solver->pmg_inject_p2_to_p1, n1, n2, &solver->pmg_inject_p2_to_p1_transpose));
+  PetscCall(VecDestroy(&v4));
+  PetscCall(VecDestroy(&v2));
+  PetscCall(VecDestroy(&v1));
+
+  solver->pmg_hierarchy_initialized = PETSC_TRUE;
+  if (app->pmg_check_coarse_transfers) PetscCall(CheckPMGCoarseTransfers(solver));
+  PetscCall(PetscPrintf(comm,
+                        "PMG_COARSE_TRANSFER_CONFIG p1_quadrature_points=%" PetscInt_FMT " p2_quadrature_points=%" PetscInt_FMT " p1_global_dofs=%" PetscInt_FMT " p2_global_dofs=%" PetscInt_FMT "\n",
+                        solver->pmg_p1_basis.n_qp, solver->pmg_p2_basis.n_qp, n1, n2));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver)
 {
   P4Basis p1_basis, p2_basis;
   DM      dm_p1 = NULL, dm_p2 = NULL;
@@ -1871,10 +2380,12 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   char    coarse_pc_type[32];
   MPI_Comm comm = PetscObjectComm((PetscObject)dm);
   PetscMPIInt ranks;
-  PetscBool coarse_pc_from_options = PETSC_FALSE, coarse_is_lu = PETSC_FALSE, coarse_is_telescope = PETSC_FALSE;
+  PetscBool coarse_pc_from_options = PETSC_FALSE, coarse_is_lu = PETSC_FALSE, coarse_is_telescope = PETSC_FALSE, coarse_is_shell = PETSC_FALSE;
+  PetscBool use_coarse_dm_mode = PETSC_FALSE;
 
   PetscFunctionBeginUser;
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
+  PetscCall(PetscStrcasecmp(app->pmg_coarse_telescope_mode, "coarse_dm", &use_coarse_dm_mode));
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 1, &p1_basis));
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 2, &p2_basis));
   PetscCall(CreateSameMeshLevelDM(dm, &p1_basis, app, &dm_p1));
@@ -1890,6 +2401,20 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &coarse_pc_from_options));
   PetscCall(PetscStrcasecmp(coarse_pc_type, "lu", &coarse_is_lu));
   PetscCall(PetscStrcasecmp(coarse_pc_type, "telescope", &coarse_is_telescope));
+  PetscCall(PetscStrcasecmp(coarse_pc_type, "shell", &coarse_is_shell));
+  PetscCheck(!coarse_is_shell || use_coarse_dm_mode, comm, PETSC_ERR_ARG_WRONG,
+             "-mg_coarse_pc_type shell is reserved for -pmg_coarse_telescope_mode coarse_dm");
+  if (!use_coarse_dm_mode || !coarse_is_shell) {
+    Vec      p1_vec = NULL;
+    PetscInt p1_global_dofs = 0;
+
+    PetscCall(DMCreateGlobalVector(dm_p1, &p1_vec));
+    PetscCall(VecGetSize(p1_vec, &p1_global_dofs));
+    PetscCall(VecDestroy(&p1_vec));
+    PetscCall(PetscPrintf(comm,
+                          "PMG_COARSE_DM_CONFIG enabled=false mode=%s active_ranks=%" PetscInt_FMT " subcomm=%s full_dofs=%" PetscInt_FMT " reduced_local_min=0 reduced_local_max=0\n",
+                          app->pmg_coarse_telescope_mode, app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type, p1_global_dofs));
+  }
 
   PetscCall(PCSetType(pc, PCMG));
   PetscCall(PCMGSetLevels(pc, 3, NULL));
@@ -1898,6 +2423,9 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscCall(PCMGSetInterpolation(pc, 1, P21));
   PetscCall(PCMGSetInterpolation(pc, 2, P42));
   PetscCall(PCMGSetGalerkin(pc, PC_MG_GALERKIN_BOTH));
+  PetscCall(PetscPrintf(comm, "PMG_COARSE_OPERATOR_CONFIG type=galerkin p1_quadrature_points=%" PetscInt_FMT " p2_quadrature_points=%" PetscInt_FMT "\n",
+                        p1_basis.n_qp, p2_basis.n_qp));
+  if (app->pmg_check_coarse_transfers) PetscCall(LinearSolverSetupPMGTransferChecks(solver, dm, app));
 
   PetscCall(PCMGGetCoarseSolve(pc, &coarse));
   PetscCall(KSPGetPC(coarse, &coarse_pc));
@@ -1922,14 +2450,18 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   } else {
     PetscCall(PetscPrintf(comm, "PMG_REDUNDANT_CONFIG enabled=false group_size=%" PetscInt_FMT " copies=0 inner_ksp=none inner_pc=none\n",
                           app->pmg_coarse_redundant_group_size));
-    if (coarse_is_lu || coarse_is_telescope) {
+    if (coarse_is_lu || coarse_is_telescope || coarse_is_shell) {
       PetscCall(KSPSetType(coarse, KSPPREONLY));
     } else {
       PetscCall(KSPSetType(coarse, KSPFGMRES));
       PetscCall(KSPSetTolerances(coarse, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 100));
       PetscCall(KSPGMRESSetRestart(coarse, 100));
     }
-    PetscCall(ConfigurePMGBasePC(coarse_pc, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
+    if (coarse_is_shell) {
+      PetscCall(ConfigurePMGCoarseDMShell(coarse_pc, app, app->pmg_coarse_telescope_active_ranks));
+    } else {
+      PetscCall(ConfigurePMGBasePC(coarse_pc, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
+    }
     PetscCall(PetscPrintf(comm, "PMG_COARSE_SOLVE type=%s group_size=%" PetscInt_FMT " aggressive_square_graph=%s\n", coarse_pc_type,
                           app->pmg_coarse_redundant_group_size, app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
   }
@@ -1966,7 +2498,7 @@ static PetscErrorCode RefreshKSPOperators(KSP ksp, AppCtx *app, Mat A, PetscBool
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, PetscBool nonlinear_tangent)
+static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A, PetscBool nonlinear_tangent, LinearSolverCtx *solver)
 {
   PC        pc;
   PetscReal solver_rtol = app->ksp_rtol;
@@ -1995,7 +2527,7 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
     } else if (app->variant == VARIANT_BDDC) {
       PetscCall(PCSetType(pc, PCBDDC));
     } else if (app->variant == VARIANT_PMG) {
-      PetscCall(ConfigurePMG(pc, dm, actx, app));
+      PetscCall(ConfigurePMG(pc, dm, actx, app, solver));
     } else {
       PetscCall(PCSetType(pc, PCNONE));
     }
@@ -2070,6 +2602,7 @@ static PetscErrorCode LinearSolverDestroy(LinearSolverCtx *solver)
   PetscCall(PetscFree(solver->raw_basis));
   PetscCall(PetscFree(solver->orth_basis));
   PetscCall(KSPDestroy(&solver->ksp));
+  PetscCall(LinearSolverDestroyPMGHierarchy(solver));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -2537,15 +3070,16 @@ static PetscErrorCode DeflatedCGSolve(LinearSolverCtx *solver, KSP ksp, Vec rhs,
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode SolveLinearSystem(LinearSolverCtx *solver, Vec rhs, Vec x, const char *label, PetscBool nonlinear_tangent, PetscInt *its)
+static PetscErrorCode SolveLinearSystem(LinearSolverCtx *solver, Vec rhs, Vec x, const char *label, Vec current_u, PetscBool nonlinear_tangent, PetscInt *its)
 {
   KSP ksp = NULL;
 
   PetscFunctionBeginUser;
+  (void)current_u;
   if (solver->reuse) {
     if (!solver->ksp) {
       PetscCall(KSPCreate(PetscObjectComm((PetscObject)solver->dm), &solver->ksp));
-      PetscCall(ConfigureKSP(solver->ksp, solver->dm, solver->actx, solver->app, solver->A, nonlinear_tangent));
+      PetscCall(ConfigureKSP(solver->ksp, solver->dm, solver->actx, solver->app, solver->A, nonlinear_tangent, solver));
       PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm), "LINEAR_SOLVER_REUSE configured persistent KSP/PC hierarchy\n"));
     } else {
       PetscBool reuse_pc = PETSC_FALSE;
@@ -2566,7 +3100,7 @@ static PetscErrorCode SolveLinearSystem(LinearSolverCtx *solver, Vec rhs, Vec x,
     ksp = solver->ksp;
   } else {
     PetscCall(KSPCreate(PetscObjectComm((PetscObject)solver->dm), &ksp));
-    PetscCall(ConfigureKSP(ksp, solver->dm, solver->actx, solver->app, solver->A, nonlinear_tangent));
+    PetscCall(ConfigureKSP(ksp, solver->dm, solver->actx, solver->app, solver->A, nonlinear_tangent, solver));
   }
   if (solver->app->use_deflation && nonlinear_tangent && solver->n_raw_basis > 0) {
     PetscReal reported_rel = PETSC_MAX_REAL;
@@ -2618,7 +3152,7 @@ static PetscErrorCode NewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, LinearS
     PetscCall(ApplyZeroDirichlet(actx->constrained_is, A, rhs));
     PetscCall(VecZeroEntries(du));
     PetscCall(PetscTime(&t0));
-    PetscCall(SolveLinearSystem(solver, rhs, du, "Newton correction", PETSC_TRUE, &linear_its));
+    PetscCall(SolveLinearSystem(solver, rhs, du, "Newton correction", u, PETSC_TRUE, &linear_its));
     PetscCall(PetscTime(&t1));
     solve_time += t1 - t0;
     total_linear_its += linear_its;
@@ -2731,7 +3265,7 @@ int main(int argc, char **argv)
   }
   PetscCall(VecZeroEntries(u));
   PetscCall(PetscTime(&t0));
-  PetscCall(SolveLinearSystem(&lsolver, f_ext, u, "Elastic initial", PETSC_FALSE, &elastic_its));
+  PetscCall(SolveLinearSystem(&lsolver, f_ext, u, "Elastic initial", NULL, PETSC_FALSE, &elastic_its));
   PetscCall(PetscTime(&t1));
   elastic_solve_time = t1 - t0;
   PetscCall(VecNorm(u, NORM_2, &u_norm));

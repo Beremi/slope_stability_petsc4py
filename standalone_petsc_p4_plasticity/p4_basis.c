@@ -1,5 +1,72 @@
 #include "p4_basis.h"
 
+static PetscErrorCode CreateTetraQuadratureFromRule(MPI_Comm comm, PetscInt npoints, PetscInt order, const PetscReal xi[][3], const PetscReal wf[], PetscQuadrature *quad)
+{
+  PetscReal *points, *weights;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscMalloc1(npoints * 3, &points));
+  PetscCall(PetscMalloc1(npoints, &weights));
+  /* PETSc tabulates simplex FE spaces on the biunit reference tetrahedron. */
+  for (PetscInt q = 0; q < npoints; ++q) {
+    for (PetscInt d = 0; d < 3; ++d) points[3 * q + d] = 2.0 * xi[q][d] - 1.0;
+    weights[q] = 8.0 * wf[q];
+  }
+  PetscCall(PetscQuadratureCreate(comm, quad));
+  PetscCall(PetscQuadratureSetCellType(*quad, DM_POLYTOPE_TETRAHEDRON));
+  PetscCall(PetscQuadratureSetOrder(*quad, order));
+  PetscCall(PetscQuadratureSetData(*quad, 3, 1, npoints, points, weights));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CreateTetra1Quadrature(MPI_Comm comm, PetscQuadrature *quad)
+{
+  static const PetscReal xi[1][3] = {
+    {0.25, 0.25, 0.25},
+  };
+  static const PetscReal wf[1] = {
+    1.0 / 6.0,
+  };
+
+  PetscFunctionBeginUser;
+  PetscCall(CreateTetraQuadratureFromRule(comm, 1, 1, xi, wf, quad));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CreateTetra11Quadrature(MPI_Comm comm, PetscQuadrature *quad)
+{
+  static const PetscReal xi[11][3] = {
+    {0.25, 0.25, 0.25},
+    {0.0714285714285714, 0.0714285714285714, 0.0714285714285714},
+    {0.7857142857142860, 0.0714285714285714, 0.0714285714285714},
+    {0.0714285714285714, 0.7857142857142860, 0.0714285714285714},
+    {0.0714285714285714, 0.0714285714285714, 0.7857142857142860},
+    {0.3994035761667990, 0.1005964238332010, 0.1005964238332010},
+    {0.1005964238332010, 0.3994035761667990, 0.1005964238332010},
+    {0.1005964238332010, 0.1005964238332010, 0.3994035761667990},
+    {0.3994035761667990, 0.3994035761667990, 0.1005964238332010},
+    {0.3994035761667990, 0.1005964238332010, 0.3994035761667990},
+    {0.1005964238332010, 0.3994035761667990, 0.3994035761667990},
+  };
+  static const PetscReal wf[11] = {
+    -0.013155555555555,
+    0.007622222222222,
+    0.007622222222222,
+    0.007622222222222,
+    0.007622222222222,
+    0.024888888888888,
+    0.024888888888888,
+    0.024888888888888,
+    0.024888888888888,
+    0.024888888888888,
+    0.024888888888888,
+  };
+
+  PetscFunctionBeginUser;
+  PetscCall(CreateTetraQuadratureFromRule(comm, 11, 4, xi, wf, quad));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode CreateTetra24Quadrature(MPI_Comm comm, PetscQuadrature *quad)
 {
   static const PetscReal xi[24][3] = {
@@ -36,20 +103,8 @@ static PetscErrorCode CreateTetra24Quadrature(MPI_Comm comm, PetscQuadrature *qu
     0.0482142857142857 / 6.0, 0.0482142857142857 / 6.0, 0.0482142857142857 / 6.0, 0.0482142857142857 / 6.0,
     0.0482142857142857 / 6.0, 0.0482142857142857 / 6.0, 0.0482142857142857 / 6.0, 0.0482142857142857 / 6.0,
   };
-  PetscReal *points, *weights;
-
   PetscFunctionBeginUser;
-  PetscCall(PetscMalloc1(24 * 3, &points));
-  PetscCall(PetscMalloc1(24, &weights));
-  /* PETSc tabulates simplex FE spaces on the biunit reference tetrahedron. */
-  for (PetscInt q = 0; q < 24; ++q) {
-    for (PetscInt d = 0; d < 3; ++d) points[3 * q + d] = 2.0 * xi[q][d] - 1.0;
-    weights[q] = 8.0 * wf[q];
-  }
-  PetscCall(PetscQuadratureCreate(comm, quad));
-  PetscCall(PetscQuadratureSetCellType(*quad, DM_POLYTOPE_TETRAHEDRON));
-  PetscCall(PetscQuadratureSetOrder(*quad, 6));
-  PetscCall(PetscQuadratureSetData(*quad, 3, 1, 24, points, weights));
+  PetscCall(CreateTetraQuadratureFromRule(comm, 24, 6, xi, wf, quad));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -64,13 +119,19 @@ PetscErrorCode P4BasisCreateDegree(MPI_Comm comm, PetscInt degree, P4Basis *basi
   basis->components = 3;
   basis->degree     = degree;
 
-  PetscCall(CreateTetra24Quadrature(comm, &basis->quadrature));
+  if (degree == 1) {
+    PetscCall(CreateTetra1Quadrature(comm, &basis->quadrature));
+  } else if (degree == 2) {
+    PetscCall(CreateTetra11Quadrature(comm, &basis->quadrature));
+  } else {
+    PetscCall(CreateTetra24Quadrature(comm, &basis->quadrature));
+  }
   PetscCall(PetscFECreateLagrange(comm, 3, 3, PETSC_TRUE, degree, PETSC_DETERMINE, &basis->fe_vector));
   PetscCall(PetscFESetQuadrature(basis->fe_vector, basis->quadrature));
   PetscCall(PetscFECreateLagrange(comm, 3, 1, PETSC_TRUE, degree, PETSC_DETERMINE, &basis->fe_scalar));
   PetscCall(PetscFESetQuadrature(basis->fe_scalar, basis->quadrature));
   PetscCall(PetscQuadratureGetData(basis->quadrature, &dim, &Nc, &npoints, &basis->points, &basis->weights));
-  PetscCheck(dim == 3 && Nc == 1 && npoints == 24, comm, PETSC_ERR_PLIB, "Unexpected quadrature shape");
+  PetscCheck(dim == 3 && Nc == 1, comm, PETSC_ERR_PLIB, "Unexpected quadrature shape");
   basis->n_qp = npoints;
   PetscCall(PetscFEGetDimension(basis->fe_scalar, &basis->n_basis));
   PetscCall(PetscFECreateTabulation(basis->fe_scalar, 1, basis->n_qp, basis->points, 1, &basis->tabulation));
