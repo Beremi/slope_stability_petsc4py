@@ -1709,6 +1709,67 @@ static PetscErrorCode ConfigurePMGBasePC(PC pc, const char pc_type[], PetscBool 
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode ReportPMGLevelDofs(DM dm, PetscInt level, PetscInt degree)
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)dm);
+  Vec      v = NULL;
+  PetscInt local_dofs, global_dofs, local_min, local_max;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateGlobalVector(dm, &v));
+  PetscCall(VecGetLocalSize(v, &local_dofs));
+  PetscCall(VecGetSize(v, &global_dofs));
+  PetscCallMPI(MPI_Allreduce(&local_dofs, &local_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&local_dofs, &local_max, 1, MPIU_INT, MPI_MAX, comm));
+  PetscCall(PetscPrintf(comm,
+                        "PMG_LEVEL_DOF level=%" PetscInt_FMT " degree=%" PetscInt_FMT " local_dofs_rank0=%" PetscInt_FMT " local_dofs_min=%" PetscInt_FMT " local_dofs_max=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT "\n",
+                        level, degree, local_dofs, local_min, local_max, global_dofs));
+  PetscCall(VecDestroy(&v));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ReportPMGLevelSolver(MPI_Comm comm, PetscInt level, KSP ksp)
+{
+  KSPType   ksp_type = NULL;
+  PC        pc = NULL;
+  PCType    pc_type = NULL;
+  PetscReal rtol, abstol, dtol;
+  PetscInt  max_it;
+
+  PetscFunctionBeginUser;
+  PetscCall(KSPGetType(ksp, &ksp_type));
+  PetscCall(KSPGetTolerances(ksp, &rtol, &abstol, &dtol, &max_it));
+  PetscCall(KSPGetPC(ksp, &pc));
+  PetscCall(PCGetType(pc, &pc_type));
+  PetscCall(PetscPrintf(comm,
+                        "PMG_LEVEL_SOLVER level=%" PetscInt_FMT " ksp=%s pc=%s rtol=%.6e abstol=%.6e dtol=%.6e max_it=%" PetscInt_FMT "\n",
+                        level, ksp_type ? ksp_type : "unset", pc_type ? pc_type : "unset", (double)rtol, (double)abstol, (double)dtol, max_it));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ReportPMGSolverChoices(KSP ksp, const AppCtx *app)
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)ksp);
+  PC       pc = NULL;
+  PCType   pc_type = NULL;
+  KSP      level_ksp = NULL;
+  PetscBool is_mg = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  if (app->variant != VARIANT_PMG) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(KSPGetPC(ksp, &pc));
+  PetscCall(PCGetType(pc, &pc_type));
+  if (pc_type) PetscCall(PetscStrcmp(pc_type, PCMG, &is_mg));
+  if (!is_mg) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PCMGGetCoarseSolve(pc, &level_ksp));
+  PetscCall(ReportPMGLevelSolver(comm, 0, level_ksp));
+  for (PetscInt level = 1; level < 3; ++level) {
+    PetscCall(PCMGGetSmoother(pc, level, &level_ksp));
+    PetscCall(ReportPMGLevelSolver(comm, level, level_ksp));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
 {
   PetscMPIInt ranks;
@@ -1717,9 +1778,14 @@ static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
 
   PetscFunctionBeginUser;
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
-  if (app->pmg_coarse_telescope_active_ranks <= 0 || ranks <= app->pmg_coarse_telescope_active_ranks) PetscFunctionReturn(PETSC_SUCCESS);
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &pc_set));
-  if (pc_set) PetscFunctionReturn(PETSC_SUCCESS);
+  if (app->pmg_coarse_telescope_active_ranks <= 0 || ranks <= app->pmg_coarse_telescope_active_ranks || pc_set) {
+    PetscCall(PetscPrintf(comm,
+                          "PMG_TELESCOPE_CONFIG level=p1 enabled=false option_override=%s active_ranks=%" PetscInt_FMT " reduction_factor=1 subcomm=%s inner_ksp=%s inner_pc=%s\n",
+                          pc_set ? "true" : "false", app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type,
+                          app->pmg_coarse_telescope_ksp_type, app->pmg_coarse_telescope_pc_type));
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
   PetscCheck(ranks % app->pmg_coarse_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
              "-pmg_coarse_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", app->pmg_coarse_telescope_active_ranks, ranks);
 
@@ -1733,6 +1799,10 @@ static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
   PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, app->pmg_coarse_telescope_ksp_max_it));
   PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_max_it", value));
   PetscCall(SetDefaultOption("-mg_coarse_telescope_pc_type", app->pmg_coarse_telescope_pc_type));
+  PetscCall(PetscPrintf(comm,
+                        "PMG_TELESCOPE_CONFIG level=p1 enabled=true option_override=false active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
+                        app->pmg_coarse_telescope_active_ranks, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type,
+                        app->pmg_coarse_telescope_ksp_type, app->pmg_coarse_telescope_pc_type));
   PetscCall(PetscPrintf(comm,
                         "PMG_TELESCOPE active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
                         app->pmg_coarse_telescope_active_ranks, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type,
@@ -1748,9 +1818,14 @@ static PetscErrorCode SetPMGP2TelescopeDefaults(AppCtx *app, MPI_Comm comm)
 
   PetscFunctionBeginUser;
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
-  if (app->pmg_p2_telescope_active_ranks <= 0 || ranks <= app->pmg_p2_telescope_active_ranks) PetscFunctionReturn(PETSC_SUCCESS);
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_levels_1_pc_type", &pc_set));
-  if (pc_set) PetscFunctionReturn(PETSC_SUCCESS);
+  if (app->pmg_p2_telescope_active_ranks <= 0 || ranks <= app->pmg_p2_telescope_active_ranks || pc_set) {
+    PetscCall(PetscPrintf(comm,
+                          "PMG_TELESCOPE_CONFIG level=p2 enabled=false option_override=%s active_ranks=%" PetscInt_FMT " reduction_factor=1 subcomm=%s inner_ksp=%s inner_pc=%s\n",
+                          pc_set ? "true" : "false", app->pmg_p2_telescope_active_ranks, app->pmg_p2_telescope_subcomm_type,
+                          app->pmg_p2_telescope_ksp_type, app->pmg_p2_telescope_pc_type));
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
   PetscCheck(ranks % app->pmg_p2_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
              "-pmg_p2_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", app->pmg_p2_telescope_active_ranks, ranks);
 
@@ -1770,6 +1845,10 @@ static PetscErrorCode SetPMGP2TelescopeDefaults(AppCtx *app, MPI_Comm comm)
     PetscCall(PetscStrcasecmp(app->pmg_p2_telescope_pc_type, "gamg", &is_gamg));
     if (is_gamg) PetscCall(SetDefaultOption("-mg_levels_1_telescope_pc_gamg_aggressive_square_graph", app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
   }
+  PetscCall(PetscPrintf(comm,
+                        "PMG_TELESCOPE_CONFIG level=p2 enabled=true option_override=false active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
+                        app->pmg_p2_telescope_active_ranks, (PetscInt)ranks / app->pmg_p2_telescope_active_ranks, app->pmg_p2_telescope_subcomm_type,
+                        app->pmg_p2_telescope_ksp_type, app->pmg_p2_telescope_pc_type));
   PetscCall(PetscPrintf(comm,
                         "PMG_P2_TELESCOPE active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
                         app->pmg_p2_telescope_active_ranks, (PetscInt)ranks / app->pmg_p2_telescope_active_ranks, app->pmg_p2_telescope_subcomm_type,
@@ -1795,6 +1874,9 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 2, &p2_basis));
   PetscCall(CreateSameMeshLevelDM(dm, &p1_basis, app, &dm_p1));
   PetscCall(CreateSameMeshLevelDM(dm, &p2_basis, app, &dm_p2));
+  PetscCall(ReportPMGLevelDofs(dm_p1, 0, 1));
+  PetscCall(ReportPMGLevelDofs(dm_p2, 1, 2));
+  PetscCall(ReportPMGLevelDofs(dm, 2, 4));
   PetscCall(BuildInterpolationMatrix(dm_p2, &p2_basis, dm_p1, &p1_basis, &P21));
   PetscCall(BuildInterpolationMatrix(dm, actx->basis, dm_p2, &p2_basis, &P42));
   PetscCall(SetPMGTelescopeDefaults(app, comm));
@@ -1827,10 +1909,14 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
     PetscCall(KSPSetTolerances(inner_ksp, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 100));
     PetscCall(KSPGetPC(inner_ksp, &inner_pc));
     PetscCall(ConfigurePMGBasePC(inner_pc, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
+    PetscCall(PetscPrintf(comm, "PMG_REDUNDANT_CONFIG enabled=true group_size=%" PetscInt_FMT " copies=%" PetscInt_FMT " inner_ksp=fgmres inner_pc=%s\n",
+                          app->pmg_coarse_redundant_group_size, copies, coarse_pc_type));
     PetscCall(PetscPrintf(comm,
                           "PMG_COARSE_SOLVE type=redundant group_size=%" PetscInt_FMT " copies=%" PetscInt_FMT " inner_pc=%s aggressive_square_graph=%s\n",
                           app->pmg_coarse_redundant_group_size, copies, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
   } else {
+    PetscCall(PetscPrintf(comm, "PMG_REDUNDANT_CONFIG enabled=false group_size=%" PetscInt_FMT " copies=0 inner_ksp=none inner_pc=none\n",
+                          app->pmg_coarse_redundant_group_size));
     if (coarse_is_lu || coarse_is_telescope) {
       PetscCall(KSPSetType(coarse, KSPPREONLY));
     } else {
@@ -1910,6 +1996,7 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
     }
   }
   PetscCall(KSPSetFromOptions(ksp));
+  PetscCall(ReportPMGSolverChoices(ksp, app));
   if (app->variant == VARIANT_FETIDP) {
     PC inner_bddc = NULL;
 

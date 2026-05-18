@@ -118,6 +118,7 @@ Option files are provided in `options/`:
 ```bash
 mpiexec -n 4 ./p4_plasticity -options_file options/gamg.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/pmg.opts
+mpiexec -n 64 ./p4_plasticity -options_file options/pmg_p1_telescope.opts
 mpiexec -n 64 ./p4_plasticity -options_file options/pmg_telescope_final.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/bddc.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/fetidp.opts
@@ -226,10 +227,13 @@ mpiexec -n 256 ./p4_plasticity -pc_variant pmg \
   -pmg_coarse_telescope_subcomm_type interlaced
 ```
 
-Use `options/pmg_telescope_final.opts` for this combined profile. On the local
-32-rank L1 probe, adding the P2-level telescope converged but was slower than
-the P1-only telescope; it is kept as an explicit high-rank scaling option rather
-than a hard-coded default.
+Use `options/pmg_p1_telescope.opts` for the current P1-only telescope benchmark
+profile. It leaves the P2 level as a cheap `chebyshev+jacobi` smoother and keeps
+P1 telescope active-rank/subcommunicator choices configurable from the command
+line. `options/pmg_telescope_final.opts` is kept as the legacy combined P1+P2
+telescope profile. On the local 32-rank L1 probe, adding the P2-level telescope
+converged but was slower than the P1-only telescope; it is kept as an explicit
+high-rank scaling option rather than a hard-coded default.
 
 By default the linear solver is now persistent across the elastic predictor and
 Newton corrections. This reuses the KSP/PCMG object, same-mesh P1/P2/P4 DMs, and
