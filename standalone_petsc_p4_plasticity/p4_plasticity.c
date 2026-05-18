@@ -1908,6 +1908,12 @@ typedef struct {
   Vec             xtmp;
   Mat             Ared;
   KSP             subksp;
+  PetscInt        apply_calls;
+  PetscInt        operator_updates;
+  PetscLogDouble  scatter_forward_time;
+  PetscLogDouble  scatter_reverse_time;
+  PetscLogDouble  inner_solve_time;
+  PetscLogDouble  operator_update_time;
 } PMGCoarseDMShellCtx;
 
 static PetscErrorCode PMGParseSubcommType(MPI_Comm comm, const char name[], PetscSubcommType *type)
@@ -2051,8 +2057,9 @@ static PetscErrorCode PMGCoarseDMShellUpdateOperator(PC pc, PMGCoarseDMShellCtx 
   Mat            Blocal = NULL;
   IS             iscol = NULL;
   PetscInt       nr, nc, bs;
-  PetscLogDouble t0, t1;
+  PetscLogDouble t0, t1, t_sub0, t_sub1, t_cat0, t_cat1, submatrix_time, concatenate_time;
   const char    *reuse_label = ctx->setup_done ? "reuse" : "initial";
+  MatReuse       reuse = ctx->setup_done ? MAT_REUSE_MATRIX : MAT_INITIAL_MATRIX;
 
   PetscFunctionBeginUser;
   PetscCall(PetscTime(&t0));
@@ -2062,22 +2069,34 @@ static PetscErrorCode PMGCoarseDMShellUpdateOperator(PC pc, PMGCoarseDMShellCtx 
   PetscCall(ISSetIdentity(iscol));
   PetscCall(ISSetBlockSize(iscol, bs));
   PetscCall(MatSetOption(B, MAT_SUBMAT_SINGLEIS, PETSC_TRUE));
+  PetscCall(PetscTime(&t_sub0));
   PetscCall(MatCreateSubMatrices(B, 1, &ctx->isrow, &iscol, MAT_INITIAL_MATRIX, &submats));
+  PetscCall(PetscTime(&t_sub1));
   Blocal = submats[0];
   PetscCall(PetscFree(submats));
   if (ctx->active) {
     PetscInt mm;
 
-    PetscCall(MatDestroy(&ctx->Ared));
     PetscCall(MatGetSize(Blocal, &mm, NULL));
-    PetscCall(MatCreateMPIMatConcatenateSeqMat(ctx->subcomm, Blocal, mm, MAT_INITIAL_MATRIX, &ctx->Ared));
-    PetscCall(PMGCoarseDMShellAttachNearNullspace(ctx, B));
+    PetscCall(PetscTime(&t_cat0));
+    PetscCall(MatCreateMPIMatConcatenateSeqMat(ctx->subcomm, Blocal, mm, reuse, &ctx->Ared));
+    PetscCall(PetscTime(&t_cat1));
     PetscCall(KSPSetOperators(ctx->subksp, ctx->Ared, ctx->Ared));
+  } else {
+    t_cat0 = t_cat1 = 0.0;
   }
+  if (reuse == MAT_INITIAL_MATRIX) PetscCall(PMGCoarseDMShellAttachNearNullspace(ctx, B));
   PetscCall(MatDestroy(&Blocal));
   PetscCall(ISDestroy(&iscol));
   PetscCall(PetscTime(&t1));
-  PetscCall(PetscPrintf(comm, "PMG_COARSE_DM_OPERATOR_UPDATE reuse=%s time=%.6g\n", reuse_label, (double)(t1 - t0)));
+  submatrix_time   = t_sub1 - t_sub0;
+  concatenate_time = t_cat1 - t_cat0;
+  ctx->operator_update_time += t1 - t0;
+  ctx->operator_updates++;
+  PetscCall(PetscPrintf(comm,
+                        "PMG_COARSE_DM_OPERATOR_UPDATE reuse=%s matrix_reuse=%s time=%.6g submatrix_time=%.6g concatenate_time=%.6g attach_nullspace=%s\n",
+                        reuse_label, reuse == MAT_INITIAL_MATRIX ? "initial" : "reuse", (double)(t1 - t0), (double)submatrix_time,
+                        (double)concatenate_time, reuse == MAT_INITIAL_MATRIX ? "true" : "false"));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -2119,12 +2138,21 @@ static PetscErrorCode PMGCoarseDMShellSetUp(PC pc)
 static PetscErrorCode PMGCoarseDMShellApply(PC pc, Vec x, Vec y)
 {
   PMGCoarseDMShellCtx *ctx = NULL;
+  PetscLogDouble       t0, t1, t2, t3;
 
   PetscFunctionBeginUser;
   PetscCall(PCShellGetContext(pc, (void **)&ctx));
+  PetscCall(PetscTime(&t0));
   PetscCall(PMGCoarseDMShellScatterToReduced(ctx, x, ctx->xred));
+  PetscCall(PetscTime(&t1));
   if (ctx->active) PetscCall(KSPSolve(ctx->subksp, ctx->xred, ctx->yred));
+  PetscCall(PetscTime(&t2));
   PetscCall(PMGCoarseDMShellScatterFromReduced(ctx, ctx->yred, y));
+  PetscCall(PetscTime(&t3));
+  ctx->apply_calls++;
+  ctx->scatter_forward_time += t1 - t0;
+  ctx->inner_solve_time += t2 - t1;
+  ctx->scatter_reverse_time += t3 - t2;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -2135,6 +2163,11 @@ static PetscErrorCode PMGCoarseDMShellDestroy(PC pc)
   PetscFunctionBeginUser;
   PetscCall(PCShellGetContext(pc, (void **)&ctx));
   if (!ctx) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)pc),
+                        "PMG_COARSE_DM_SUMMARY apply_calls=%" PetscInt_FMT " operator_updates=%" PetscInt_FMT
+                        " scatter_forward_time=%.6g inner_solve_time=%.6g scatter_reverse_time=%.6g operator_update_time=%.6g\n",
+                        ctx->apply_calls, ctx->operator_updates, (double)ctx->scatter_forward_time, (double)ctx->inner_solve_time,
+                        (double)ctx->scatter_reverse_time, (double)ctx->operator_update_time));
   PetscCall(KSPDestroy(&ctx->subksp));
   PetscCall(MatDestroy(&ctx->Ared));
   PetscCall(VecDestroy(&ctx->xred));
