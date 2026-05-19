@@ -51,6 +51,19 @@ INCLUDE_REDUNDANT=0 \
 ./submit_pmg_scaling.sh
 ```
 
+To preview the opt-in true coarse-level shell V-cycle experiment only:
+
+```bash
+DRY_RUN=1 \
+INCLUDE_TELESCOPE=0 \
+INCLUDE_REDUNDANT=0 \
+INCLUDE_SHELL=1 \
+SHELL_P2_ACTIVE_RANKS_LIST="64 128" \
+SHELL_P1_ACTIVE_RANKS_LIST="32 64" \
+SHELL_SUBCOMM_TYPES="interlaced contiguous" \
+./submit_pmg_scaling.sh
+```
+
 ## Submit
 
 The default campaign runs:
@@ -63,6 +76,24 @@ The default campaign runs:
 
 ```bash
 PARTITION=qcpu_exp TIME_LIMIT=00:30:00 ./submit_pmg_scaling.sh
+```
+
+The shell V-cycle backend is opt-in and uses
+`options/pmg_shell_vcycle.opts`. For the first true coarse-level scaling
+batch, run only the shell variants against the already-known best baseline:
+
+```bash
+PARTITION=qcpu_exp \
+TIME_LIMIT=00:45:00 \
+INCLUDE_TELESCOPE=0 \
+INCLUDE_REDUNDANT=0 \
+INCLUDE_SHELL=1 \
+NODE_COUNTS="1 2" \
+DEFLATION_LIST="false true" \
+SHELL_P2_ACTIVE_RANKS_LIST="64 128" \
+SHELL_P1_ACTIVE_RANKS_LIST="32 64" \
+SHELL_SUBCOMM_TYPES="interlaced contiguous" \
+./submit_pmg_scaling.sh
 ```
 
 For the best `1e-1` profile follow-up at tighter tolerance, narrow the lists

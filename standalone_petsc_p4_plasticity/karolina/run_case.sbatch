@@ -76,6 +76,10 @@ metadata="$RESULT_DIR/job.env"
   echo "PMG_COARSE_TELESCOPE_SUBCOMM_TYPE=${PMG_COARSE_TELESCOPE_SUBCOMM_TYPE:-}"
   echo "PMG_COARSE_REDUNDANT_GROUP_SIZE=${PMG_COARSE_REDUNDANT_GROUP_SIZE:-}"
   echo "PMG_P2_TELESCOPE_ACTIVE_RANKS=${PMG_P2_TELESCOPE_ACTIVE_RANKS:-0}"
+  echo "PMG_APPLY_BACKEND=${PMG_APPLY_BACKEND:-}"
+  echo "PMG_SHELL_P2_ACTIVE_RANKS=${PMG_SHELL_P2_ACTIVE_RANKS:-}"
+  echo "PMG_SHELL_P1_ACTIVE_RANKS=${PMG_SHELL_P1_ACTIVE_RANKS:-}"
+  echo "PMG_SHELL_SUBCOMM_TYPE=${PMG_SHELL_SUBCOMM_TYPE:-}"
   echo "PMG_LAG_PRECONDITIONER=${PMG_LAG_PRECONDITIONER:-1}"
   echo "START_TIME=$(date --iso-8601=seconds)"
 } | tee "$metadata"
@@ -118,6 +122,18 @@ if [[ -n "${PMG_COARSE_REDUNDANT_GROUP_SIZE:-}" ]]; then
 fi
 if [[ -n "${PMG_P2_TELESCOPE_ACTIVE_RANKS:-0}" ]]; then
   BASE_ARGS+=(-pmg_p2_telescope_active_ranks "${PMG_P2_TELESCOPE_ACTIVE_RANKS:-0}")
+fi
+if [[ -n "${PMG_APPLY_BACKEND:-}" ]]; then
+  BASE_ARGS+=(-pmg_apply_backend "$PMG_APPLY_BACKEND")
+fi
+if [[ -n "${PMG_SHELL_P2_ACTIVE_RANKS:-}" ]]; then
+  BASE_ARGS+=(-pmg_shell_p2_active_ranks "$PMG_SHELL_P2_ACTIVE_RANKS")
+fi
+if [[ -n "${PMG_SHELL_P1_ACTIVE_RANKS:-}" ]]; then
+  BASE_ARGS+=(-pmg_shell_p1_active_ranks "$PMG_SHELL_P1_ACTIVE_RANKS")
+fi
+if [[ -n "${PMG_SHELL_SUBCOMM_TYPE:-}" ]]; then
+  BASE_ARGS+=(-pmg_shell_subcomm_type "$PMG_SHELL_SUBCOMM_TYPE")
 fi
 if [[ "${LOG_VIEW:-1}" == "1" ]]; then
   BASE_ARGS+=(-log_view)

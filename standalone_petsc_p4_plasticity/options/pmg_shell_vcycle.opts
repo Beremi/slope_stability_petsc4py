@@ -1,0 +1,21 @@
+-pc_variant pmg
+-pmg_apply_backend shell_vcycle
+-ksp_type fgmres
+-dm_plex_partition_balance true
+-pmg_coarse_pc_type gamg
+-pmg_coarse_lu_max_dofs 50000
+-pmg_coarse_redundant_group_size 0
+-pmg_coarse_gamg_aggressive_square_graph false
+-pmg_shell_p2_active_ranks 64
+-pmg_shell_p1_active_ranks 32
+-pmg_shell_subcomm_type interlaced
+-pmg_coarse_telescope_ksp_type fgmres
+-pmg_coarse_telescope_ksp_rtol 1e-3
+-pmg_coarse_telescope_ksp_max_it 100
+-pmg_coarse_telescope_pc_type gamg
+-pmg_p2_telescope_active_ranks 0
+-pmg_smoother_ksp_type chebyshev
+-pmg_smoother_pc_type jacobi
+-pmg_smoother_max_it 2
+-linear_rtol 1.0e-3
+-ksp_converged_reason
