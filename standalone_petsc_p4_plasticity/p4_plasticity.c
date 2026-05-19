@@ -5,6 +5,29 @@
 #include <petscksp.h>
 #include <stdlib.h>
 
+static PetscLogStage log_stage_deflation_orthogonalize = -1;
+static PetscLogStage log_stage_deflation_initial_guess = -1;
+static PetscLogStage log_stage_deflation_projector     = -1;
+static PetscLogStage log_stage_pmg_shell_fine_smooth   = -1;
+static PetscLogStage log_stage_pmg_shell_residual      = -1;
+static PetscLogStage log_stage_pmg_shell_transfer      = -1;
+static PetscLogStage log_stage_pmg_shell_p2            = -1;
+static PetscLogStage log_stage_pmg_shell_p1            = -1;
+
+static PetscErrorCode RegisterLogStages(void)
+{
+  PetscFunctionBeginUser;
+  PetscCall(PetscLogStageRegister("deflation_orthogonalize", &log_stage_deflation_orthogonalize));
+  PetscCall(PetscLogStageRegister("deflation_initial_guess", &log_stage_deflation_initial_guess));
+  PetscCall(PetscLogStageRegister("deflation_projector", &log_stage_deflation_projector));
+  PetscCall(PetscLogStageRegister("pmg_shell_fine_smooth", &log_stage_pmg_shell_fine_smooth));
+  PetscCall(PetscLogStageRegister("pmg_shell_residual", &log_stage_pmg_shell_residual));
+  PetscCall(PetscLogStageRegister("pmg_shell_transfer", &log_stage_pmg_shell_transfer));
+  PetscCall(PetscLogStageRegister("pmg_shell_p2", &log_stage_pmg_shell_p2));
+  PetscCall(PetscLogStageRegister("pmg_shell_p1", &log_stage_pmg_shell_p1));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 typedef enum {
   VARIANT_GAMG,
   VARIANT_BDDC,
@@ -92,6 +115,7 @@ typedef struct {
   PetscBool    reuse;
   Vec         *raw_basis;
   Vec         *orth_basis;
+  Vec         *Aorth_basis;
   PetscInt     n_raw_basis;
   PetscInt     raw_basis_cap;
   PetscInt     n_orth_basis;
@@ -2748,11 +2772,13 @@ static PetscErrorCode PMGShellResidual(Mat A, Vec rhs, Vec x, Vec r, Vec tmp, Pe
   PetscLogDouble t0, t1;
 
   PetscFunctionBeginUser;
+  PetscCall(PetscLogStagePush(log_stage_pmg_shell_residual));
   PetscCall(PetscTime(&t0));
   PetscCall(MatMult(A, x, tmp));
   PetscCall(VecWAXPY(r, -1.0, tmp, rhs));
   PetscCall(PetscTime(&t1));
   *accum_time += t1 - t0;
+  PetscCall(PetscLogStagePop());
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -2783,67 +2809,85 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(PCShellGetContext(pc, (void **)&ctx));
   PetscCall(VecZeroEntries(y));
 
+  PetscCall(PetscLogStagePush(log_stage_pmg_shell_fine_smooth));
   PetscCall(PetscTime(&t0));
   PetscCall(KSPSolve(ctx->smooth4, x, ctx->z4));
   PetscCall(VecAXPY(y, 1.0, ctx->z4));
   PetscCall(PetscTime(&t1));
   ctx->fine_smooth_time += t1 - t0;
+  PetscCall(PetscLogStagePop());
 
   PetscCall(PMGShellResidual(ctx->A4, x, y, ctx->r4, ctx->tmp4, &ctx->residual_time));
+  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
   PetscCall(PetscTime(&t0));
   PetscCall(MatMultTranspose(ctx->P42, ctx->r4, ctx->p2_rhs_full));
   PetscCall(PetscTime(&t1));
   ctx->restrict_time += t1 - t0;
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p2_layout, ctx->p2_rhs_full, ctx->p2_rhs));
+  PetscCall(PetscLogStagePop());
 
   if (ctx->p2_layout.active) {
+    PetscCall(PetscLogStagePush(log_stage_pmg_shell_p2));
     PetscCall(PetscTime(&t0));
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_rhs, ctx->p2_x));
     PetscCall(PetscTime(&t1));
     ctx->p2_smooth_time += t1 - t0;
+    PetscCall(PetscLogStagePop());
     PetscCall(PMGShellResidual(ctx->A2_sub, ctx->p2_rhs, ctx->p2_x, ctx->p2_r, ctx->p2_delta, &ctx->residual_time));
   }
+  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
   PetscCall(PMGActiveLayoutCopySubToFull(&ctx->p2_layout, ctx->p2_r, ctx->p2_r_full));
   PetscCall(PetscTime(&t0));
   PetscCall(MatMultTranspose(ctx->P21, ctx->p2_r_full, ctx->p1_rhs_full));
   PetscCall(PetscTime(&t1));
   ctx->restrict_time += t1 - t0;
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p1_layout, ctx->p1_rhs_full, ctx->p1_rhs));
+  PetscCall(PetscLogStagePop());
 
   if (ctx->p1_layout.active) {
+    PetscCall(PetscLogStagePush(log_stage_pmg_shell_p1));
     PetscCall(PetscTime(&t0));
     PetscCall(KSPSolve(ctx->coarse1, ctx->p1_rhs, ctx->p1_x));
     PetscCall(PetscTime(&t1));
     ctx->coarse_solve_time += t1 - t0;
+    PetscCall(PetscLogStagePop());
   }
+  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
   PetscCall(PMGActiveLayoutCopySubToFull(&ctx->p1_layout, ctx->p1_x, ctx->p1_x_full));
   PetscCall(PetscTime(&t0));
   PetscCall(MatMult(ctx->P21, ctx->p1_x_full, ctx->p2_corr_full));
   PetscCall(PetscTime(&t1));
   ctx->prolong_time += t1 - t0;
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p2_layout, ctx->p2_corr_full, ctx->p2_delta));
+  PetscCall(PetscLogStagePop());
   if (ctx->p2_layout.active) {
     PetscCall(VecAXPY(ctx->p2_x, 1.0, ctx->p2_delta));
     PetscCall(PMGShellResidual(ctx->A2_sub, ctx->p2_rhs, ctx->p2_x, ctx->p2_r, ctx->p2_delta, &ctx->residual_time));
+    PetscCall(PetscLogStagePush(log_stage_pmg_shell_p2));
     PetscCall(PetscTime(&t0));
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_r, ctx->p2_delta));
     PetscCall(VecAXPY(ctx->p2_x, 1.0, ctx->p2_delta));
     PetscCall(PetscTime(&t1));
     ctx->p2_smooth_time += t1 - t0;
+    PetscCall(PetscLogStagePop());
   }
+  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
   PetscCall(PMGActiveLayoutCopySubToFull(&ctx->p2_layout, ctx->p2_x, ctx->p2_corr_full));
   PetscCall(PetscTime(&t0));
   PetscCall(MatMult(ctx->P42, ctx->p2_corr_full, ctx->z4));
   PetscCall(VecAXPY(y, 1.0, ctx->z4));
   PetscCall(PetscTime(&t1));
   ctx->prolong_time += t1 - t0;
+  PetscCall(PetscLogStagePop());
 
   PetscCall(PMGShellResidual(ctx->A4, x, y, ctx->r4, ctx->tmp4, &ctx->residual_time));
+  PetscCall(PetscLogStagePush(log_stage_pmg_shell_fine_smooth));
   PetscCall(PetscTime(&t0));
   PetscCall(KSPSolve(ctx->smooth4, ctx->r4, ctx->z4));
   PetscCall(VecAXPY(y, 1.0, ctx->z4));
   PetscCall(PetscTime(&t1));
   ctx->fine_smooth_time += t1 - t0;
+  PetscCall(PetscLogStagePop());
   ctx->apply_calls++;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -3364,6 +3408,7 @@ static PetscErrorCode LinearSolverDestroy(LinearSolverCtx *solver)
   for (PetscInt i = 0; i < solver->n_raw_basis; ++i) PetscCall(VecDestroy(&solver->raw_basis[i]));
   PetscCall(PetscFree(solver->raw_basis));
   PetscCall(PetscFree(solver->orth_basis));
+  PetscCall(PetscFree(solver->Aorth_basis));
   PetscCall(KSPDestroy(&solver->ksp));
   PetscCall(LinearSolverDestroyPMGHierarchy(solver));
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -3419,7 +3464,10 @@ static PetscErrorCode CheckLinearSolutionExplicit(DM dm, AppCtx *app, Mat A, Vec
 static PetscErrorCode LinearSolverClearOrthBasis(LinearSolverCtx *solver)
 {
   PetscFunctionBeginUser;
-  for (PetscInt i = 0; i < solver->n_orth_basis; ++i) PetscCall(VecDestroy(&solver->orth_basis[i]));
+  for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
+    PetscCall(VecDestroy(&solver->orth_basis[i]));
+    PetscCall(VecDestroy(&solver->Aorth_basis[i]));
+  }
   solver->n_orth_basis = 0;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -3452,21 +3500,29 @@ static PetscErrorCode LinearSolverAppendRawBasis(LinearSolverCtx *solver, Vec v,
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode LinearSolverStoreOrthVector(LinearSolverCtx *solver, Vec v)
+static PetscErrorCode LinearSolverStoreOrthVector(LinearSolverCtx *solver, Vec v, Vec Av)
 {
-  Vec copy = NULL;
+  Vec copy = NULL, Acopy = NULL;
 
   PetscFunctionBeginUser;
   if (solver->orth_basis_cap == solver->n_orth_basis) {
     const PetscInt new_cap = solver->orth_basis_cap ? 2 * solver->orth_basis_cap : PetscMax(1, solver->n_raw_basis);
 
     PetscCall(PetscRealloc((size_t)new_cap * sizeof(Vec), &solver->orth_basis));
-    for (PetscInt i = solver->orth_basis_cap; i < new_cap; ++i) solver->orth_basis[i] = NULL;
+    PetscCall(PetscRealloc((size_t)new_cap * sizeof(Vec), &solver->Aorth_basis));
+    for (PetscInt i = solver->orth_basis_cap; i < new_cap; ++i) {
+      solver->orth_basis[i]  = NULL;
+      solver->Aorth_basis[i] = NULL;
+    }
     solver->orth_basis_cap = new_cap;
   }
   PetscCall(VecDuplicate(v, &copy));
   PetscCall(VecCopy(v, copy));
-  solver->orth_basis[solver->n_orth_basis++] = copy;
+  PetscCall(VecDuplicate(Av, &Acopy));
+  PetscCall(VecCopy(Av, Acopy));
+  solver->orth_basis[solver->n_orth_basis]  = copy;
+  solver->Aorth_basis[solver->n_orth_basis] = Acopy;
+  solver->n_orth_basis++;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -3477,9 +3533,15 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
   PetscLogDouble t0, t1;
 
   PetscFunctionBeginUser;
+  PetscCall(PetscLogStagePush(log_stage_deflation_orthogonalize));
   PetscCall(PetscTime(&t0));
   PetscCall(LinearSolverClearOrthBasis(solver));
-  if (!solver->n_raw_basis) PetscFunctionReturn(PETSC_SUCCESS);
+  if (!solver->n_raw_basis) {
+    PetscCall(PetscTime(&t1));
+    solver->deflation_orthogonalization_time += t1 - t0;
+    PetscCall(PetscLogStagePop());
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
   PetscCall(VecDuplicate(solver->raw_basis[0], &v));
   PetscCall(VecDuplicate(solver->raw_basis[0], &Av));
 
@@ -3493,14 +3555,14 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
     PetscReal   norm_a;
 
     PetscCall(VecCopy(solver->raw_basis[src], v));
+    PetscCall(MatMult(A, v, Av));
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
       PetscScalar coeff;
 
-      PetscCall(MatMult(A, v, Av));
       PetscCall(VecDot(solver->orth_basis[i], Av, &coeff));
       PetscCall(VecAXPY(v, -coeff, solver->orth_basis[i]));
+      PetscCall(VecAXPY(Av, -coeff, solver->Aorth_basis[i]));
     }
-    PetscCall(MatMult(A, v, Av));
     PetscCall(VecDot(v, Av, &norm_scalar));
     norm_a = PetscRealPart(norm_scalar);
     if (norm_a <= 0.0) {
@@ -3511,14 +3573,22 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
       ++skipped_small;
       continue;
     }
-    PetscCall(VecScale(v, 1.0 / PetscSqrtReal(norm_a)));
-    PetscCall(LinearSolverStoreOrthVector(solver, v));
+    {
+      const PetscReal inv_norm = 1.0 / PetscSqrtReal(norm_a);
+
+      PetscCall(VecScale(v, inv_norm));
+      PetscCall(VecScale(Av, inv_norm));
+    }
+    PetscCall(LinearSolverStoreOrthVector(solver, v, Av));
   }
   for (PetscInt i = 0; i < solver->n_orth_basis / 2; ++i) {
     Vec tmp = solver->orth_basis[i];
+    Vec Atmp = solver->Aorth_basis[i];
 
     solver->orth_basis[i] = solver->orth_basis[solver->n_orth_basis - 1 - i];
     solver->orth_basis[solver->n_orth_basis - 1 - i] = tmp;
+    solver->Aorth_basis[i] = solver->Aorth_basis[solver->n_orth_basis - 1 - i];
+    solver->Aorth_basis[solver->n_orth_basis - 1 - i] = Atmp;
   }
   PetscCall(VecDestroy(&v));
   PetscCall(VecDestroy(&Av));
@@ -3528,6 +3598,10 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
                         "DEFLATION_ORTHO label=\"%s\" raw_cols=%" PetscInt_FMT " orth_cols=%" PetscInt_FMT " skipped_small=%" PetscInt_FMT " skipped_nonpositive=%" PetscInt_FMT " tol=%.6e time=%.6g\n",
                         label, solver->n_raw_basis, solver->n_orth_basis, skipped_small, skipped_nonpositive,
                         (double)solver->app->deflation_basis_tol, (double)(t1 - t0)));
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_CACHE_CONFIG orth_cols=%" PetscInt_FMT " cached_A_cols=%" PetscInt_FMT "\n",
+                        solver->n_orth_basis, solver->n_orth_basis));
+  PetscCall(PetscLogStagePop());
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -3536,18 +3610,16 @@ static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A
   PetscLogDouble t0, t1;
 
   PetscFunctionBeginUser;
+  PetscCall(PetscLogStagePush(log_stage_deflation_initial_guess));
   PetscCall(PetscTime(&t0));
   PetscCall(VecZeroEntries(x));
+  PetscCall(VecCopy(rhs, r));
   for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
     PetscScalar coeff;
 
     PetscCall(VecDot(solver->orth_basis[i], rhs, &coeff));
     PetscCall(VecAXPY(x, coeff, solver->orth_basis[i]));
-  }
-  PetscCall(VecCopy(rhs, r));
-  if (solver->n_orth_basis) {
-    PetscCall(MatMult(A, x, work));
-    PetscCall(VecAXPY(r, -1.0, work));
+    PetscCall(VecAXPY(r, -coeff, solver->Aorth_basis[i]));
   }
   PetscCall(PetscTime(&t1));
   solver->deflation_coarse_time += t1 - t0;
@@ -3555,10 +3627,13 @@ static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATION_COARSE_INITIAL basis_cols=%" PetscInt_FMT " call=%" PetscInt_FMT " time=%.6g cumulative_time=%.6g\n",
                         solver->n_orth_basis, solver->deflation_coarse_calls, (double)(t1 - t0), (double)solver->deflation_coarse_time));
+  PetscCall(PetscLogStagePop());
+  (void)A;
+  (void)work;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, PC pc, Vec v, Vec z, Vec Az)
+static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, PC pc, Vec v, Vec z, Vec Az, PetscBool return_Az)
 {
   PetscLogDouble t0, t1, t2, pc_time, projector_time = 0.0;
 
@@ -3566,14 +3641,17 @@ static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, 
   PetscCall(PetscTime(&t0));
   PetscCall(PCApply(pc, v, z));
   PetscCall(PetscTime(&t1));
-  if (solver->n_orth_basis) {
+  if (solver->n_orth_basis || return_Az) {
+    PetscCall(PetscLogStagePush(log_stage_deflation_projector));
     PetscCall(MatMult(A, z, Az));
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
       PetscScalar coeff;
 
       PetscCall(VecDot(solver->orth_basis[i], Az, &coeff));
       PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
+      PetscCall(VecAXPY(Az, -coeff, solver->Aorth_basis[i]));
     }
+    PetscCall(PetscLogStagePop());
   }
   PetscCall(PetscTime(&t2));
   pc_time        = t1 - t0;
@@ -3712,8 +3790,7 @@ static PetscErrorCode DeflatedFGMRESSolve(LinearSolverCtx *solver, KSP ksp, Vec 
   for (PetscInt j = 0; !converged && j < max_it; ++j) {
     PetscReal hnext, res_norm;
 
-    PetscCall(DeflationApplyProjectedPC(solver, A, pc, V[j], Z[j], Az));
-    PetscCall(MatMult(A, Z[j], Az));
+    PetscCall(DeflationApplyProjectedPC(solver, A, pc, V[j], Z[j], Az, PETSC_TRUE));
     for (PetscInt i = 0; i <= j; ++i) {
       PetscScalar hij;
 
@@ -3782,7 +3859,7 @@ static PetscErrorCode DeflatedCGSolve(LinearSolverCtx *solver, KSP ksp, Vec rhs,
   if (!converged) {
     PetscScalar rho;
 
-    PetscCall(DeflationApplyProjectedPC(solver, A, pc, r, z, Ap));
+    PetscCall(DeflationApplyProjectedPC(solver, A, pc, r, z, Ap, PETSC_FALSE));
     PetscCall(VecDot(r, z, &rho));
     rho_real = PetscRealPart(rho);
     PetscCheck(rho_real > 0.0, PetscObjectComm((PetscObject)solver->dm), PETSC_ERR_NOT_CONVERGED,
@@ -3812,7 +3889,7 @@ static PetscErrorCode DeflatedCGSolve(LinearSolverCtx *solver, KSP ksp, Vec rhs,
       converged = PETSC_TRUE;
       break;
     }
-    PetscCall(DeflationApplyProjectedPC(solver, A, pc, r, z, Ap));
+    PetscCall(DeflationApplyProjectedPC(solver, A, pc, r, z, Ap, PETSC_FALSE));
     PetscCall(VecDot(r, z, &rho_new));
     PetscCheck(PetscRealPart(rho_new) > 0.0, PetscObjectComm((PetscObject)solver->dm), PETSC_ERR_NOT_CONVERGED,
                "Deflated CG encountered nonpositive updated preconditioned residual norm %.6e", (double)PetscRealPart(rho_new));
@@ -3975,6 +4052,7 @@ int main(int argc, char **argv)
   PetscLogDouble t_start, t_end, t0, t1, elastic_assembly_time, elastic_solve_time;
 
   PetscCall(PetscInitialize(&argc, &argv, NULL, "Standalone pure PETSc P4 plasticity case\n"));
+  PetscCall(RegisterLogStages());
   PetscCall(PetscTime(&t_start));
   PetscCall(ParseOptions(PETSC_COMM_WORLD, &app));
   PetscCall(SetDDPartitionerDefault(PETSC_COMM_WORLD, &app));
