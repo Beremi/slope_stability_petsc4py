@@ -3,6 +3,7 @@
 
 #include <petscdmplex.h>
 #include <petscksp.h>
+#include <petscsf.h>
 #include <stdlib.h>
 
 static PetscLogStage log_stage_deflation_orthogonalize = -1;
@@ -66,6 +67,7 @@ typedef struct {
   char      pmg_coarse_telescope_mode[32];
   char      pmg_apply_backend[32];
   char      pmg_shell_subcomm_type[32];
+  char      pmg_shell_coarse_layout[32];
   PetscReal pmg_coarse_telescope_ksp_rtol;
   PetscReal pmg_p2_telescope_ksp_rtol;
   PetscInt  pmg_coarse_lu_max_dofs;
@@ -240,6 +242,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscStrncpy(app->pmg_coarse_telescope_mode, "default", sizeof(app->pmg_coarse_telescope_mode)));
   PetscCall(PetscStrncpy(app->pmg_apply_backend, "pcmg", sizeof(app->pmg_apply_backend)));
   PetscCall(PetscStrncpy(app->pmg_shell_subcomm_type, "interlaced", sizeof(app->pmg_shell_subcomm_type)));
+  PetscCall(PetscStrncpy(app->pmg_shell_coarse_layout, "active_layout", sizeof(app->pmg_shell_coarse_layout)));
   app->pmg_coarse_telescope_ksp_rtol   = 1.0e-3;
   app->pmg_p2_telescope_ksp_rtol       = 1.0e-3;
   app->pmg_coarse_lu_max_dofs = 50000;
@@ -307,6 +310,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsInt("-pmg_shell_p2_active_ranks", "Active MPI ranks for the shell V-cycle P2 layout; 0 or >= ranks keeps all ranks active", NULL, app->pmg_shell_p2_active_ranks, &app->pmg_shell_p2_active_ranks, NULL));
   PetscCall(PetscOptionsInt("-pmg_shell_p1_active_ranks", "Active MPI ranks for the shell V-cycle P1 layout; 0 or >= ranks keeps all ranks active", NULL, app->pmg_shell_p1_active_ranks, &app->pmg_shell_p1_active_ranks, NULL));
   PetscCall(PetscOptionsString("-pmg_shell_subcomm_type", "Shell V-cycle active-rank layout: interlaced|contiguous", NULL, app->pmg_shell_subcomm_type, app->pmg_shell_subcomm_type, sizeof(app->pmg_shell_subcomm_type), NULL));
+  PetscCall(PetscOptionsString("-pmg_shell_coarse_layout", "Shell V-cycle coarse layout: active_layout|repartitioned_dm", NULL, app->pmg_shell_coarse_layout, app->pmg_shell_coarse_layout, sizeof(app->pmg_shell_coarse_layout), NULL));
   PetscCall(PetscOptionsBool("-pmg_check_coarse_transfers", "Check PMG P4->P2 and P2->P1 transfer matrices on exact polynomial fields", NULL, app->pmg_check_coarse_transfers, &app->pmg_check_coarse_transfers, NULL));
   PetscCall(PetscOptionsInt("-pmg_lag_preconditioner", "Rebuild persistent PMG preconditioner every N Newton linear solves; 1 rebuilds every solve", NULL, app->pmg_lag_preconditioner, &app->pmg_lag_preconditioner, NULL));
   PetscCall(PetscOptionsString("-bddc_graph", "topology|petsc", NULL, app->bddc_graph, app->bddc_graph, sizeof(app->bddc_graph), NULL));
@@ -353,6 +357,11 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCheck(app->pmg_shell_p2_active_ranks >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_shell_p2_active_ranks must be nonnegative");
   PetscCheck(app->pmg_shell_p1_active_ranks >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_shell_p1_active_ranks must be nonnegative");
   PetscCheck(app->pmg_lag_preconditioner >= 1, comm, PETSC_ERR_ARG_OUTOFRANGE, "-pmg_lag_preconditioner must be >= 1");
+  PetscCall(PetscStrcasecmp(app->pmg_shell_coarse_layout, "active_layout", &flg));
+  if (!flg) {
+    PetscCall(PetscStrcasecmp(app->pmg_shell_coarse_layout, "repartitioned_dm", &flg));
+    PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-pmg_shell_coarse_layout must be active_layout or repartitioned_dm");
+  }
   PetscCall(PetscStrcasecmp(app->pmg_apply_backend, "pcmg", &flg));
   if (!flg) {
     PetscCall(PMGApplyBackendIsShell(app, &flg));
@@ -1669,6 +1678,201 @@ static PetscErrorCode CreateSameMeshLevelDM(DM fine_dm, P4Basis *basis, const Ap
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode PMGParseSubcommType(MPI_Comm comm, const char name[], PetscSubcommType *type);
+static PetscErrorCode PMGResolveActiveRanks(MPI_Comm comm, PetscInt requested_active_ranks, PetscInt *active_ranks, PetscInt *reduction_factor);
+static PetscInt       PMGActiveRankFromOrdinal(PetscInt ordinal, PetscInt active_ranks, PetscInt reduction_factor, PetscSubcommType subcomm_type);
+
+static PetscErrorCode CreateIdentityMigrationMat(DM dm, Mat *M)
+{
+  MPI_Comm        comm = PetscObjectComm((PetscObject)dm);
+  Vec             v = NULL;
+  PetscInt        nlocal, n, start, end;
+  const PetscInt  bs = 1;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMCreateGlobalVector(dm, &v));
+  PetscCall(VecGetLocalSize(v, &nlocal));
+  PetscCall(VecGetSize(v, &n));
+  PetscCall(VecGetOwnershipRange(v, &start, &end));
+  PetscCall(MatCreateAIJ(comm, nlocal, nlocal, n, n, bs, NULL, 0, NULL, M));
+  for (PetscInt row = start; row < end; ++row) PetscCall(MatSetValue(*M, row, row, 1.0, INSERT_VALUES));
+  PetscCall(MatAssemblyBegin(*M, MAT_FINAL_ASSEMBLY));
+  PetscCall(MatAssemblyEnd(*M, MAT_FINAL_ASSEMBLY));
+  PetscCall(VecDestroy(&v));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CreateGlobalMigrationMat(DM old_dm, DM new_dm, PetscSF sfMigration, Mat *M)
+{
+  MPI_Comm             comm = PetscObjectComm((PetscObject)new_dm);
+  PetscSection         oldLocal = NULL, newLocal = NULL, oldGlobal = NULL, newGlobal = NULL;
+  PetscSF              oldPointSF = NULL, newPointSF = NULL, sfByLeaf = NULL;
+  PetscInt            *rootOffsets = NULL, *leafOffsets = NULL, *oldStarts = NULL;
+  PetscBool           *seenRows = NULL;
+  Vec                  vold = NULL, vnew = NULL;
+  PetscInt             oldLocalSize, oldGlobalSize, oldStart, oldEnd, newLocalSize, newGlobalSize, newStart, newEnd;
+  PetscInt             rpStart, rpEnd, lpStart, lpEnd;
+  PetscMPIInt          size;
+  PetscInt             nroots, nleaves;
+  const PetscInt      *localPoints = NULL;
+  const PetscSFNode   *remotePoints = NULL;
+  PetscSFNode         *remoteCopy = NULL;
+
+  PetscFunctionBeginUser;
+  if (!sfMigration) {
+    PetscCall(CreateIdentityMigrationMat(old_dm, M));
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  PetscCall(DMGetLocalSection(old_dm, &oldLocal));
+  PetscCall(DMGetLocalSection(new_dm, &newLocal));
+  PetscCall(DMGetPointSF(old_dm, &oldPointSF));
+  PetscCall(DMGetPointSF(new_dm, &newPointSF));
+  PetscCall(PetscSectionCreateGlobalSection(oldLocal, oldPointSF, PETSC_TRUE, PETSC_FALSE, PETSC_TRUE, &oldGlobal));
+  PetscCall(PetscSectionCreateGlobalSection(newLocal, newPointSF, PETSC_TRUE, PETSC_FALSE, PETSC_TRUE, &newGlobal));
+  PetscCall(PetscSectionGetChart(oldGlobal, &rpStart, &rpEnd));
+  PetscCall(PetscSectionGetChart(newGlobal, &lpStart, &lpEnd));
+  (void)lpStart;
+  (void)lpEnd;
+  PetscCall(PetscSFGetGraph(sfMigration, &nroots, &nleaves, &localPoints, &remotePoints));
+  PetscCall(PetscCalloc1(nroots, &rootOffsets));
+  for (PetscInt p = 0; p < nroots; ++p) rootOffsets[p] = -1;
+  for (PetscInt p = rpStart; p < rpEnd && p < nroots; ++p) PetscCall(PetscSectionGetOffset(oldGlobal, p, &rootOffsets[p]));
+  PetscCall(PetscMalloc1(PetscMax(nleaves, 1), &leafOffsets));
+  PetscCall(PetscMalloc1(PetscMax(nleaves, 1), &remoteCopy));
+  for (PetscInt i = 0; i < nleaves; ++i) remoteCopy[i] = remotePoints[i];
+  PetscCall(PetscSFCreate(comm, &sfByLeaf));
+  PetscCall(PetscSFSetGraph(sfByLeaf, nroots, nleaves, NULL, PETSC_OWN_POINTER, remoteCopy, PETSC_OWN_POINTER));
+  PetscCall(PetscSFBcastBegin(sfByLeaf, MPIU_INT, rootOffsets, leafOffsets, MPI_REPLACE));
+  PetscCall(PetscSFBcastEnd(sfByLeaf, MPIU_INT, rootOffsets, leafOffsets, MPI_REPLACE));
+
+  PetscCall(DMCreateGlobalVector(old_dm, &vold));
+  PetscCall(DMCreateGlobalVector(new_dm, &vnew));
+  PetscCall(VecGetLocalSize(vold, &oldLocalSize));
+  PetscCall(VecGetSize(vold, &oldGlobalSize));
+  PetscCall(VecGetOwnershipRange(vold, &oldStart, &oldEnd));
+  PetscCall(VecGetLocalSize(vnew, &newLocalSize));
+  PetscCall(VecGetSize(vnew, &newGlobalSize));
+  PetscCall(VecGetOwnershipRange(vnew, &newStart, &newEnd));
+  (void)oldEnd;
+  (void)newEnd;
+  PetscCall(PetscMalloc1(size, &oldStarts));
+  PetscCallMPI(MPI_Allgather(&oldStart, 1, MPIU_INT, oldStarts, 1, MPIU_INT, comm));
+  PetscCall(PetscCalloc1(PetscMax(newLocalSize, 1), &seenRows));
+  PetscCall(MatCreateAIJ(comm, newLocalSize, oldLocalSize, newGlobalSize, oldGlobalSize, 1, NULL, 1, NULL, M));
+  for (PetscInt leaf = 0; leaf < nleaves; ++leaf) {
+    const PetscInt point = localPoints ? localPoints[leaf] : leaf;
+    PetscInt       dof, cdof, off, n;
+
+    if (point < 0) continue;
+    PetscCall(PetscSectionGetDof(newGlobal, point, &dof));
+    PetscCall(PetscSectionGetConstraintDof(newGlobal, point, &cdof));
+    PetscCall(PetscSectionGetOffset(newGlobal, point, &off));
+    if (off < 0 || leafOffsets[leaf] < 0) continue;
+    n = dof - cdof;
+    for (PetscInt d = 0; d < n; ++d) {
+      const PetscInt row_local = off + d;
+      const PetscInt row       = newStart + row_local;
+      const PetscInt col       = oldStarts[remotePoints[leaf].rank] + leafOffsets[leaf] + d;
+
+      if (row_local < 0 || row_local >= newLocalSize) continue;
+      if (seenRows[row_local]) continue;
+      seenRows[row_local] = PETSC_TRUE;
+      PetscCall(MatSetValue(*M, row, col, 1.0, INSERT_VALUES));
+    }
+  }
+  PetscCall(MatAssemblyBegin(*M, MAT_FINAL_ASSEMBLY));
+  PetscCall(MatAssemblyEnd(*M, MAT_FINAL_ASSEMBLY));
+  PetscCall(PetscFree(seenRows));
+  PetscCall(PetscFree(oldStarts));
+  PetscCall(PetscFree(leafOffsets));
+  PetscCall(PetscFree(rootOffsets));
+  PetscCall(VecDestroy(&vold));
+  PetscCall(VecDestroy(&vnew));
+  PetscCall(PetscSFDestroy(&sfByLeaf));
+  PetscCall(PetscSectionDestroy(&oldGlobal));
+  PetscCall(PetscSectionDestroy(&newGlobal));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode CreateActiveRepartitionedLevelDM(DM fine_dm, P4Basis *basis, const AppCtx *app, PetscInt requested_active_ranks, const char subcomm_type_name[], PetscInt level, PetscInt degree, DM *level_dm, Mat *old_to_new)
+{
+  MPI_Comm          comm = PetscObjectComm((PetscObject)fine_dm);
+  DM                base = NULL, dist = NULL;
+  PetscPartitioner  part = NULL, old_part = NULL;
+  PetscSF           sfMigration = NULL;
+  PetscSubcommType  subcomm_type;
+  PetscMPIInt       size;
+  PetscInt          active_ranks, reduction_factor;
+  PetscInt          cStart, cEnd, nowned = 0, total_owned = 0, prefix_inclusive = 0, prefix = 0;
+  PetscInt         *sizes = NULL, *offsets = NULL, *used = NULL, *points = NULL;
+  PetscLogDouble    t0, t1;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  PetscCall(PMGParseSubcommType(comm, subcomm_type_name, &subcomm_type));
+  PetscCall(PMGResolveActiveRanks(comm, requested_active_ranks, &active_ranks, &reduction_factor));
+  PetscCall(CreateSameMeshLevelDM(fine_dm, basis, app, &base));
+  PetscCall(DMPlexGetHeightStratum(base, 0, &cStart, &cEnd));
+  nowned = cEnd - cStart;
+  PetscCallMPI(MPI_Allreduce(&nowned, &total_owned, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Scan(&nowned, &prefix_inclusive, 1, MPIU_INT, MPI_SUM, comm));
+  prefix = prefix_inclusive - nowned;
+
+  PetscCall(PetscCalloc3((PetscInt)size, &sizes, (PetscInt)size, &offsets, (PetscInt)size, &used));
+  PetscCall(PetscMalloc1(PetscMax(nowned, 1), &points));
+  for (PetscInt i = 0; i < nowned; ++i) {
+    PetscInt ordinal = total_owned ? (PetscInt)(((PetscInt64)(prefix + i) * (PetscInt64)active_ranks) / (PetscInt64)total_owned) : 0;
+    PetscInt target;
+
+    if (ordinal >= active_ranks) ordinal = active_ranks - 1;
+    target = PMGActiveRankFromOrdinal(ordinal, active_ranks, reduction_factor, subcomm_type);
+    PetscCheck(target >= 0 && target < (PetscInt)size, comm, PETSC_ERR_PLIB, "Invalid active target rank %" PetscInt_FMT, target);
+    sizes[target]++;
+  }
+  for (PetscInt r = 1; r < (PetscInt)size; ++r) offsets[r] = offsets[r - 1] + sizes[r - 1];
+  for (PetscInt i = 0; i < nowned; ++i) {
+    PetscInt ordinal = total_owned ? (PetscInt)(((PetscInt64)(prefix + i) * (PetscInt64)active_ranks) / (PetscInt64)total_owned) : 0;
+    PetscInt target, slot;
+
+    if (ordinal >= active_ranks) ordinal = active_ranks - 1;
+    target = PMGActiveRankFromOrdinal(ordinal, active_ranks, reduction_factor, subcomm_type);
+    slot   = offsets[target] + used[target]++;
+    points[slot] = i;
+  }
+
+  PetscCall(DMPlexGetPartitioner(base, &old_part));
+  if (old_part) PetscCall(PetscObjectReference((PetscObject)old_part));
+  PetscCall(PetscPartitionerCreate(comm, &part));
+  PetscCall(PetscPartitionerSetType(part, PETSCPARTITIONERSHELL));
+  PetscCall(PetscPartitionerShellSetPartition(part, (PetscInt)size, sizes, points));
+  PetscCall(DMPlexSetPartitioner(base, part));
+  PetscCall(PetscTime(&t0));
+  PetscCall(DMPlexDistribute(base, 0, old_to_new ? &sfMigration : NULL, &dist));
+  PetscCall(PetscTime(&t1));
+  if (old_part) PetscCall(DMPlexSetPartitioner(base, old_part));
+  PetscCall(PetscPartitionerDestroy(&old_part));
+  PetscCall(PetscPartitionerDestroy(&part));
+  PetscCall(PetscFree3(sizes, offsets, used));
+  PetscCall(PetscFree(points));
+
+  if (dist) {
+    if (old_to_new) PetscCall(CreateGlobalMigrationMat(base, dist, sfMigration, old_to_new));
+    PetscCall(DMDestroy(&base));
+    base = dist;
+  } else if (old_to_new) {
+    PetscCall(CreateIdentityMigrationMat(base, old_to_new));
+  }
+  PetscCall(PetscSFDestroy(&sfMigration));
+  PetscCall(DMGetCoordinatesLocalSetUp(base));
+  PetscCall(DMSetMatType(base, MATAIJ));
+  PetscCall(PetscPrintf(comm,
+                        "PMG_REPARTITIONED_DM_CONFIG level=%" PetscInt_FMT " degree=%" PetscInt_FMT " enabled=true active_ranks=%" PetscInt_FMT " subcomm=%s cells=%" PetscInt_FMT " repartition_time=%.6g\n",
+                        level, degree, active_ranks, subcomm_type_name, total_owned, (double)(t1 - t0)));
+  *level_dm = base;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode BuildInterpolationMatrixWithLayouts(DM fine_dm, P4Basis *fine_basis, DM coarse_dm, P4Basis *coarse_basis,
                                                           PetscInt mat_mlocal, PetscInt mat_nlocal, PetscInt mat_M, PetscInt mat_N, Mat *P)
 {
@@ -2013,6 +2217,39 @@ static PetscErrorCode PMGParseSubcommType(MPI_Comm comm, const char name[], Pets
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode PMGResolveActiveRanks(MPI_Comm comm, PetscInt requested_active_ranks, PetscInt *active_ranks, PetscInt *reduction_factor)
+{
+  PetscMPIInt size;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  if (requested_active_ranks <= 0 || requested_active_ranks >= (PetscInt)size) *active_ranks = (PetscInt)size;
+  else *active_ranks = requested_active_ranks;
+  PetscCheck(*active_ranks > 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "Active-rank count must be positive");
+  PetscCheck((PetscInt)size % *active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
+             "Active-rank count %" PetscInt_FMT " must divide MPI ranks %d", *active_ranks, size);
+  *reduction_factor = (PetscInt)size / *active_ranks;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGIsActiveRank(MPI_Comm comm, PetscInt active_ranks, PetscInt reduction_factor, PetscSubcommType subcomm_type, PetscBool *active)
+{
+  PetscMPIInt rank, size;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_rank(comm, &rank));
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  if (active_ranks == (PetscInt)size) *active = PETSC_TRUE;
+  else if (subcomm_type == PETSC_SUBCOMM_CONTIGUOUS) *active = (PetscBool)(rank < active_ranks);
+  else *active = (PetscBool)(rank % reduction_factor == 0);
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscInt PMGActiveRankFromOrdinal(PetscInt ordinal, PetscInt active_ranks, PetscInt reduction_factor, PetscSubcommType subcomm_type)
+{
+  return subcomm_type == PETSC_SUBCOMM_CONTIGUOUS ? ordinal : ordinal * reduction_factor;
+}
+
 typedef struct {
   PetscBool       active;
   PetscInt        requested_active_ranks;
@@ -2052,17 +2289,9 @@ static PetscErrorCode PMGActiveLayoutCreate(MPI_Comm comm, Vec original_template
   PetscCall(VecGetSize(original_template, &layout->global_dofs));
   PetscCall(VecGetBlockSize(original_template, &layout->block_size));
   PetscCall(VecGetType(original_template, &vec_type));
-
-  if (requested_active_ranks <= 0 || requested_active_ranks >= (PetscInt)size) layout->active_ranks = (PetscInt)size;
-  else layout->active_ranks = requested_active_ranks;
-  PetscCheck(layout->active_ranks > 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "Active-rank count must be positive");
-  PetscCheck((PetscInt)size % layout->active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
-             "Active-rank count %" PetscInt_FMT " must divide MPI ranks %d", layout->active_ranks, size);
+  PetscCall(PMGResolveActiveRanks(comm, requested_active_ranks, &layout->active_ranks, &layout->reduction_factor));
   layout->inactive_ranks   = (PetscInt)size - layout->active_ranks;
-  layout->reduction_factor = (PetscInt)size / layout->active_ranks;
-  if (layout->active_ranks == (PetscInt)size) layout->active = PETSC_TRUE;
-  else if (layout->subcomm_type == PETSC_SUBCOMM_CONTIGUOUS) layout->active = (PetscBool)(rank < layout->active_ranks);
-  else layout->active = (PetscBool)(rank % layout->reduction_factor == 0);
+  PetscCall(PMGIsActiveRank(comm, layout->active_ranks, layout->reduction_factor, layout->subcomm_type, &layout->active));
 
   PetscCallMPI(MPI_Comm_split(comm, layout->active ? 0 : MPI_UNDEFINED, rank, &layout->subcomm));
   if (layout->active) {
@@ -2087,6 +2316,54 @@ static PetscErrorCode PMGActiveLayoutCreate(MPI_Comm comm, Vec original_template
   PetscCall(ISCreateStride(comm, layout->local_dofs, layout->ownership_start, 1, &layout->isrow));
   PetscCall(ISSetBlockSize(layout->isrow, layout->block_size));
   PetscCall(VecScatterCreate(original_template, layout->isrow, layout->full_template, NULL, &layout->original_to_active));
+
+  local_for_min = layout->active ? layout->local_dofs : PETSC_MAX_INT;
+  PetscCallMPI(MPI_Allreduce(&local_for_min, &layout->local_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&layout->local_dofs, &layout->local_max, 1, MPIU_INT, MPI_MAX, comm));
+  if (layout->local_min == PETSC_MAX_INT) layout->local_min = 0;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PMGActiveLayoutCreateFromOwnedVector(MPI_Comm comm, Vec active_template, PetscInt requested_active_ranks, const char subcomm_type_name[], PMGActiveLayout *layout)
+{
+  PetscMPIInt rank, size;
+  VecType     vec_type = NULL;
+  PetscInt    local_for_min;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscMemzero(layout, sizeof(*layout)));
+  layout->subcomm = MPI_COMM_NULL;
+  layout->requested_active_ranks = requested_active_ranks;
+  PetscCallMPI(MPI_Comm_rank(comm, &rank));
+  PetscCallMPI(MPI_Comm_size(comm, &size));
+  PetscCall(PMGParseSubcommType(comm, subcomm_type_name, &layout->subcomm_type));
+  PetscCall(PetscStrncpy(layout->subcomm_type_name, subcomm_type_name, sizeof(layout->subcomm_type_name)));
+  PetscCall(VecGetSize(active_template, &layout->global_dofs));
+  PetscCall(VecGetBlockSize(active_template, &layout->block_size));
+  PetscCall(VecGetType(active_template, &vec_type));
+  PetscCall(PMGResolveActiveRanks(comm, requested_active_ranks, &layout->active_ranks, &layout->reduction_factor));
+  layout->inactive_ranks = (PetscInt)size - layout->active_ranks;
+  PetscCall(PMGIsActiveRank(comm, layout->active_ranks, layout->reduction_factor, layout->subcomm_type, &layout->active));
+  PetscCall(VecGetLocalSize(active_template, &layout->local_dofs));
+  PetscCall(VecGetOwnershipRange(active_template, &layout->ownership_start, &layout->ownership_end));
+  PetscCheck(layout->active || layout->local_dofs == 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+             "Repartitioned active DM gave inactive rank %d %" PetscInt_FMT " local dofs", rank, layout->local_dofs);
+
+  PetscCallMPI(MPI_Comm_split(comm, layout->active ? 0 : MPI_UNDEFINED, rank, &layout->subcomm));
+  if (layout->active) {
+    PetscCall(VecCreate(layout->subcomm, &layout->sub_template));
+    PetscCall(VecSetSizes(layout->sub_template, layout->local_dofs, layout->global_dofs));
+    PetscCall(VecSetBlockSize(layout->sub_template, layout->block_size));
+    if (vec_type) PetscCall(VecSetType(layout->sub_template, vec_type));
+    PetscCall(VecSetFromOptions(layout->sub_template));
+  } else {
+    layout->sub_template = NULL;
+  }
+
+  PetscCall(VecDuplicate(active_template, &layout->full_template));
+  PetscCall(ISCreateStride(comm, layout->local_dofs, layout->ownership_start, 1, &layout->isrow));
+  PetscCall(ISSetBlockSize(layout->isrow, layout->block_size));
+  PetscCall(VecScatterCreate(active_template, layout->isrow, layout->full_template, NULL, &layout->original_to_active));
 
   local_for_min = layout->active ? layout->local_dofs : PETSC_MAX_INT;
   PetscCallMPI(MPI_Allreduce(&local_for_min, &layout->local_min, 1, MPIU_INT, MPI_MIN, comm));
@@ -2640,14 +2917,23 @@ static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat
   Vec       fine_vec = NULL, p2_vec = NULL, p1_vec = NULL;
   PetscInt  fine_local, fine_global;
   char      prefix4[128];
+  PetscBool use_repartitioned_dm = PETSC_FALSE;
+  Mat       M2_active = NULL;
 
   PetscFunctionBeginUser;
+  PetscCall(PetscStrcasecmp(ctx->app->pmg_shell_coarse_layout, "repartitioned_dm", &use_repartitioned_dm));
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 1, &ctx->p1_basis));
   ctx->p1_basis_created = PETSC_TRUE;
   PetscCall(P4BasisCreateDegree(PETSC_COMM_SELF, 2, &ctx->p2_basis));
   ctx->p2_basis_created = PETSC_TRUE;
-  PetscCall(CreateSameMeshLevelDM(ctx->dm, &ctx->p1_basis, ctx->app, &ctx->dm_p1));
-  PetscCall(CreateSameMeshLevelDM(ctx->dm, &ctx->p2_basis, ctx->app, &ctx->dm_p2));
+  if (use_repartitioned_dm) {
+    PetscCall(CreateActiveRepartitionedLevelDM(ctx->dm, &ctx->p1_basis, ctx->app, ctx->app->pmg_shell_p1_active_ranks, ctx->app->pmg_shell_subcomm_type, 0, 1, &ctx->dm_p1, NULL));
+    PetscCall(CreateActiveRepartitionedLevelDM(ctx->dm, &ctx->p2_basis, ctx->app, ctx->app->pmg_shell_p2_active_ranks, ctx->app->pmg_shell_subcomm_type, 1, 2, &ctx->dm_p2, &M2_active));
+  } else {
+    PetscCall(CreateSameMeshLevelDM(ctx->dm, &ctx->p1_basis, ctx->app, &ctx->dm_p1));
+    PetscCall(CreateSameMeshLevelDM(ctx->dm, &ctx->p2_basis, ctx->app, &ctx->dm_p2));
+    PetscCall(PetscPrintf(comm, "PMG_REPARTITIONED_DM_CONFIG enabled=false mode=active_layout\n"));
+  }
 
   PetscCall(ReportPMGLevelDofs(ctx->dm_p1, 0, 1));
   PetscCall(ReportPMGLevelDofs(ctx->dm_p2, 1, 2));
@@ -2656,18 +2942,63 @@ static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat
   PetscCall(DMCreateGlobalVector(ctx->dm, &fine_vec));
   PetscCall(DMCreateGlobalVector(ctx->dm_p2, &p2_vec));
   PetscCall(DMCreateGlobalVector(ctx->dm_p1, &p1_vec));
-  PetscCall(PMGActiveLayoutCreate(comm, p2_vec, ctx->app->pmg_shell_p2_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p2_layout));
-  PetscCall(PMGActiveLayoutCreate(comm, p1_vec, ctx->app->pmg_shell_p1_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p1_layout));
+  if (use_repartitioned_dm) {
+    PetscCall(PMGActiveLayoutCreateFromOwnedVector(comm, p2_vec, ctx->app->pmg_shell_p2_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p2_layout));
+    PetscCall(PMGActiveLayoutCreateFromOwnedVector(comm, p1_vec, ctx->app->pmg_shell_p1_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p1_layout));
+  } else {
+    PetscCall(PMGActiveLayoutCreate(comm, p2_vec, ctx->app->pmg_shell_p2_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p2_layout));
+    PetscCall(PMGActiveLayoutCreate(comm, p1_vec, ctx->app->pmg_shell_p1_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p1_layout));
+  }
   PetscCall(PMGShellReportFineLevel(ctx->dm));
   PetscCall(PMGShellReportActiveLevel(comm, 1, 2, &ctx->p2_layout));
   PetscCall(PMGShellReportActiveLevel(comm, 0, 1, &ctx->p1_layout));
 
   PetscCall(VecGetLocalSize(fine_vec, &fine_local));
   PetscCall(VecGetSize(fine_vec, &fine_global));
-  PetscCall(BuildInterpolationMatrixWithLayouts(ctx->dm_p2, &ctx->p2_basis, ctx->dm_p1, &ctx->p1_basis, ctx->p2_layout.local_dofs,
-                                                ctx->p1_layout.local_dofs, ctx->p2_layout.global_dofs, ctx->p1_layout.global_dofs, &ctx->P21));
-  PetscCall(BuildInterpolationMatrixWithLayouts(ctx->dm, ctx->actx->basis, ctx->dm_p2, &ctx->p2_basis, fine_local, ctx->p2_layout.local_dofs,
-                                                fine_global, ctx->p2_layout.global_dofs, &ctx->P42));
+  if (use_repartitioned_dm) {
+    DM             dm_p4_repart = NULL, dm_p2_for_p1 = NULL;
+    Mat            M4 = NULL, M2_p1 = NULL, P42_repart = NULL, P21_repart = NULL, p2_map = NULL;
+    Vec            p4_repart_vec = NULL, p2_for_p1_vec = NULL;
+    PetscInt       p4_repart_local, p4_repart_global, p2_for_p1_local, p2_for_p1_global;
+
+    PetscCall(PetscPrintf(comm, "PMG_REPARTITIONED_TRANSFER_CONFIG enabled=true builder=migration_sf_galerkin_transfer\n"));
+    PetscCall(CreateActiveRepartitionedLevelDM(ctx->dm, ctx->actx->basis, ctx->app, ctx->p2_layout.active_ranks, ctx->app->pmg_shell_subcomm_type, 2, 4, &dm_p4_repart, &M4));
+    PetscCall(DMCreateGlobalVector(dm_p4_repart, &p4_repart_vec));
+    PetscCall(VecGetLocalSize(p4_repart_vec, &p4_repart_local));
+    PetscCall(VecGetSize(p4_repart_vec, &p4_repart_global));
+    PetscCall(BuildInterpolationMatrixWithLayouts(dm_p4_repart, ctx->actx->basis, ctx->dm_p2, &ctx->p2_basis, p4_repart_local,
+                                                  ctx->p2_layout.local_dofs, p4_repart_global, ctx->p2_layout.global_dofs, &P42_repart));
+    PetscCall(MatTransposeMatMult(M4, P42_repart, MAT_INITIAL_MATRIX, PETSC_DETERMINE, &ctx->P42));
+
+    if (ctx->p2_layout.active_ranks == ctx->p1_layout.active_ranks) {
+      PetscCall(BuildInterpolationMatrixWithLayouts(ctx->dm_p2, &ctx->p2_basis, ctx->dm_p1, &ctx->p1_basis, ctx->p2_layout.local_dofs,
+                                                    ctx->p1_layout.local_dofs, ctx->p2_layout.global_dofs, ctx->p1_layout.global_dofs, &ctx->P21));
+    } else {
+      PetscCall(CreateActiveRepartitionedLevelDM(ctx->dm, &ctx->p2_basis, ctx->app, ctx->p1_layout.active_ranks, ctx->app->pmg_shell_subcomm_type, 1, 2, &dm_p2_for_p1, &M2_p1));
+      PetscCall(DMCreateGlobalVector(dm_p2_for_p1, &p2_for_p1_vec));
+      PetscCall(VecGetLocalSize(p2_for_p1_vec, &p2_for_p1_local));
+      PetscCall(VecGetSize(p2_for_p1_vec, &p2_for_p1_global));
+      PetscCall(BuildInterpolationMatrixWithLayouts(dm_p2_for_p1, &ctx->p2_basis, ctx->dm_p1, &ctx->p1_basis, p2_for_p1_local,
+                                                    ctx->p1_layout.local_dofs, p2_for_p1_global, ctx->p1_layout.global_dofs, &P21_repart));
+      PetscCall(MatMatTransposeMult(M2_active, M2_p1, MAT_INITIAL_MATRIX, PETSC_DETERMINE, &p2_map));
+      PetscCall(MatMatMult(p2_map, P21_repart, MAT_INITIAL_MATRIX, PETSC_DETERMINE, &ctx->P21));
+    }
+
+    PetscCall(VecDestroy(&p4_repart_vec));
+    PetscCall(VecDestroy(&p2_for_p1_vec));
+    PetscCall(MatDestroy(&M4));
+    PetscCall(MatDestroy(&M2_p1));
+    PetscCall(MatDestroy(&P42_repart));
+    PetscCall(MatDestroy(&P21_repart));
+    PetscCall(MatDestroy(&p2_map));
+    PetscCall(DMDestroy(&dm_p4_repart));
+    PetscCall(DMDestroy(&dm_p2_for_p1));
+  } else {
+    PetscCall(BuildInterpolationMatrixWithLayouts(ctx->dm_p2, &ctx->p2_basis, ctx->dm_p1, &ctx->p1_basis, ctx->p2_layout.local_dofs,
+                                                  ctx->p1_layout.local_dofs, ctx->p2_layout.global_dofs, ctx->p1_layout.global_dofs, &ctx->P21));
+    PetscCall(BuildInterpolationMatrixWithLayouts(ctx->dm, ctx->actx->basis, ctx->dm_p2, &ctx->p2_basis, fine_local, ctx->p2_layout.local_dofs,
+                                                  fine_global, ctx->p2_layout.global_dofs, &ctx->P42));
+  }
   PetscCall(PetscPrintf(comm,
                         "PMG_COARSE_OPERATOR_CONFIG type=galerkin_shell_vcycle p1_quadrature_points=%" PetscInt_FMT " p2_quadrature_points=%" PetscInt_FMT "\n",
                         ctx->p1_basis.n_qp, ctx->p2_basis.n_qp));
@@ -2712,6 +3043,7 @@ static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat
   PetscCall(VecDestroy(&fine_vec));
   PetscCall(VecDestroy(&p2_vec));
   PetscCall(VecDestroy(&p1_vec));
+  PetscCall(MatDestroy(&M2_active));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 

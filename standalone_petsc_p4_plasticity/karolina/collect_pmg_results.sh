@@ -96,7 +96,7 @@ join_diagnostics() {
 }
 
 {
-  echo "job_id,run_label,ranks,nodes,tasks_per_node,partition,qos,state,exit_code,elapsed,maxrss,averss,maxvmsize,maxrss_gib_per_rank,averss_gib_per_rank,approx_total_averss_gib,linear_rtol,ksp_max_it,deflation,pmg_apply_backend,pmg_p1_active_ranks,pmg_p1_subcomm,pmg_redundant_group_size,pmg_p2_active_ranks,pmg_shell_p2_active_ranks,pmg_shell_p1_active_ranks,pmg_shell_subcomm_type,pmg_lag_preconditioner,global_dofs,elastic_its,newton_its,newton_linear_its,total_linear_its,elastic_assembly_time,elastic_solve_time,newton_assembly_time,newton_solve_time,wall_time,final_rel,deflation_basis_cols,deflation_orthogonalization_time,deflation_coarse_initial_time,deflation_pc_apply_time,deflation_projector_time,PCApply,KSPSolve,MatMult,VecScatterEnd,VecMDot,KSPGMRESOrthog,MatPtAPNumeric,MatPtAPSymbolic,PCSetUp,pmg_diagnostics,result_line,diagnostics,log"
+  echo "job_id,run_label,ranks,nodes,tasks_per_node,partition,qos,state,exit_code,elapsed,maxrss,averss,maxvmsize,maxrss_gib_per_rank,averss_gib_per_rank,approx_total_averss_gib,linear_rtol,ksp_max_it,deflation,pmg_apply_backend,pmg_p1_active_ranks,pmg_p1_subcomm,pmg_redundant_group_size,pmg_p2_active_ranks,pmg_shell_p2_active_ranks,pmg_shell_p1_active_ranks,pmg_shell_subcomm_type,pmg_shell_coarse_layout,pmg_lag_preconditioner,global_dofs,elastic_its,newton_its,newton_linear_its,total_linear_its,elastic_assembly_time,elastic_solve_time,newton_assembly_time,newton_solve_time,wall_time,final_rel,deflation_basis_cols,deflation_orthogonalization_time,deflation_coarse_initial_time,deflation_pc_apply_time,deflation_projector_time,PCApply,KSPSolve,MatMult,VecScatterEnd,VecMDot,KSPGMRESOrthog,MatPtAPNumeric,MatPtAPSymbolic,PCSetUp,pmg_diagnostics,result_line,diagnostics,log"
   find "$RESULTS_DIR" -mindepth 1 -maxdepth 1 -type d | sort | while read -r dir; do
     env_file="$dir/job.env"
     result_file="$dir/result_line.txt"
@@ -166,6 +166,7 @@ join_diagnostics() {
     csv_escape "$(env_value "$env_file" PMG_SHELL_P2_ACTIVE_RANKS)"; printf ','
     csv_escape "$(env_value "$env_file" PMG_SHELL_P1_ACTIVE_RANKS)"; printf ','
     csv_escape "$(env_value "$env_file" PMG_SHELL_SUBCOMM_TYPE)"; printf ','
+    csv_escape "$(env_value "$env_file" PMG_SHELL_COARSE_LAYOUT)"; printf ','
     csv_escape "$(env_value "$env_file" PMG_LAG_PRECONDITIONER)"; printf ','
     csv_escape "$(result_value "$result_line" global_dofs)"; printf ','
     csv_escape "$(result_value "$result_line" elastic_its)"; printf ','

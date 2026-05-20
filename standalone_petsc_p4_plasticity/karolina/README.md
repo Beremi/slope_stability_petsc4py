@@ -61,6 +61,7 @@ INCLUDE_SHELL=1 \
 SHELL_P2_ACTIVE_RANKS_LIST="64 128" \
 SHELL_P1_ACTIVE_RANKS_LIST="32 64" \
 SHELL_SUBCOMM_TYPES="interlaced contiguous" \
+SHELL_COARSE_LAYOUTS="active_layout repartitioned_dm" \
 ./submit_pmg_scaling.sh
 ```
 
@@ -80,7 +81,9 @@ PARTITION=qcpu_exp TIME_LIMIT=00:30:00 ./submit_pmg_scaling.sh
 
 The shell V-cycle backend is opt-in and uses
 `options/pmg_shell_vcycle.opts`. For the first true coarse-level scaling
-batch, run only the shell variants against the already-known best baseline:
+batch, run only the shell variants against the already-known best baseline.
+`active_layout` is the current shell baseline; `repartitioned_dm` switches to
+the real repartitioned coarse-DM/operator experiment:
 
 ```bash
 PARTITION=qcpu_exp \
@@ -89,12 +92,18 @@ INCLUDE_TELESCOPE=0 \
 INCLUDE_REDUNDANT=0 \
 INCLUDE_SHELL=1 \
 NODE_COUNTS="1 2" \
-DEFLATION_LIST="false true" \
-SHELL_P2_ACTIVE_RANKS_LIST="64 128" \
-SHELL_P1_ACTIVE_RANKS_LIST="32 64" \
-SHELL_SUBCOMM_TYPES="interlaced contiguous" \
+DEFLATION_LIST=true \
+LINEAR_RTOL=1e-1 \
+KSP_MAX_IT=200 \
+SHELL_P2_ACTIVE_RANKS_LIST="64" \
+SHELL_P1_ACTIVE_RANKS_LIST="32" \
+SHELL_SUBCOMM_TYPES="interlaced" \
+SHELL_COARSE_LAYOUTS="active_layout repartitioned_dm" \
 ./submit_pmg_scaling.sh
 ```
+
+If that first four-job comparison is stable, repeat the same command with
+`SHELL_P2_ACTIVE_RANKS_LIST="128"` to test the wider P2 active set.
 
 For the best `1e-1` profile follow-up at tighter tolerance, narrow the lists
 explicitly:

@@ -80,6 +80,7 @@ metadata="$RESULT_DIR/job.env"
   echo "PMG_SHELL_P2_ACTIVE_RANKS=${PMG_SHELL_P2_ACTIVE_RANKS:-}"
   echo "PMG_SHELL_P1_ACTIVE_RANKS=${PMG_SHELL_P1_ACTIVE_RANKS:-}"
   echo "PMG_SHELL_SUBCOMM_TYPE=${PMG_SHELL_SUBCOMM_TYPE:-}"
+  echo "PMG_SHELL_COARSE_LAYOUT=${PMG_SHELL_COARSE_LAYOUT:-}"
   echo "PMG_LAG_PRECONDITIONER=${PMG_LAG_PRECONDITIONER:-1}"
   echo "START_TIME=$(date --iso-8601=seconds)"
 } | tee "$metadata"
@@ -134,6 +135,9 @@ if [[ -n "${PMG_SHELL_P1_ACTIVE_RANKS:-}" ]]; then
 fi
 if [[ -n "${PMG_SHELL_SUBCOMM_TYPE:-}" ]]; then
   BASE_ARGS+=(-pmg_shell_subcomm_type "$PMG_SHELL_SUBCOMM_TYPE")
+fi
+if [[ -n "${PMG_SHELL_COARSE_LAYOUT:-}" ]]; then
+  BASE_ARGS+=(-pmg_shell_coarse_layout "$PMG_SHELL_COARSE_LAYOUT")
 fi
 if [[ "${LOG_VIEW:-1}" == "1" ]]; then
   BASE_ARGS+=(-log_view)
