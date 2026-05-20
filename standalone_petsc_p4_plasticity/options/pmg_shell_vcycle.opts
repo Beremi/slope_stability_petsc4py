@@ -1,6 +1,7 @@
 -pc_variant pmg
 -pmg_apply_backend shell_vcycle
 -ksp_type fgmres
+-ksp_norm_type unpreconditioned
 -dm_plex_partition_balance true
 -pmg_coarse_pc_type gamg
 -pmg_coarse_lu_max_dofs 50000
@@ -17,5 +18,7 @@
 -pmg_smoother_ksp_type chebyshev
 -pmg_smoother_pc_type jacobi
 -pmg_smoother_max_it 2
--linear_rtol 1.0e-3
+-deflation true
+-linear_rtol 1.0e-1
+-ksp_max_it 200
 -ksp_converged_reason

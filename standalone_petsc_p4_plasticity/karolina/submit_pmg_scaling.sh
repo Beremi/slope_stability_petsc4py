@@ -8,25 +8,24 @@ ACCOUNT="${ACCOUNT:-fta-26-40}"
 QOS="${QOS:-3571_6328}"
 PARTITION="${PARTITION:-qcpu_exp}"
 NODE_CORES="${NODE_CORES:-128}"
-TIME_LIMIT="${TIME_LIMIT:-00:30:00}"
+TIME_LIMIT="${TIME_LIMIT:-00:45:00}"
 NODE_COUNTS="${NODE_COUNTS:-1 2}"
 ACTIVE_RANKS_LIST="${ACTIVE_RANKS_LIST:-16 32 64}"
 SUBCOMM_TYPES="${SUBCOMM_TYPES:-contiguous interlaced}"
-DEFLATION_LIST="${DEFLATION_LIST:-false true}"
+DEFLATION_LIST="${DEFLATION_LIST:-true}"
 REDUNDANT_GROUP_SIZES="${REDUNDANT_GROUP_SIZES:-16 32 64}"
-SHELL_P2_ACTIVE_RANKS_LIST="${SHELL_P2_ACTIVE_RANKS_LIST:-64 128}"
-SHELL_P1_ACTIVE_RANKS_LIST="${SHELL_P1_ACTIVE_RANKS_LIST:-32 64}"
-SHELL_SUBCOMM_TYPES="${SHELL_SUBCOMM_TYPES:-interlaced contiguous}"
-SHELL_COARSE_LAYOUTS="${SHELL_COARSE_LAYOUTS:-active_layout}"
-INCLUDE_TELESCOPE="${INCLUDE_TELESCOPE:-1}"
-INCLUDE_REDUNDANT="${INCLUDE_REDUNDANT:-1}"
-INCLUDE_SHELL="${INCLUDE_SHELL:-0}"
+SHELL_P2_ACTIVE_RANKS_LIST="${SHELL_P2_ACTIVE_RANKS_LIST:-64}"
+SHELL_P1_ACTIVE_RANKS_LIST="${SHELL_P1_ACTIVE_RANKS_LIST:-32}"
+SHELL_SUBCOMM_TYPES="${SHELL_SUBCOMM_TYPES:-interlaced}"
+INCLUDE_TELESCOPE="${INCLUDE_TELESCOPE:-0}"
+INCLUDE_REDUNDANT="${INCLUDE_REDUNDANT:-0}"
+INCLUDE_SHELL="${INCLUDE_SHELL:-1}"
 RUN_ROOT="${RUN_ROOT:-$SCRIPT_DIR/runs/pmg_plasticity_$(date +%Y%m%d_%H%M%S)}"
 
 mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/results"
 
 manifest="$RUN_ROOT/submitted_pmg_jobs.csv"
-echo "job_id,profile,ranks,nodes,tasks_per_node,active_ranks,subcomm_type,redundant_group_size,shell_p2_active_ranks,shell_p1_active_ranks,shell_subcomm_type,shell_coarse_layout,deflation,lag,linear_rtol,ksp_max_it,partition,qos,time_limit,run_label" >"$manifest"
+echo "job_id,profile,ranks,nodes,tasks_per_node,active_ranks,subcomm_type,redundant_group_size,shell_p2_active_ranks,shell_p1_active_ranks,shell_subcomm_type,deflation,lag,linear_rtol,ksp_max_it,partition,qos,time_limit,run_label" >"$manifest"
 
 echo "RUN_ROOT=$RUN_ROOT"
 echo "ACCOUNT=$ACCOUNT QOS=$QOS PARTITION=$PARTITION NODE_CORES=$NODE_CORES TIME_LIMIT=$TIME_LIMIT"
@@ -38,7 +37,6 @@ echo "REDUNDANT_GROUP_SIZES=$REDUNDANT_GROUP_SIZES"
 echo "SHELL_P2_ACTIVE_RANKS_LIST=$SHELL_P2_ACTIVE_RANKS_LIST"
 echo "SHELL_P1_ACTIVE_RANKS_LIST=$SHELL_P1_ACTIVE_RANKS_LIST"
 echo "SHELL_SUBCOMM_TYPES=$SHELL_SUBCOMM_TYPES"
-echo "SHELL_COARSE_LAYOUTS=$SHELL_COARSE_LAYOUTS"
 echo "LINEAR_RTOL=${LINEAR_RTOL:-1e-1} KSP_MAX_IT=${KSP_MAX_IT:-200} PMG_LAG_PRECONDITIONER=${PMG_LAG_PRECONDITIONER:-1}"
 
 submit_one() {
@@ -51,7 +49,6 @@ submit_one() {
   local shell_p2="${7:-}"
   local shell_p1="${8:-}"
   local shell_subcomm="${9:-}"
-  local shell_layout="${10:-active_layout}"
   local ranks tasks_per_node job_name run_label profile_options_file profile_backend
 
   ranks=$(( nodes * NODE_CORES ))
@@ -80,15 +77,8 @@ submit_one() {
       echo "ERROR: ranks=$ranks must be divisible by shell p2=$shell_p2 and p1=$shell_p1" >&2
       exit 2
     fi
-    case "$shell_layout" in
-      active_layout|repartitioned_dm) ;;
-      *) echo "ERROR: shell coarse layout must be active_layout or repartitioned_dm, got $shell_layout" >&2; exit 2 ;;
-    esac
-    run_label+="_p2a${shell_p2}_p1a${shell_p1}_${shell_subcomm}_${shell_layout}"
+    run_label+="_p2a${shell_p2}_p1a${shell_p1}_${shell_subcomm}"
     profile_options_file="${SHELL_OPTIONS_FILE:-options/pmg_shell_vcycle.opts}"
-    if [[ "$shell_layout" == "repartitioned_dm" && -z "${SHELL_OPTIONS_FILE:-}" ]]; then
-      profile_options_file="${SHELL_REPARTITIONED_OPTIONS_FILE:-options/pmg_shell_repartitioned.opts}"
-    fi
     profile_backend="shell_vcycle"
   else
     echo "ERROR: unknown profile=$profile" >&2
@@ -139,7 +129,6 @@ submit_one() {
       PMG_SHELL_P2_ACTIVE_RANKS="$shell_p2"
       PMG_SHELL_P1_ACTIVE_RANKS="$shell_p1"
       PMG_SHELL_SUBCOMM_TYPE="$shell_subcomm"
-      PMG_SHELL_COARSE_LAYOUT="$shell_layout"
     )
   fi
 
@@ -172,13 +161,13 @@ submit_one() {
     printf 'DRY_RUN '
     printf '%q ' "${cmd[@]}"
     printf '\n'
-    echo "DRY_RUN,$profile,$ranks,$nodes,$tasks_per_node,$active,$subcomm,$group_size,$shell_p2,$shell_p1,$shell_subcomm,$shell_layout,$deflation,${PMG_LAG_PRECONDITIONER:-1},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
+    echo "DRY_RUN,$profile,$ranks,$nodes,$tasks_per_node,$active,$subcomm,$group_size,$shell_p2,$shell_p1,$shell_subcomm,$deflation,${PMG_LAG_PRECONDITIONER:-1},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
     return 0
   fi
 
   local job_id
   job_id="$("${cmd[@]}")"
-  echo "$job_id,$profile,$ranks,$nodes,$tasks_per_node,$active,$subcomm,$group_size,$shell_p2,$shell_p1,$shell_subcomm,$shell_layout,$deflation,${PMG_LAG_PRECONDITIONER:-1},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
+  echo "$job_id,$profile,$ranks,$nodes,$tasks_per_node,$active,$subcomm,$group_size,$shell_p2,$shell_p1,$shell_subcomm,$deflation,${PMG_LAG_PRECONDITIONER:-1},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
   echo "submitted job_id=$job_id profile=$profile ranks=$ranks active=$active subcomm=$subcomm group_size=$group_size deflation=$deflation"
 }
 
@@ -224,13 +213,7 @@ for nodes in $NODE_COUNTS; do
               contiguous|interlaced) ;;
               *) echo "ERROR: SHELL_SUBCOMM_TYPES entries must be contiguous or interlaced, got $shell_subcomm" >&2; exit 2 ;;
             esac
-            for shell_layout in $SHELL_COARSE_LAYOUTS; do
-              case "$shell_layout" in
-                active_layout|repartitioned_dm) ;;
-                *) echo "ERROR: SHELL_COARSE_LAYOUTS entries must be active_layout or repartitioned_dm, got $shell_layout" >&2; exit 2 ;;
-              esac
-              submit_one shell "$nodes" 0 none "" "$deflation" "$shell_p2" "$shell_p1" "$shell_subcomm" "$shell_layout"
-            done
+            submit_one shell "$nodes" 0 none "" "$deflation" "$shell_p2" "$shell_p1" "$shell_subcomm"
           done
         done
       done

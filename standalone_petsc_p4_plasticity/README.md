@@ -3,8 +3,9 @@
 This directory is an extracted C/PETSc-only test case for the heterogenous 3D
 P4(L1) slope mesh. It intentionally avoids petsc4py, Python package imports,
 continuation logic, NUMA/GASM experiments, plotting, and repo-local solver
-abstractions. The only multigrid hierarchy kept here is the self-contained
-PETSc `PCMG` P4 -> P2 -> P1 preconditioner used by `-pc_variant pmg`.
+abstractions. The maintained PMG paths are the self-contained same-mesh
+P4 -> P2 -> P1 PETSc `PCMG` preconditioner and the opt-in shell V-cycle backend
+used for the current scaling baseline.
 
 The program reads `data/adaptive_family_a_l1.msh` with `DMPlexCreateFromFile`,
 adds a 3-component degree-4 Lagrange FE space, creates PETSc-owned matrices and
@@ -73,6 +74,7 @@ mpiexec -n 2 ./p4_plasticity \
 - `-linear_rtol 1e-8`
 - `-mesh_bc_mode rollers|base_only|full_sides`
 - `-pc_variant gamg|pmg|bddc|fetidp|none`
+- `-pmg_apply_backend pcmg|shell_vcycle`
 - `-pmg_coarse_pc_type auto|hypre|gamg|lu`
 - `-pmg_coarse_lu_max_dofs 50000`
 - `-pmg_coarse_redundant_group_size 16`
@@ -89,6 +91,9 @@ mpiexec -n 2 ./p4_plasticity \
 - `-pmg_p2_telescope_ksp_rtol 1e-3`
 - `-pmg_p2_telescope_ksp_max_it 50`
 - `-pmg_p2_telescope_pc_type jacobi`
+- `-pmg_shell_p2_active_ranks 64`
+- `-pmg_shell_p1_active_ranks 32`
+- `-pmg_shell_subcomm_type interlaced`
 - `-pmg_smoother_ksp_type chebyshev`
 - `-pmg_smoother_pc_type jacobi`
 - `-pmg_smoother_max_it 2`
@@ -121,6 +126,7 @@ Option files are provided in `options/`:
 ```bash
 mpiexec -n 4 ./p4_plasticity -options_file options/gamg.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/pmg.opts
+mpiexec -n 64 ./p4_plasticity -options_file options/pmg_shell_vcycle.opts
 mpiexec -n 64 ./p4_plasticity -options_file options/pmg_p1_telescope.opts
 mpiexec -n 64 ./p4_plasticity -options_file options/pmg_telescope_final.opts
 mpiexec -n 4 ./p4_plasticity -options_file options/bddc.opts
@@ -139,6 +145,11 @@ Deflation runs print `DEFLATION_ORTHO`, `DEFLATION_COARSE_INITIAL`, and a final
 `DEFLATION_TIMING` line; the `RESULT` line also includes accumulated
 orthonormalization, coarse-initial-correction, PC-apply, and projection timings
 plus call counts.
+
+The current maintained PMG scaling baseline is documented in
+[PMG_SCALING_REPORT.md](PMG_SCALING_REPORT.md). Its Karolina profile is
+`options/pmg_shell_vcycle.opts` with shell V-cycle, P2 active ranks 64, P1 active
+ranks 32, interlaced subcommunicators, and deflation enabled.
 
 For full comparisons, use the guarded runner so failed PETSc setup paths do not
 consume the workstation:
@@ -206,10 +217,10 @@ PETSc's constrained local/global sections provide the negative closure indices
 used to skip eliminated rows and columns during element insertion.
 
 The GAMG, PMG, BDDC, and FETI-DP paths attach PETSc's rigid-body
-near-nullspace. The PMG variant builds same-mesh P1, P2, and P4 DMs with the
-same boundary constraints, evaluates coarse FE basis functions at fine dual
-points to form P1 -> P2 and P2 -> P4 interpolation, and lets PETSc build
-Galerkin operators inside `PCMG`. Its P1 bottom solve now
+near-nullspace. The default PMG backend builds same-mesh P1, P2, and P4 DMs
+with the same boundary constraints, evaluates coarse FE basis functions at fine
+dual points to form P1 -> P2 and P2 -> P4 interpolation, and lets PETSc build
+Galerkin operators inside `PCMG`. Its P1 bottom solve
 matches the L1 elasticity experiments: GAMG by default, aggressive square-graph
 coarsening disabled, optional `PCREDUNDANT` grouping through
 `-pmg_coarse_redundant_group_size`, and optional PETSc `PCTELESCOPE` activation
@@ -218,7 +229,9 @@ through `-pmg_coarse_telescope_active_ranks`. A second optional PETSc
 `-pmg_p2_telescope_active_ranks`; this is the PETSc-native way to telescope the
 P2-level work in the current 3-level same-communicator `PCMG`. It does not
 redistribute the P2/P1 DMs or the P2->P4 / P1->P2 interpolation matrices onto
-smaller communicators. For example, on high-rank L1 runs the elasticity
+smaller communicators. The maintained `-pmg_apply_backend shell_vcycle` path
+instead applies the PMG V-cycle in this driver and uses active-layout P2/P1
+operators on reduced rank sets. For example, on high-rank L1 runs the elasticity
 telescope campaign used DMPlex partition-boundary balancing, group size 16, and
 32 to 64 active coarse ranks:
 
@@ -237,6 +250,11 @@ line. `options/pmg_telescope_final.opts` is kept as the legacy combined P1+P2
 telescope profile. On the local 32-rank L1 probe, adding the P2-level telescope
 converged but was slower than the P1-only telescope; it is kept as an explicit
 high-rank scaling option rather than a hard-coded default.
+
+Use `options/pmg_shell_vcycle.opts` for the current production scaling baseline:
+shell V-cycle, P2 active ranks 64, P1 active ranks 32, interlaced
+subcommunicators, and explicit deflation. The Karolina harness defaults to this
+profile for `1x128` and `2x128` comparisons.
 
 By default the linear solver is now persistent across the elastic predictor and
 Newton corrections. This reuses the KSP/PCMG object, same-mesh P1/P2/P4 DMs, and

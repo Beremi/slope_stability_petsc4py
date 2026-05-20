@@ -64,14 +64,14 @@ metadata="$RESULT_DIR/job.env"
   echo "REPO_ROOT=$REPO_ROOT"
   echo "COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)"
   echo "BRANCH=$(git -C "$REPO_ROOT" branch --show-current)"
-  echo "OPTIONS_FILE=${OPTIONS_FILE:-options/pmg_p1_telescope.opts}"
+  echo "OPTIONS_FILE=${OPTIONS_FILE:-options/pmg_shell_vcycle.opts}"
   echo "PARTITIONER=${PARTITIONER:-parmetis}"
   echo "REFINE_LEVELS=${REFINE_LEVELS:-1}"
   echo "LAMBDA=${LAMBDA:-1.5}"
   echo "LINEAR_RTOL=${LINEAR_RTOL:-1e-1}"
   echo "KSP_MAX_IT=${KSP_MAX_IT:-200}"
   echo "NEWTON_MAX_IT=${NEWTON_MAX_IT:-20}"
-  echo "DEFLATION=${DEFLATION:-false}"
+  echo "DEFLATION=${DEFLATION:-true}"
   echo "PMG_COARSE_TELESCOPE_ACTIVE_RANKS=${PMG_COARSE_TELESCOPE_ACTIVE_RANKS:-}"
   echo "PMG_COARSE_TELESCOPE_SUBCOMM_TYPE=${PMG_COARSE_TELESCOPE_SUBCOMM_TYPE:-}"
   echo "PMG_COARSE_REDUNDANT_GROUP_SIZE=${PMG_COARSE_REDUNDANT_GROUP_SIZE:-}"
@@ -80,7 +80,6 @@ metadata="$RESULT_DIR/job.env"
   echo "PMG_SHELL_P2_ACTIVE_RANKS=${PMG_SHELL_P2_ACTIVE_RANKS:-}"
   echo "PMG_SHELL_P1_ACTIVE_RANKS=${PMG_SHELL_P1_ACTIVE_RANKS:-}"
   echo "PMG_SHELL_SUBCOMM_TYPE=${PMG_SHELL_SUBCOMM_TYPE:-}"
-  echo "PMG_SHELL_COARSE_LAYOUT=${PMG_SHELL_COARSE_LAYOUT:-}"
   echo "PMG_LAG_PRECONDITIONER=${PMG_LAG_PRECONDITIONER:-1}"
   echo "START_TIME=$(date --iso-8601=seconds)"
 } | tee "$metadata"
@@ -95,7 +94,7 @@ fi
 
 BASE_ARGS=(
   ./p4_plasticity
-  -options_file "${OPTIONS_FILE:-options/pmg_p1_telescope.opts}"
+  -options_file "${OPTIONS_FILE:-options/pmg_shell_vcycle.opts}"
   -mesh "${MESH:-data/adaptive_family_a_l1.msh}"
   -refine_levels "${REFINE_LEVELS:-1}"
   -lambda "${LAMBDA:-1.5}"
@@ -104,7 +103,7 @@ BASE_ARGS=(
   -newton_max_it "${NEWTON_MAX_IT:-20}"
   -ksp_type "${KSP_TYPE:-fgmres}"
   -ksp_norm_type "${KSP_NORM_TYPE:-unpreconditioned}"
-  -deflation "${DEFLATION:-false}"
+  -deflation "${DEFLATION:-true}"
   -pmg_lag_preconditioner "${PMG_LAG_PRECONDITIONER:-1}"
   -ksp_converged_reason
 )
@@ -135,9 +134,6 @@ if [[ -n "${PMG_SHELL_P1_ACTIVE_RANKS:-}" ]]; then
 fi
 if [[ -n "${PMG_SHELL_SUBCOMM_TYPE:-}" ]]; then
   BASE_ARGS+=(-pmg_shell_subcomm_type "$PMG_SHELL_SUBCOMM_TYPE")
-fi
-if [[ -n "${PMG_SHELL_COARSE_LAYOUT:-}" ]]; then
-  BASE_ARGS+=(-pmg_shell_coarse_layout "$PMG_SHELL_COARSE_LAYOUT")
 fi
 if [[ "${LOG_VIEW:-1}" == "1" ]]; then
   BASE_ARGS+=(-log_view)
