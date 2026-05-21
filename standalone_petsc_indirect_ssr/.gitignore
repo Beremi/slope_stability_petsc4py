@@ -1,0 +1,7 @@
+p4_indirect_ssr
+*.o
+*.log
+__pycache__/
+*.pyc
+continuation_curve.csv
+karolina/runs/

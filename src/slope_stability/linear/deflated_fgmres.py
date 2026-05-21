@@ -319,6 +319,11 @@ def dfgmres_matlab_exact_distributed(
         maxits = 1000
     if tol is None:
         tol = 1.0e-6
+    replay_probe = None
+    if stats is not None:
+        candidate = stats.get("linear_replay_probe")
+        if isinstance(candidate, dict):
+            replay_probe = candidate
 
     def _dist_dot(x_local: np.ndarray, y_local: np.ndarray) -> float:
         return float(comm.allreduce(float(np.dot(x_local, y_local)), op=MPI.SUM))
@@ -372,11 +377,22 @@ def dfgmres_matlab_exact_distributed(
         x_local = q_coarse_solve(b_local)
 
     n_local = b_local.size
+    coarse_x_local = x_local.copy()
     r0_local = b_local - A_local(x_local)
     b_norm = _dist_norm(b_local)
     if b_norm == 0.0:
         b_norm = 1.0
     res_norm = _dist_norm(r0_local)
+    if replay_probe is not None:
+        replay_probe.update(
+            {
+                "b_norm": float(b_norm),
+                "beta": float(res_norm),
+                "initial_rel": float(res_norm / b_norm),
+                "coarse_x_local": coarse_x_local.copy(),
+                "r0_local": r0_local.copy(),
+            }
+        )
 
     res_hist = np.zeros(maxits + 1, dtype=np.float64)
     res_hist[0] = res_norm / b_norm
@@ -394,15 +410,23 @@ def dfgmres_matlab_exact_distributed(
     iters = 0
     y = np.zeros(1, dtype=np.float64)
     for j in range(maxits):
-        w_local = _to_vec(M_local(V[:, j]))
-        w_local = proj_fct(w_local)
+        pc_local = _to_vec(M_local(V[:, j]))
+        w_local = proj_fct(pc_local)
         u_local = A_local(w_local)
+        if replay_probe is not None and j == 0:
+            replay_probe["v0_local"] = V[:, 0].copy()
+            replay_probe["pc_v0_local"] = pc_local.copy()
+            replay_probe["z0_local"] = w_local.copy()
+            replay_probe["Az0_local"] = u_local.copy()
 
         for i in range(j + 1):
             H[i, j] = _dist_dot(V[:, i], u_local)
             u_local = u_local - H[i, j] * V[:, i]
 
         H[j + 1, j] = _dist_norm(u_local)
+        if replay_probe is not None and j == 0:
+            replay_probe["arnoldi_residual0_local"] = u_local.copy()
+            replay_probe["h_col0"] = [float(H[0, 0]), float(H[1, 0])]
         Wbasis[:, j] = w_local
 
         if H[j + 1, j] < 1.0e-14:
@@ -431,6 +455,8 @@ def dfgmres_matlab_exact_distributed(
         if t_ls is not None:
             stats["least_squares_s"] = stats.get("least_squares_s", 0.0) + (perf_counter() - t_ls)
     res_hist = res_hist[: iters + 1]
+    if replay_probe is not None:
+        replay_probe["reported_residual_history"] = [float(v) for v in np.asarray(res_hist, dtype=np.float64).reshape(-1)]
     x_local = x_local + Wbasis[:, :iters] @ y
     return x_local, iters, res_hist
 

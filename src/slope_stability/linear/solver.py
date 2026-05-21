@@ -3936,6 +3936,10 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
             use_distributed_local = bool(self._mpi_comm is not None and int(self._A_petsc.getComm().getSize()) > 1)
             rhs_arr = None
             rhs_local_for_diagnostics = None
+            replay_probe_label = getattr(self, "_linear_replay_debug_label", None)
+            replay_probe = {"label": str(replay_probe_label)} if replay_probe_label else None
+            if replay_probe is not None:
+                timing_stats["linear_replay_probe"] = replay_probe
 
             def _timed_matvec(v: np.ndarray) -> np.ndarray:
                 t_mat = perf_counter()
@@ -4055,9 +4059,17 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
                         (true_residual_final is not None and float(true_residual_final) <= float(self.tolerance))
                     ),
                     "converged_reason": None,
-                    "timings": {k: float(v) for k, v in timing_stats.items()},
+                    "timings": {
+                        k: float(v)
+                        for k, v in timing_stats.items()
+                        if isinstance(v, (int, float, np.integer, np.floating))
+                    },
                 }
+                if replay_probe is not None:
+                    self._last_solve_info["linear_replay_probe"] = replay_probe
         finally:
+            if hasattr(self, "_linear_replay_debug_label"):
+                self._linear_replay_debug_label = None
             if gc_guard_enabled:
                 if gc_was_enabled:
                     gc.enable()
