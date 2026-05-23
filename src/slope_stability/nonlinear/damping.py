@@ -245,6 +245,7 @@ def damping(
     alpha_min = 0.0
     alpha_max = float(alpha)
     line_search_iterations = 0
+    trace: list[dict[str, float | int]] = []
 
     for _ in range(int(it_damp_max)):
         line_search_iterations += 1
@@ -269,6 +270,13 @@ def damping(
             F_alpha = constitutive_matrix_builder.build_F_reduced(U_alpha)
             decrease = _dot(F_alpha - (f_array if f_array is not None else _rhs_array(f)), dU, q_mask=q_mask)
 
+        trace.append(
+            {
+                "iteration": int(line_search_iterations),
+                "alpha": float(alpha),
+                "decrease": float(decrease),
+            }
+        )
         if decrease < 0.0:
             if alpha == 1.0:
                 break
@@ -279,6 +287,10 @@ def damping(
         alpha = 0.5 * (alpha_min + alpha_max)
 
     result = _line_search_result(float(alpha), int(line_search_iterations))
+    if return_info:
+        result["initial_decrease"] = float(initial_decrease)
+        result["dU_norm"] = float(dU_norm)
+        result["trace"] = trace
     return result if return_info else result["alpha"]
 
 

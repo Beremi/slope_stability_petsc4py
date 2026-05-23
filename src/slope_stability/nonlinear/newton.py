@@ -22,19 +22,66 @@ except Exception:  # pragma: no cover
 
 
 _LINEAR_REPLAY_EXPORT_COUNT = 0
+_INIT_REPLAY_EXPORT_COUNT = 0
 
 
 def _linear_replay_export_int_set(name: str) -> set[int] | None:
     raw = os.environ.get(name, "").strip()
     if not raw:
         return None
+    if raw.lower() == "all":
+        return None
     values: set[int] = set()
     for part in raw.split(","):
         part = part.strip()
         if not part:
             continue
+        if part.lower() == "all":
+            return None
         values.add(int(part))
     return values
+
+
+def _init_replay_export_bool(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _init_replay_export_lambda_set(name: str) -> set[float] | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw or raw.lower() == "all":
+        return None
+    values: set[float] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.lower() == "all":
+            return None
+        values.add(float(part))
+    return values
+
+
+def _init_replay_export_requested(*, lambda_it: float, iteration: int) -> tuple[Path, int] | None:
+    global _INIT_REPLAY_EXPORT_COUNT
+
+    root = os.environ.get("SSP_INIT_REPLAY_EXPORT_DIR", "").strip()
+    if not root:
+        return None
+    max_samples = int(os.environ.get("SSP_INIT_REPLAY_EXPORT_MAX", "0") or "0")
+    if max_samples > 0 and _INIT_REPLAY_EXPORT_COUNT >= max_samples:
+        return None
+    lambdas = _init_replay_export_lambda_set("SSP_INIT_REPLAY_EXPORT_LAMBDAS")
+    if lambdas is not None and not any(abs(float(lambda_it) - value) <= 1.0e-12 * max(1.0, abs(value)) for value in lambdas):
+        return None
+    iters = _linear_replay_export_int_set("SSP_INIT_REPLAY_EXPORT_NEWTON_ITERS")
+    if iters is not None and int(iteration) not in iters:
+        return None
+
+    sample_id = _INIT_REPLAY_EXPORT_COUNT
+    _INIT_REPLAY_EXPORT_COUNT += 1
+    lambda_tag = f"{float(lambda_it):.12g}".replace("-", "m").replace("+", "").replace(".", "p")
+    sample_dir = Path(root).expanduser().resolve() / f"init_lambda_{lambda_tag}_it_{int(iteration):04d}_sample_{sample_id:04d}"
+    return sample_dir, sample_id
 
 
 def _linear_replay_export_requested(*, omega: float, iteration: int) -> tuple[Path, int] | None:
@@ -74,11 +121,11 @@ def _values_to_free_global(A_ref, values: np.ndarray, free_idx: np.ndarray) -> n
         return np.asarray(data[free_idx], dtype=np.float64)
     n_local = int(A_ref.getOwnershipRange()[1] - A_ref.getOwnershipRange()[0])
     if data.size == n_local:
-        gathered = A_ref.getComm().tompi4py().allgather(np.asarray(data, dtype=np.float64))
+        gathered = [np.asarray(part, dtype=np.float64).reshape(-1) for part in A_ref.getComm().tompi4py().allgather(np.asarray(data, dtype=np.float64))]
         full = np.concatenate(gathered) if gathered else np.empty(0, dtype=np.float64)
         if full.size == n_full:
             return np.asarray(full[free_idx], dtype=np.float64)
-    gathered = A_ref.getComm().tompi4py().allgather(np.asarray(data, dtype=np.float64))
+    gathered = [np.asarray(part, dtype=np.float64).reshape(-1) for part in A_ref.getComm().tompi4py().allgather(np.asarray(data, dtype=np.float64))]
     concatenated = np.concatenate(gathered) if gathered else np.empty(0, dtype=np.float64)
     if concatenated.size == free_idx.size:
         return np.asarray(concatenated, dtype=np.float64)
@@ -88,12 +135,66 @@ def _values_to_free_global(A_ref, values: np.ndarray, free_idx: np.ndarray) -> n
     )
 
 
+def _values_to_operator_free_global(A_ref, values: np.ndarray, free_idx: np.ndarray) -> np.ndarray:
+    data = np.asarray(values, dtype=np.float64)
+    if data.ndim > 1:
+        data = data.reshape(-1, order="F")
+    else:
+        data = data.reshape(-1)
+    free_idx = np.asarray(free_idx, dtype=np.int64)
+    n_full = int(A_ref.getSize()[1])
+    if data.size == free_idx.size:
+        return np.asarray(data, dtype=np.float64).copy()
+    if data.size == n_full:
+        return np.asarray(data[free_idx], dtype=np.float64)
+
+    comm = A_ref.getComm().tompi4py()
+    gathered = [np.asarray(part, dtype=np.float64).reshape(-1) for part in comm.allgather(np.asarray(data, dtype=np.float64))]
+    concatenated = np.concatenate(gathered) if gathered else np.empty(0, dtype=np.float64)
+    if concatenated.size == free_idx.size:
+        return np.asarray(concatenated, dtype=np.float64)
+    if concatenated.size == n_full:
+        return np.asarray(concatenated[free_idx], dtype=np.float64)
+    sizes = [int(part.size) for part in gathered]
+    raise ValueError(
+        f"Cannot convert operator-local probe values to free replay layout "
+        f"(local={data.size}, gathered={concatenated.size}, local_sizes={sizes!r}, "
+        f"global full={n_full}, free={free_idx.size})."
+    )
+
+
+def _write_replay_global_vec_raw(path: Path, A_ref, values: np.ndarray, *, global_size: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    comm = A_ref.getComm()
+    rank = int(comm.getRank())
+    data = np.asarray(values, dtype=np.float64)
+    if data.ndim > 1:
+        data = data.reshape(-1, order="F")
+    else:
+        data = data.reshape(-1)
+    n_global = int(global_size)
+    if data.size == n_global:
+        global_values = np.asarray(data, dtype=np.float64).copy()
+    else:
+        gathered = [np.asarray(part, dtype=np.float64).reshape(-1) for part in comm.tompi4py().allgather(np.asarray(data, dtype=np.float64))]
+        global_values = np.concatenate(gathered) if gathered else np.empty(0, dtype=np.float64)
+    if int(global_values.size) != n_global:
+        raise ValueError(
+            f"Cannot write raw replay vector {path.name}: gathered {global_values.size} values, expected {n_global}."
+        )
+    if rank == 0:
+        with path.open("wb") as fh:
+            np.asarray([global_values.size], dtype="<i8").tofile(fh)
+            np.asarray(global_values, dtype="<f8").tofile(fh)
+
+
 def _write_replay_free_vec_binary(path: Path, A_ref, values: np.ndarray, *, free_idx: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     comm = A_ref.getComm()
     free_values = _values_to_free_global(A_ref, values, free_idx)
+    n_global = int(free_values.size)
     vec = PETSc.Vec().create(comm=comm)
-    vec.setSizes((PETSc.DECIDE, int(free_values.size)))
+    vec.setSizes((PETSc.DECIDE, n_global))
     vec.setFromOptions()
     r0, r1 = vec.getOwnershipRange()
     arr = vec.getArray(readonly=False)
@@ -105,6 +206,23 @@ def _write_replay_free_vec_binary(path: Path, A_ref, values: np.ndarray, *, free
     finally:
         viewer.destroy()
         vec.destroy()
+
+
+def _write_replay_free_vec_raw(path: Path, A_ref, values: np.ndarray, *, free_idx: np.ndarray, operator_local: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    comm = A_ref.getComm()
+    rank = int(comm.getRank())
+    if operator_local:
+        free_values = _values_to_operator_free_global(A_ref, values, free_idx)
+    else:
+        free_values = _values_to_free_global(A_ref, values, free_idx)
+    sizes = comm.tompi4py().allgather(int(free_values.size))
+    if len(set(sizes)) != 1:
+        raise ValueError(f"Raw replay vector export got inconsistent global sizes across ranks: {sizes!r}")
+    if rank == 0:
+        with path.open("wb") as fh:
+            np.asarray([free_values.size], dtype="<i8").tofile(fh)
+            np.asarray(free_values, dtype="<f8").tofile(fh)
 
 
 def _write_replay_free_mat_binary(path: Path, A_ref, *, free_idx: np.ndarray) -> str:
@@ -197,10 +315,15 @@ def _linear_replay_basis_columns(linear_system_solver, A_ref, free_idx: np.ndarr
     r0, r1 = A_ref.getOwnershipRange()
     n_global = int(A_ref.getSize()[1])
     n_local = int(r1 - r0)
+    comm = A_ref.getComm()
+    basis_is_operator_local = bool(getattr(linear_system_solver, "_deflation_basis_is_local", False))
     cols: list[np.ndarray] = []
     for j in range(basis.shape[1]):
         col = np.asarray(basis[:, j], dtype=np.float64)
-        if free_idx is not None:
+        if basis_is_operator_local and col.size == n_local:
+            gathered = comm.tompi4py().allgather(col)
+            vals = np.concatenate(gathered) if gathered else np.empty(0, dtype=np.float64)
+        elif free_idx is not None:
             vals = _values_to_free_global(A_ref, col, free_idx)
         elif col.size == n_local:
             vals = col
@@ -241,6 +364,8 @@ def _linear_replay_begin_export(
     enable = getattr(linear_system_solver, "enable_diagnostics", None)
     if callable(enable):
         enable(True)
+    if hasattr(linear_system_solver, "_diagnostics_enabled"):
+        setattr(linear_system_solver, "_diagnostics_enabled", True)
 
     _write_replay_free_vec_binary(sample_dir / "u.vec", A_ref, np.asarray(U_it, dtype=np.float64).reshape(-1, order="F"), free_idx=free_idx)
     _write_replay_free_vec_binary(sample_dir / "f_free.vec", A_ref, np.asarray(f_free, dtype=np.float64), free_idx=free_idx)
@@ -307,10 +432,23 @@ def _linear_replay_begin_export(
 def _linear_replay_set_probe_label(linear_system_solver, export_ctx, label: str) -> None:
     if export_ctx is None:
         return
+    enable = getattr(linear_system_solver, "enable_diagnostics", None)
+    if callable(enable):
+        enable(True)
+    if hasattr(linear_system_solver, "_diagnostics_enabled"):
+        setattr(linear_system_solver, "_diagnostics_enabled", True)
     setattr(linear_system_solver, "_linear_replay_debug_label", str(label))
 
 
-def _linear_replay_write_probe(export_ctx, A_ref, label: str, info: dict, free_idx: np.ndarray) -> dict[str, object] | None:
+def _linear_replay_write_probe(
+    export_ctx,
+    A_ref,
+    label: str,
+    info: dict,
+    free_idx: np.ndarray,
+    *,
+    write_vectors: bool = True,
+) -> dict[str, object] | None:
     probe = info.get("linear_replay_probe") if isinstance(info, dict) else None
     if not isinstance(probe, dict):
         return None
@@ -319,21 +457,73 @@ def _linear_replay_write_probe(export_ctx, A_ref, label: str, info: dict, free_i
     comm = A_ref.getComm()
     rank = int(comm.getRank())
     vector_files: dict[str, str] = {}
-    for key in (
-        "coarse_x_local",
+    vector_format = os.environ.get("SSP_INIT_REPLAY_EXPORT_PROBE_FORMAT", os.environ.get("SSP_LINEAR_STATE_EXPORT_PROBE_FORMAT", "petsc"))
+    vector_format = vector_format.strip().lower() or "petsc"
+    vector_global_sizes = probe.get("_vector_global_sizes", {})
+    if not isinstance(vector_global_sizes, dict):
+        vector_global_sizes = {}
+    petsc_free_probe_keys = {
         "r0_local",
         "v0_local",
         "pc_v0_local",
         "z0_local",
         "Az0_local",
         "arnoldi_residual0_local",
-    ):
-        value = probe.get(key)
-        if value is None:
-            continue
-        filename = f"probe_{label}_{key}.vec"
-        _write_replay_free_vec_binary(sample_dir / filename, A_ref, np.asarray(value, dtype=np.float64), free_idx=free_idx)
-        vector_files[key] = filename
+        "mg_fine_rhs_local",
+        "mg_fine_pre_local",
+        "mg_fine_residual_local",
+        "mg_fine_post_local",
+    }
+    if write_vectors:
+        for key in (
+            "r0_local",
+            "v0_local",
+            "pc_v0_local",
+            "z0_local",
+            "Az0_local",
+            "arnoldi_residual0_local",
+            "mg_fine_rhs_local",
+            "mg_fine_pre_local",
+            "mg_fine_residual_local",
+            "mg_fine_post_local",
+            "mg_p2_rhs_local",
+            "mg_p2_pre_local",
+            "mg_p2_residual_local",
+            "mg_p1_rhs_local",
+            "mg_p1_x_local",
+            "mg_p2_post_local",
+        ):
+            value = probe.get(key)
+            present = value is not None
+            present_count = int(comm.tompi4py().allreduce(1 if present else 0))
+            present_all = present_count == int(comm.getSize())
+            if not present_all:
+                continue
+            vec_filename = f"probe_{label}_{key}.vec"
+            raw_filename = f"probe_{label}_{key}.raw"
+            raw_global_size = vector_global_sizes.get(key)
+            if raw_global_size is not None:
+                if vector_format in {"raw", "both"}:
+                    _write_replay_global_vec_raw(
+                        sample_dir / raw_filename,
+                        A_ref,
+                        np.asarray(value, dtype=np.float64),
+                        global_size=int(raw_global_size),
+                    )
+                    vector_files[key] = raw_filename
+                continue
+            if vector_format in {"petsc", "both"} and key in petsc_free_probe_keys:
+                _write_replay_free_vec_binary(sample_dir / vec_filename, A_ref, np.asarray(value, dtype=np.float64), free_idx=free_idx)
+                vector_files[key] = vec_filename
+            if vector_format in {"raw", "both"}:
+                _write_replay_free_vec_raw(
+                    sample_dir / raw_filename,
+                    A_ref,
+                    np.asarray(value, dtype=np.float64),
+                    free_idx=free_idx,
+                    operator_local=True,
+                )
+                vector_files[key] = raw_filename
 
     scalars: dict[str, object] = {}
     for key in ("label", "b_norm", "beta", "initial_rel", "h_col0", "reported_residual_history"):
@@ -363,8 +553,9 @@ def _linear_replay_finish_export(export_ctx, A_ref, dW_free, dV_free, info_w: di
     rank = int(comm.getRank())
     _write_replay_free_vec_binary(sample_dir / "solution_w.vec", A_ref, np.asarray(dW_free, dtype=np.float64), free_idx=free_idx)
     _write_replay_free_vec_binary(sample_dir / "solution_v.vec", A_ref, np.asarray(dV_free, dtype=np.float64), free_idx=free_idx)
-    probe_w = _linear_replay_write_probe(export_ctx, A_ref, "dW", info_w, free_idx)
-    probe_v = _linear_replay_write_probe(export_ctx, A_ref, "dV", info_v, free_idx)
+    write_probe_vectors = os.environ.get("SSP_LINEAR_STATE_EXPORT_PROBES", "1").strip().lower() in {"1", "true", "yes", "on"}
+    probe_w = _linear_replay_write_probe(export_ctx, A_ref, "dW", info_w, free_idx, write_vectors=write_probe_vectors)
+    probe_v = _linear_replay_write_probe(export_ctx, A_ref, "dV", info_v, free_idx, write_vectors=write_probe_vectors)
     meta = dict(export_ctx["meta"])
     meta["expected"] = {
         "dW_iterations": int(info_w.get("iterations", -1)),
@@ -395,6 +586,269 @@ def _linear_replay_finish_export(export_ctx, A_ref, dW_free, dV_free, info_w: di
                 fh.write(f"expected_dW_reported_residual_final {meta['expected']['dW_reported_residual_final']:.17e}\n")
             if meta["expected"]["dV_reported_residual_final"] is not None:
                 fh.write(f"expected_dV_reported_residual_final {meta['expected']['dV_reported_residual_final']:.17e}\n")
+
+
+def _linear_replay_step_history_enabled() -> bool:
+    return os.environ.get("SSP_LINEAR_STATE_EXPORT_STEP_HISTORY", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _linear_replay_write_step_expected(sample_dir: Path, history: dict, *, flag: int, newton_iterations: int, lambda_end: float, omega: float) -> None:
+    if not _linear_replay_step_history_enabled():
+        return
+    rank = 0
+    if PETSc is not None:
+        try:
+            rank = int(PETSc.COMM_WORLD.getRank())
+        except Exception:
+            rank = 0
+    if rank != 0:
+        return
+
+    def _arr(name: str, default=np.nan, dtype=float) -> np.ndarray:
+        value = history.get(name)
+        if value is None:
+            return np.full(int(newton_iterations), default, dtype=dtype)
+        data = np.asarray(value, dtype=dtype).reshape(-1)
+        if data.size < int(newton_iterations):
+            pad = np.full(int(newton_iterations) - data.size, default, dtype=dtype)
+            data = np.concatenate([data, pad])
+        return data[: int(newton_iterations)]
+
+    lambdas = _arr("lambda")
+    r_values = _arr("r")
+    alphas = _arr("alpha")
+    delta_lambdas = _arr("delta_lambda")
+    accepted_delta_lambdas = _arr("accepted_delta_lambda")
+    residuals = _arr("residual")
+    relcorr = _arr("accepted_relative_correction_norm")
+    stopping_values = np.asarray(history.get("stopping_value", []), dtype=np.float64).reshape(-1)
+    if stopping_values.size < int(newton_iterations):
+        stopping_values = np.full(int(newton_iterations), np.nan, dtype=np.float64)
+    else:
+        stopping_values = stopping_values[: int(newton_iterations)]
+    dW_iterations = _arr("dW_iterations", default=-1, dtype=np.int64)
+    dV_iterations = _arr("dV_iterations", default=-1, dtype=np.int64)
+    linear_iterations = _arr("linear_iterations", default=-1, dtype=np.int64)
+    line_search_iterations = _arr("line_search_iterations", default=-1, dtype=np.int64)
+    basis_solve = _arr("deflation_basis_dim_solve", default=-1, dtype=np.int64)
+    basis_end = _arr("deflation_basis_dim_end", default=-1, dtype=np.int64)
+
+    rows: list[dict[str, object]] = []
+    for i in range(int(newton_iterations)):
+        status = "converged" if i == int(newton_iterations) - 1 and int(flag) == 0 else "iterate"
+        rows.append(
+            {
+                "iteration": i + 1,
+                "lambda": float(lambdas[i]),
+                "r": float(r_values[i]),
+                "alpha": float(alphas[i]),
+                "delta_lambda": float(delta_lambdas[i]),
+                "accepted_delta_lambda": float(accepted_delta_lambdas[i]),
+                "rel_residual": float(residuals[i]),
+                "rel_correction": float(relcorr[i]),
+                "stopping_value": float(stopping_values[i]),
+                "dW_iterations": int(dW_iterations[i]),
+                "dV_iterations": int(dV_iterations[i]),
+                "linear_iterations": int(linear_iterations[i]),
+                "line_search_iterations": int(line_search_iterations[i]),
+                "deflation_basis_dim_solve": int(basis_solve[i]),
+                "deflation_basis_dim_end": int(basis_end[i]),
+                "status": status,
+            }
+        )
+
+    payload = {
+        "omega": float(omega),
+        "lambda_end": float(lambda_end),
+        "flag": int(flag),
+        "newton_iterations": int(newton_iterations),
+        "linear_iterations": int(np.nansum(linear_iterations.astype(np.float64))),
+        "rows": rows,
+    }
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    (sample_dir / "step_expected.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with (sample_dir / "step_expected.csv").open("w", encoding="utf-8") as fh:
+        fh.write(
+            "iteration,lambda,r,alpha,delta_lambda,accepted_delta_lambda,rel_residual,rel_correction,"
+            "stopping_value,dW_iterations,dV_iterations,linear_iterations,line_search_iterations,"
+            "deflation_basis_dim_solve,deflation_basis_dim_end,status\n"
+        )
+        for row in rows:
+            fh.write(
+                f"{row['iteration']},{row['lambda']:.17e},{row['r']:.17e},{row['alpha']:.17e},"
+                f"{row['delta_lambda']:.17e},{row['accepted_delta_lambda']:.17e},"
+                f"{row['rel_residual']:.17e},{row['rel_correction']:.17e},{row['stopping_value']:.17e},"
+                f"{row['dW_iterations']},{row['dV_iterations']},{row['linear_iterations']},"
+                f"{row['line_search_iterations']},{row['deflation_basis_dim_solve']},"
+                f"{row['deflation_basis_dim_end']},{row['status']}\n"
+            )
+
+
+def _init_replay_begin_export(
+    *,
+    A_ref,
+    K_elast,
+    K_tangent,
+    K_regularized,
+    linear_system_solver,
+    free_idx: np.ndarray,
+    U_it: np.ndarray,
+    f_free,
+    F_free,
+    rhs,
+    lambda_it: float,
+    r: float,
+    iteration: int,
+    rel_resid: float,
+    use_local_build: bool,
+):
+    requested = _init_replay_export_requested(lambda_it=float(lambda_it), iteration=int(iteration))
+    if requested is None:
+        return None
+    sample_dir, sample_id = requested
+    comm = A_ref.getComm()
+    rank = int(comm.getRank())
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    enable = getattr(linear_system_solver, "enable_diagnostics", None)
+    if callable(enable):
+        enable(True)
+    if hasattr(linear_system_solver, "_diagnostics_enabled"):
+        setattr(linear_system_solver, "_diagnostics_enabled", True)
+
+    _write_replay_free_vec_binary(sample_dir / "u_before.vec", A_ref, np.asarray(U_it, dtype=np.float64).reshape(-1, order="F"), free_idx=free_idx)
+    _write_replay_free_vec_binary(sample_dir / "f_free.vec", A_ref, np.asarray(f_free, dtype=np.float64), free_idx=free_idx)
+    _write_replay_free_vec_binary(sample_dir / "F_free.vec", A_ref, np.asarray(F_free, dtype=np.float64), free_idx=free_idx)
+    _write_replay_free_vec_binary(sample_dir / "rhs.vec", A_ref, np.asarray(rhs, dtype=np.float64), free_idx=free_idx)
+
+    basis_cols = _linear_replay_basis_columns(linear_system_solver, A_ref, free_idx)
+    for j, col in enumerate(basis_cols):
+        _write_replay_free_vec_binary(sample_dir / f"basis_{j:04d}.vec", A_ref, col, free_idx=free_idx)
+
+    matrix_files: dict[str, str] = {}
+    if _init_replay_export_bool("SSP_INIT_REPLAY_EXPORT_MATRIX"):
+        matrix_files["Areg"] = _write_replay_free_mat_binary(sample_dir / "Areg_free.mat", K_regularized, free_idx=free_idx)
+        matrix_files["Kelastic"] = _write_replay_free_mat_binary(sample_dir / "Kelastic_free.mat", K_elast, free_idx=free_idx)
+        if K_tangent is not None:
+            matrix_files["Ktangent"] = _write_replay_free_mat_binary(sample_dir / "Ktangent_free.mat", K_tangent, free_idx=free_idx)
+
+    dof_map_file = None
+    topology_map_file = None
+    if rank == 0:
+        dof_map_file = _linear_replay_write_free_dof_map(sample_dir, getattr(linear_system_solver, "coord", None), free_idx)
+        topology_map_file = _linear_replay_write_cell_topology_map(sample_dir, linear_system_solver)
+    dof_map_file = comm.tompi4py().bcast(dof_map_file, root=0)
+    topology_map_file = comm.tompi4py().bcast(topology_map_file, root=0)
+    meta = {
+        "kind": "fixed_lambda_init",
+        "sample_id": int(sample_id),
+        "lambda": float(lambda_it),
+        "r": float(r),
+        "newton_iteration": int(iteration),
+        "rel_residual": float(rel_resid),
+        "use_local_build": bool(use_local_build),
+        "basis_cols": int(len(basis_cols)),
+        "global_size": int(np.asarray(free_idx).size),
+        "source_full_global_size": int(A_ref.getSize()[1]),
+        "matrix": matrix_files.get("Areg"),
+        "matrices": matrix_files,
+        "free_dof_map": dof_map_file,
+        "cell_topology_map": topology_map_file,
+        "ownership_range": [int(v) for v in A_ref.getOwnershipRange()],
+        "files": {
+            "u_before": "u_before.vec",
+            "f_free": "f_free.vec",
+            "F_free": "F_free.vec",
+            "rhs": "rhs.vec",
+            "basis_prefix": "basis_",
+        },
+    }
+    if rank == 0:
+        (sample_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with (sample_dir / "meta.txt").open("w", encoding="utf-8") as fh:
+            fh.write(f"kind fixed_lambda_init\n")
+            fh.write(f"sample_id {sample_id}\n")
+            fh.write(f"lambda {float(lambda_it):.17e}\n")
+            fh.write(f"r {float(r):.17e}\n")
+            fh.write(f"newton_iteration {int(iteration)}\n")
+            fh.write(f"rel_residual {float(rel_resid):.17e}\n")
+            fh.write(f"basis_cols {int(len(basis_cols))}\n")
+    return {"sample_dir": sample_dir, "meta": meta}
+
+
+def _init_replay_finish_export(
+    export_ctx,
+    A_ref,
+    dU,
+    U_after,
+    solve_info: dict,
+    iter_delta: dict,
+    damping_info: dict,
+    free_idx: np.ndarray,
+    *,
+    rel_correction: float,
+    stop: bool,
+) -> None:
+    if export_ctx is None:
+        return
+    sample_dir = Path(export_ctx["sample_dir"])
+    comm = A_ref.getComm()
+    rank = int(comm.getRank())
+    _write_replay_free_vec_binary(sample_dir / "du.vec", A_ref, np.asarray(dU, dtype=np.float64).reshape(-1, order="F"), free_idx=free_idx)
+    _write_replay_free_vec_binary(sample_dir / "u_after.vec", A_ref, np.asarray(U_after, dtype=np.float64).reshape(-1, order="F"), free_idx=free_idx)
+    probe = _linear_replay_write_probe(
+        export_ctx,
+        A_ref,
+        "du",
+        solve_info,
+        free_idx,
+        write_vectors=_init_replay_export_bool("SSP_INIT_REPLAY_EXPORT_PROBES"),
+    )
+
+    damping_trace = damping_info.get("trace", []) if isinstance(damping_info, dict) else []
+    meta = dict(export_ctx["meta"])
+    iterations = int(solve_info.get("iterations", -1))
+    if iterations < 0:
+        iterations = int(iter_delta.get("iterations", -1))
+    meta["expected"] = {
+        "iterations": iterations,
+        "reported_residual_final": None
+        if solve_info.get("reported_residual_final") is None
+        else float(solve_info.get("reported_residual_final")),
+        "true_residual_final": None if solve_info.get("true_residual_final") is None else float(solve_info.get("true_residual_final")),
+        "reported_residual_history": [float(v) for v in solve_info.get("reported_residual_history", [])],
+        "true_residual_history": [float(v) for v in solve_info.get("true_residual_history", [])],
+        "alpha": float(damping_info.get("alpha", 0.0)),
+        "line_search_iterations": int(damping_info.get("line_search_iterations", 0)),
+        "initial_decrease": None
+        if damping_info.get("initial_decrease") is None
+        else float(damping_info.get("initial_decrease")),
+        "dU_norm": None if damping_info.get("dU_norm") is None else float(damping_info.get("dU_norm")),
+        "rel_correction": float(rel_correction),
+        "stop": bool(stop),
+    }
+    if probe is not None:
+        meta["expected"]["du_probe"] = probe
+    if rank == 0:
+        (sample_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (sample_dir / "damping.json").write_text(json.dumps({"trace": damping_trace, "expected": meta["expected"]}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with (sample_dir / "damping.csv").open("w", encoding="utf-8") as fh:
+            fh.write("iteration,alpha,decrease\n")
+            for row in damping_trace if isinstance(damping_trace, list) else []:
+                fh.write(
+                    f"{int(row.get('iteration', 0))},{float(row.get('alpha', 0.0)):.17e},{float(row.get('decrease', np.nan)):.17e}\n"
+                )
+        with (sample_dir / "meta.txt").open("a", encoding="utf-8") as fh:
+            fh.write(f"expected_iterations {meta['expected']['iterations']}\n")
+            if meta["expected"]["reported_residual_final"] is not None:
+                fh.write(f"expected_reported_residual_final {meta['expected']['reported_residual_final']:.17e}\n")
+            if meta["expected"]["true_residual_final"] is not None:
+                fh.write(f"expected_true_residual_final {meta['expected']['true_residual_final']:.17e}\n")
+            fh.write(f"expected_alpha {meta['expected']['alpha']:.17e}\n")
+            fh.write(f"expected_line_search_iterations {meta['expected']['line_search_iterations']}\n")
+            if meta["expected"]["initial_decrease"] is not None:
+                fh.write(f"expected_initial_decrease {meta['expected']['initial_decrease']:.17e}\n")
+            fh.write(f"expected_rel_correction {meta['expected']['rel_correction']:.17e}\n")
+            fh.write(f"expected_stop {'true' if meta['expected']['stop'] else 'false'}\n")
 
 
 def _to_float_matrix(U: np.ndarray) -> np.ndarray:
@@ -1150,6 +1604,7 @@ def _solve_direction_once(
 ):
     snap_before = _collector_snapshot(linear_system_solver)
     K_free = None
+    solve_info = {}
     try:
         if use_full_operator:
             _setup_linear_system(
@@ -1179,12 +1634,13 @@ def _solve_direction_once(
                 linear_system_solver.A_orthogonalize(K_free)
             dU_free = _solve_linear_system(linear_system_solver, K_free, rhs, b_full=b_full, free_idx=free_idx)
     finally:
+        solve_info = _last_solve_info(linear_system_solver)
         _release_iteration_resources(linear_system_solver)
         _destroy_petsc_mat(K_free)
     return (
         np.asarray(dU_free, dtype=np.float64).reshape(-1),
         _collector_delta(snap_before, _collector_snapshot(linear_system_solver)),
-        _last_solve_info(linear_system_solver),
+        solve_info,
     )
 
 
@@ -1436,6 +1892,26 @@ def newton(
                     use_free_build=use_free_build,
                 )
                 K_r_try = _combine_matrices(r_try, K_elast, 1.0 - r_try, K_tangent)
+            export_ctx = None
+            if retry_index == 0:
+                export_ctx = _init_replay_begin_export(
+                    A_ref=K_r_try,
+                    K_elast=K_elast,
+                    K_tangent=K_tangent,
+                    K_regularized=K_r_try,
+                    linear_system_solver=linear_system_solver,
+                    free_idx=free_idx,
+                    U_it=U_it,
+                    f_free=(f_free_local if f_free_local is not None else f_free),
+                    F_free=(F_free_local if F_free_local is not None else F_free),
+                    rhs=rhs,
+                    lambda_it=float(getattr(constitutive_matrix_builder, "current_reduction_lambda", np.nan)),
+                    r=float(r_try),
+                    iteration=int(it),
+                    rel_resid=float(criterion),
+                    use_local_build=bool(use_local_build),
+                )
+                _linear_replay_set_probe_label(linear_system_solver, export_ctx, "du")
             preconditioning_matrix = None
             if use_full_operator and _requires_explicit_preconditioning_matrix(linear_system_solver):
                 if _needs_preconditioning_matrix_refresh(linear_system_solver):
@@ -1557,6 +2033,23 @@ def newton(
             iterate_free_norm = _free_norm(U_it, Q)
             accepted_correction_norm = float(np.linalg.norm(float(alpha) * _to_free_vector(dU, Q)))
             accepted_relative_correction_norm = float(accepted_correction_norm / max(iterate_free_norm, 1.0e-30))
+            if export_ctx is not None:
+                _init_replay_finish_export(
+                    export_ctx,
+                    K_r_try,
+                    dU,
+                    U_it + float(alpha) * dU,
+                    solve_info,
+                    iter_delta,
+                    damping_info,
+                    free_idx,
+                    rel_correction=float(accepted_relative_correction_norm),
+                    stop=bool(
+                        stop_mode == "relative_correction"
+                        and float(alpha) > 0.0
+                        and accepted_relative_correction_norm < stop_tol
+                    ),
+                )
             true_residual_final = solve_info.get("true_residual_final")
             hit_max_iterations = bool(solve_info.get("hit_max_iterations", False))
             guarded_accept = bool(
@@ -1790,7 +2283,10 @@ def newton_ind_ssr(
     Q = np.asarray(Q, dtype=bool)
 
     free_idx = q_to_free_indices(Q)
-    if os.environ.get("SSP_LINEAR_STATE_EXPORT_DIR", "").strip():
+    if (
+        os.environ.get("SSP_LINEAR_STATE_EXPORT_DIR", "").strip()
+        and os.environ.get("SSP_LINEAR_STATE_EXPORT_KEEP_PMG_HIERARCHY", "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
         opts = getattr(linear_system_solver, "preconditioner_options", None)
         if isinstance(opts, dict):
             opts["compact_pmg_python_hierarchy_after_setup"] = False
@@ -1866,10 +2362,13 @@ def newton_ind_ssr(
     linear_preconditioner_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     linear_orthogonalization_hist = np.zeros(int(it_newt_max), dtype=np.float64)
     iteration_wall_hist = np.full(int(it_newt_max), np.nan, dtype=np.float64)
+    dW_iterations_hist = np.full(int(it_newt_max), -1, dtype=np.int64)
+    dV_iterations_hist = np.full(int(it_newt_max), -1, dtype=np.int64)
     line_search_iterations_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     line_search_fallback_used_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     deflation_basis_dim_solve_hist = np.zeros(int(it_newt_max), dtype=np.int64)
     deflation_basis_dim_end_hist = np.zeros(int(it_newt_max), dtype=np.int64)
+    step_expected_export_dir: Path | None = None
     first_iteration_linear_iterations = 0
     first_iteration_linear_solve_time = 0.0
     first_iteration_linear_preconditioner_time = 0.0
@@ -2097,6 +2596,10 @@ def newton_ind_ssr(
                     )
                     info_v = _solve_info_with_collector_delta(linear_system_solver, snap_before_v)
                     _linear_replay_finish_export(export_ctx, K_r, dW_free, dV_free, info_w, info_v, free_idx)
+                    if export_ctx is not None and step_expected_export_dir is None:
+                        step_expected_export_dir = Path(export_ctx["sample_dir"])
+                    dW_iterations_hist[it - 1] = int(info_w.get("iterations", -1))
+                    dV_iterations_hist[it - 1] = int(info_v.get("iterations", -1))
                 else:
                     f_replay_free = _to_free_vector(f, Q) if f_free is None else f_free
                     rhs_v_free = f_replay_free - F_free
@@ -2127,6 +2630,10 @@ def newton_ind_ssr(
                     dV_free = _solve_linear_system(linear_system_solver, K_r, rhs_v_free, free_idx=free_idx)
                     info_v = _solve_info_with_collector_delta(linear_system_solver, snap_before_v)
                     _linear_replay_finish_export(export_ctx, K_r, dW_free, dV_free, info_w, info_v, free_idx)
+                    if export_ctx is not None and step_expected_export_dir is None:
+                        step_expected_export_dir = Path(export_ctx["sample_dir"])
+                    dW_iterations_hist[it - 1] = int(info_w.get("iterations", -1))
+                    dV_iterations_hist[it - 1] = int(info_v.get("iterations", -1))
             else:
                 temporary_basis_snapshot = None
                 if (
@@ -2172,6 +2679,10 @@ def newton_ind_ssr(
                 dV_free = _solve_linear_system(linear_system_solver, K_free, rhs_v_free, free_idx=free_idx)
                 info_v = _solve_info_with_collector_delta(linear_system_solver, snap_before_v)
                 _linear_replay_finish_export(export_ctx, K_r, dW_free, dV_free, info_w, info_v, free_idx)
+                if export_ctx is not None and step_expected_export_dir is None:
+                    step_expected_export_dir = Path(export_ctx["sample_dir"])
+                dW_iterations_hist[it - 1] = int(info_w.get("iterations", -1))
+                dV_iterations_hist[it - 1] = int(info_v.get("iterations", -1))
         finally:
             _release_iteration_resources(linear_system_solver)
             if temporary_basis_snapshot is not None:
@@ -2364,6 +2875,8 @@ def newton_ind_ssr(
         "linear_preconditioner_time": linear_preconditioner_hist[:it],
         "linear_orthogonalization_time": linear_orthogonalization_hist[:it],
         "iteration_wall_time": iteration_wall_hist[:it],
+        "dW_iterations": dW_iterations_hist[:it],
+        "dV_iterations": dV_iterations_hist[:it],
         "line_search_iterations": line_search_iterations_hist[:it],
         "line_search_fallback_used": line_search_fallback_used_hist[:it],
         "deflation_basis_dim_solve": deflation_basis_dim_solve_hist[:it],
@@ -2386,6 +2899,15 @@ def newton_ind_ssr(
         "residual_tolerance": float(tol),
         "line_search_mode": str(line_search_mode),
     }
+    if step_expected_export_dir is not None:
+        _linear_replay_write_step_expected(
+            step_expected_export_dir,
+            history,
+            flag=int(flag_N),
+            newton_iterations=int(it),
+            lambda_end=float(lambda_it),
+            omega=float(omega),
+        )
     return U_it, float(lambda_it), flag_N, it, history
 
 

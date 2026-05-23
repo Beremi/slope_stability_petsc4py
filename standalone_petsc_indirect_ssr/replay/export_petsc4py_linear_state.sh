@@ -6,13 +6,15 @@ OUT_ROOT="${OUT_ROOT:-/tmp/ssr_linear_replay_state}"
 RUN_OUT="${RUN_OUT:-/tmp/petsc4py_p4_l1_replay_out}"
 CONFIG="${CONFIG:-/tmp/petsc4py_p4_l1_replay.toml}"
 RANKS="${RANKS:-4}"
+OMEGA_MAX="${OMEGA_MAX:-6.25e6}"
+STEP_MAX="${STEP_MAX:-100}"
 
-cat > "${CONFIG}" <<'TOML'
+cat > "${CONFIG}" <<TOML
 [benchmark]
 title = "3D heterogeneous SSR replay export"
 matlab_script = "slope_stability_3D_hetero_SSR.m"
 comparison_kind = "continuation"
-mpi_ranks = 4
+mpi_ranks = ${RANKS}
 suite = false
 
 [problem]
@@ -34,10 +36,10 @@ lambda_init = 1.0
 d_lambda_init = 0.1
 d_lambda_min = 1e-3
 d_lambda_diff_scaled_min = 1e-3
-omega_max = 6.25e6
+omega_max = ${OMEGA_MAX}
 init_newton_stopping_criterion = "relative_correction"
 init_newton_stopping_tol = 1e-3
-step_max = 100
+step_max = ${STEP_MAX}
 
 [newton]
 it_max = 200
@@ -79,6 +81,9 @@ SSP_LINEAR_STATE_EXPORT_NEWTON_ITERS="${EXPORT_NEWTON_ITERS:-1}" \
 SSP_LINEAR_STATE_EXPORT_OMEGA_MIN="${EXPORT_OMEGA_MIN:-6.24e6}" \
 SSP_LINEAR_STATE_EXPORT_OMEGA_MAX="${EXPORT_OMEGA_MAX:-6.25e6}" \
 SSP_LINEAR_STATE_EXPORT_MATRIX="${EXPORT_MATRIX:-1}" \
+SSP_LINEAR_STATE_EXPORT_PROBES="${EXPORT_PROBES:-1}" \
+SSP_LINEAR_STATE_EXPORT_PROBE_FORMAT="${EXPORT_PROBE_FORMAT:-petsc}" \
+SSP_LINEAR_STATE_EXPORT_STEP_HISTORY="${EXPORT_STEP_HISTORY:-0}" \
 mpiexec -n "${RANKS}" "${ROOT_DIR}/.venv/bin/python" -m slope_stability.cli.run_case_from_config \
   "${CONFIG}" \
   --out_dir "${RUN_OUT}"

@@ -46,6 +46,11 @@ typedef enum {
   DEFLATION_SOLVER_CG
 } DeflationSolverType;
 
+typedef enum {
+  DEFLATION_PROJECTOR_A_ORTHONORMAL,
+  DEFLATION_PROJECTOR_BIORTHOGONAL
+} DeflationProjectorType;
+
 typedef struct {
   char      mesh[PETSC_MAX_PATH_LEN];
   PetscInt  refine_levels;
@@ -108,14 +113,33 @@ typedef struct {
   PetscBool inspect_partition;
   PetscBool reuse_linear_solver;
   PetscBool use_deflation;
+  PetscBool indirect_newton_pair_freeze_matrix;
   char      deflation_solver_name[32];
   DeflationSolverType deflation_solver;
+  char      deflation_projector_name[32];
+  DeflationProjectorType deflation_projector;
   PetscReal deflation_basis_tol;
+  PetscReal deflation_biorthogonal_pivot_tol;
   PetscInt  deflation_max_it;
   PetscInt  deflation_max_vectors;
   PetscBool deflation_monitor;
+  PetscBool deflation_intra_newton_recycle;
+  PetscInt  deflation_recycle_max_vectors;
+  PetscReal deflation_recycle_basis_tol;
+  PetscBool deflation_krylov_persistent;
+  PetscReal deflation_krylov_basis_tol;
+  PetscBool deflation_check_orthonormality;
+  PetscReal deflation_orthonormality_warn_tol;
+  PetscInt  deflation_reorthogonalize_sweeps;
   char      linear_replay_dir[PETSC_MAX_PATH_LEN];
   PetscBool linear_replay_use_exported_rhs;
+  PetscBool linear_replay_check_pc_probe;
+  char      step_replay_dir[PETSC_MAX_PATH_LEN];
+  char      init_replay_dir[PETSC_MAX_PATH_LEN];
+  PetscBool init_replay_use_exported_matrix;
+  PetscBool init_replay_use_exported_rhs;
+  PetscBool init_replay_use_exported_u;
+  PetscBool init_replay_check_damping;
 } AppCtx;
 
 typedef struct {
@@ -138,7 +162,9 @@ typedef struct {
   KSP          ksp;
   PetscBool    reuse;
   Vec         *raw_basis;
+  PetscReal   *raw_basis_tol;
   Vec         *orth_basis;
+  Vec         *left_basis;
   Vec         *Aorth_basis;
   PetscInt     n_raw_basis;
   PetscInt     raw_basis_cap;
@@ -150,6 +176,14 @@ typedef struct {
   PetscLogDouble deflation_projector_time;
   PetscInt       deflation_coarse_calls;
   PetscInt       deflation_projected_pc_calls;
+  Vec           *recycle_basis;
+  PetscInt       n_recycle_basis;
+  PetscInt       recycle_basis_cap;
+  PetscBool      capture_recycle_basis;
+  PetscBool      recycle_temp_basis_active;
+  PetscInt       recycle_temp_start_raw;
+  PetscBool      force_reuse_preconditioner;
+  PetscInt       deflation_krylov_persistent_added;
   PetscInt       pmg_lag_solve_index;
   PetscBool      pmg_hierarchy_initialized;
   PetscBool      pmg_p1_basis_created;
@@ -283,14 +317,33 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->inspect_partition         = PETSC_FALSE;
   app->reuse_linear_solver       = PETSC_TRUE;
   app->use_deflation             = PETSC_TRUE;
+  app->indirect_newton_pair_freeze_matrix = PETSC_FALSE;
   PetscCall(PetscStrncpy(app->deflation_solver_name, "fgmres", sizeof(app->deflation_solver_name)));
   app->deflation_solver      = DEFLATION_SOLVER_FGMRES;
+  PetscCall(PetscStrncpy(app->deflation_projector_name, "a_orthonormal", sizeof(app->deflation_projector_name)));
+  app->deflation_projector   = DEFLATION_PROJECTOR_A_ORTHONORMAL;
   app->deflation_basis_tol   = 1.0e-3;
+  app->deflation_biorthogonal_pivot_tol = 1.0e-10;
   app->deflation_max_it      = 0;
   app->deflation_max_vectors = 0;
   app->deflation_monitor     = PETSC_FALSE;
+  app->deflation_intra_newton_recycle = PETSC_FALSE;
+  app->deflation_recycle_max_vectors  = 0;
+  app->deflation_recycle_basis_tol     = 1.0e-30;
+  app->deflation_krylov_persistent     = PETSC_FALSE;
+  app->deflation_krylov_basis_tol      = 0.0;
+  app->deflation_check_orthonormality  = PETSC_FALSE;
+  app->deflation_orthonormality_warn_tol = 1.0e-8;
+  app->deflation_reorthogonalize_sweeps = 0;
   app->linear_replay_dir[0]  = '\0';
   app->linear_replay_use_exported_rhs = PETSC_TRUE;
+  app->linear_replay_check_pc_probe   = PETSC_TRUE;
+  app->step_replay_dir[0]            = '\0';
+  app->init_replay_dir[0]            = '\0';
+  app->init_replay_use_exported_matrix = PETSC_TRUE;
+  app->init_replay_use_exported_rhs    = PETSC_TRUE;
+  app->init_replay_use_exported_u      = PETSC_TRUE;
+  app->init_replay_check_damping       = PETSC_TRUE;
 
   PetscOptionsBegin(comm, NULL, "Standalone P4 indirect SSR options", NULL);
   PetscCall(PetscOptionsString("-mesh", "Gmsh mesh path", NULL, app->mesh, app->mesh, sizeof(app->mesh), NULL));
@@ -353,13 +406,31 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsBool("-inspect_partition", "Print DMPlex/MATIS partition diagnostics and exit before assembly", NULL, app->inspect_partition, &app->inspect_partition, NULL));
   PetscCall(PetscOptionsBool("-reuse_linear_solver", "Keep one KSP/PC hierarchy and refresh operators for repeated elastic/Newton solves", NULL, app->reuse_linear_solver, &app->reuse_linear_solver, NULL));
   PetscCall(PetscOptionsBool("-deflation", "Use collected linear solutions as an A-orthonormal deflation basis for Newton solves", NULL, app->use_deflation, &app->use_deflation, NULL));
+  PetscCall(PetscOptionsBool("-indirect_newton_pair_freeze_matrix", "Chord-pair experiment: assemble a fresh indirect Newton tangent on even iterations, reuse it and its preconditioner on the following odd iteration", NULL, app->indirect_newton_pair_freeze_matrix, &app->indirect_newton_pair_freeze_matrix, NULL));
   PetscCall(PetscOptionsString("-deflation_solver", "Deflated outer Krylov method: fgmres|matlab_dfgmres|cg", NULL, app->deflation_solver_name, app->deflation_solver_name, sizeof(app->deflation_solver_name), NULL));
+  PetscCall(PetscOptionsString("-deflation_projector", "Deflation projector: a_orthonormal|biorthogonal", NULL, app->deflation_projector_name, app->deflation_projector_name, sizeof(app->deflation_projector_name), NULL));
   PetscCall(PetscOptionsReal("-deflation_basis_tol", "Minimum A-norm squared for keeping a deflation vector during A-orthogonalization", NULL, app->deflation_basis_tol, &app->deflation_basis_tol, NULL));
+  PetscCall(PetscOptionsReal("-deflation_biorthogonal_pivot_tol", "Relative pivot-angle cutoff for -deflation_projector biorthogonal", NULL, app->deflation_biorthogonal_pivot_tol, &app->deflation_biorthogonal_pivot_tol, NULL));
   PetscCall(PetscOptionsInt("-deflation_max_it", "Maximum iterations for the explicit deflated Krylov solve; 0 uses -ksp_max_it with a safe fallback", NULL, app->deflation_max_it, &app->deflation_max_it, NULL));
   PetscCall(PetscOptionsInt("-deflation_max_vectors", "Maximum collected deflation vectors; 0 keeps all Newton-step vectors", NULL, app->deflation_max_vectors, &app->deflation_max_vectors, NULL));
   PetscCall(PetscOptionsBool("-deflation_monitor", "Print explicit deflated Krylov residual history", NULL, app->deflation_monitor, &app->deflation_monitor, NULL));
+  PetscCall(PetscOptionsBool("-deflation_intra_newton_recycle", "Temporarily recycle Krylov directions from the expected cheaper indirect Newton solve into the other solve with the same matrix", NULL, app->deflation_intra_newton_recycle, &app->deflation_intra_newton_recycle, NULL));
+  PetscCall(PetscOptionsInt("-deflation_recycle_max_vectors", "Maximum temporary Krylov directions to recycle per indirect Newton pair; 0 keeps all directions", NULL, app->deflation_recycle_max_vectors, &app->deflation_recycle_max_vectors, NULL));
+  PetscCall(PetscOptionsReal("-deflation_recycle_basis_tol", "Minimum A-norm squared for temporary intra-Newton Krylov recycle vectors; independent of -deflation_basis_tol", NULL, app->deflation_recycle_basis_tol, &app->deflation_recycle_basis_tol, NULL));
+  PetscCall(PetscOptionsBool("-deflation_krylov_persistent", "Append every explicit FGMRES/DFGMRES preconditioned Krylov direction to the persistent deflation pool for the current Newton solve", NULL, app->deflation_krylov_persistent, &app->deflation_krylov_persistent, NULL));
+  PetscCall(PetscOptionsReal("-deflation_krylov_basis_tol", "Minimum A-norm squared for persistent Krylov deflation directions; 0 disables scale cutoff", NULL, app->deflation_krylov_basis_tol, &app->deflation_krylov_basis_tol, NULL));
+  PetscCall(PetscOptionsBool("-deflation_check_orthonormality", "After A-orthogonalizing the deflation basis, explicitly check B^T A B against identity", NULL, app->deflation_check_orthonormality, &app->deflation_check_orthonormality, NULL));
+  PetscCall(PetscOptionsReal("-deflation_orthonormality_warn_tol", "Warning threshold for DEFLATION_GRAM_CHECK ok=false", NULL, app->deflation_orthonormality_warn_tol, &app->deflation_orthonormality_warn_tol, NULL));
+  PetscCall(PetscOptionsInt("-deflation_reorthogonalize_sweeps", "Extra bidirectional A-reorthogonalization sweeps after the normal basis build and before each linear solve", NULL, app->deflation_reorthogonalize_sweeps, &app->deflation_reorthogonalize_sweeps, NULL));
   PetscCall(PetscOptionsString("-linear_replay_dir", "Replay one petsc4py-exported indirect Newton linear state from this sample directory", NULL, app->linear_replay_dir, app->linear_replay_dir, sizeof(app->linear_replay_dir), NULL));
   PetscCall(PetscOptionsBool("-linear_replay_use_exported_rhs", "Solve exported petsc4py RHS vectors instead of C-rebuilt RHS vectors", NULL, app->linear_replay_use_exported_rhs, &app->linear_replay_use_exported_rhs, NULL));
+  PetscCall(PetscOptionsBool("-linear_replay_check_pc_probe", "Compare exported first PCApply/Arnoldi probe vectors in replay modes", NULL, app->linear_replay_check_pc_probe, &app->linear_replay_check_pc_probe, NULL));
+  PetscCall(PetscOptionsString("-step_replay_dir", "Start a full indirect Newton solve from one petsc4py-exported indirect linear sample directory", NULL, app->step_replay_dir, app->step_replay_dir, sizeof(app->step_replay_dir), NULL));
+  PetscCall(PetscOptionsString("-init_replay_dir", "Replay one petsc4py-exported fixed-lambda init Newton state from this sample directory", NULL, app->init_replay_dir, app->init_replay_dir, sizeof(app->init_replay_dir), NULL));
+  PetscCall(PetscOptionsBool("-init_replay_use_exported_matrix", "Solve the init replay with the exported petsc4py regularized matrix", NULL, app->init_replay_use_exported_matrix, &app->init_replay_use_exported_matrix, NULL));
+  PetscCall(PetscOptionsBool("-init_replay_use_exported_rhs", "Solve the init replay with the exported petsc4py RHS", NULL, app->init_replay_use_exported_rhs, &app->init_replay_use_exported_rhs, NULL));
+  PetscCall(PetscOptionsBool("-init_replay_use_exported_u", "Assemble C init replay objects at the exported petsc4py displacement", NULL, app->init_replay_use_exported_u, &app->init_replay_use_exported_u, NULL));
+  PetscCall(PetscOptionsBool("-init_replay_check_damping", "Compare C fixed-lambda damping against exported petsc4py damping metadata", NULL, app->init_replay_check_damping, &app->init_replay_check_damping, NULL));
   PetscOptionsEnd();
 
   PetscCall(PetscStrcasecmp(app->variant_name, "gamg", &flg));
@@ -450,8 +521,14 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCheck(!app->bddc_use_local_dirichlet, comm, PETSC_ERR_SUP,
              "-bddc_use_local_dirichlet is disabled for the PETSc-constrained DMPlex plasticity driver; BDDC local Dirichlet rows must first be rebuilt in MATIS local row space");
   PetscCheck(app->deflation_basis_tol >= 0.0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_basis_tol must be nonnegative");
+  PetscCheck(app->deflation_biorthogonal_pivot_tol >= 0.0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_biorthogonal_pivot_tol must be nonnegative");
+  PetscCheck(app->deflation_recycle_basis_tol >= 0.0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_recycle_basis_tol must be nonnegative");
+  PetscCheck(app->deflation_krylov_basis_tol >= 0.0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_krylov_basis_tol must be nonnegative");
+  PetscCheck(app->deflation_orthonormality_warn_tol >= 0.0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_orthonormality_warn_tol must be nonnegative");
+  PetscCheck(app->deflation_reorthogonalize_sweeps >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_reorthogonalize_sweeps must be nonnegative");
   PetscCheck(app->deflation_max_it >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_max_it must be nonnegative");
   PetscCheck(app->deflation_max_vectors >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_max_vectors must be nonnegative");
+  PetscCheck(app->deflation_recycle_max_vectors >= 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-deflation_recycle_max_vectors must be nonnegative");
   PetscCall(PetscStrcasecmp(app->deflation_solver_name, "fgmres", &flg));
   if (flg) app->deflation_solver = DEFLATION_SOLVER_FGMRES;
   else {
@@ -464,6 +541,23 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
       app->deflation_solver = DEFLATION_SOLVER_CG;
     }
   }
+  PetscCall(PetscStrcasecmp(app->deflation_projector_name, "a_orthonormal", &flg));
+  if (flg) app->deflation_projector = DEFLATION_PROJECTOR_A_ORTHONORMAL;
+  else {
+    PetscCall(PetscStrcasecmp(app->deflation_projector_name, "biorthogonal", &flg));
+    PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-deflation_projector must be a_orthonormal or biorthogonal");
+    app->deflation_projector = DEFLATION_PROJECTOR_BIORTHOGONAL;
+  }
+  PetscCheck(app->deflation_projector != DEFLATION_PROJECTOR_BIORTHOGONAL || app->deflation_solver != DEFLATION_SOLVER_CG, comm, PETSC_ERR_SUP,
+             "-deflation_projector biorthogonal is implemented for explicit FGMRES/DFGMRES, not CG");
+  PetscCheck(!app->deflation_intra_newton_recycle || app->deflation_solver != DEFLATION_SOLVER_CG, comm, PETSC_ERR_SUP,
+             "-deflation_intra_newton_recycle is implemented for explicit FGMRES/DFGMRES, not CG");
+  PetscCheck(!app->deflation_krylov_persistent || app->deflation_solver != DEFLATION_SOLVER_CG, comm, PETSC_ERR_SUP,
+             "-deflation_krylov_persistent is implemented for explicit FGMRES/DFGMRES, not CG");
+  PetscCheck(!app->deflation_intra_newton_recycle || app->deflation_max_vectors == 0, comm, PETSC_ERR_SUP,
+             "-deflation_intra_newton_recycle currently requires -deflation_max_vectors 0 so temporary vectors cannot evict permanent history");
+  PetscCheck(!app->deflation_krylov_persistent || app->deflation_max_vectors == 0, comm, PETSC_ERR_SUP,
+             "-deflation_krylov_persistent requires -deflation_max_vectors 0 so Krylov history is not evicted inside the Newton solve");
   PetscCheck(!app->use_deflation || app->variant != VARIANT_FETIDP, comm, PETSC_ERR_SUP,
              "Explicit deflation currently wraps PETSc PCs; KSPFETIDP is itself a KSP and is not supported by -deflation");
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -2173,6 +2267,7 @@ static PetscErrorCode PMGActiveLayoutCreate(MPI_Comm comm, Vec original_template
   PetscMPIInt rank, size;
   VecType     vec_type = NULL;
   PetscInt    local_for_min;
+  PetscInt    original_local, original_start, original_end;
 
   PetscFunctionBeginUser;
   PetscCall(PetscMemzero(layout, sizeof(*layout)));
@@ -2183,6 +2278,8 @@ static PetscErrorCode PMGActiveLayoutCreate(MPI_Comm comm, Vec original_template
   PetscCall(PMGParseSubcommType(comm, subcomm_type_name, &layout->subcomm_type));
   PetscCall(PetscStrncpy(layout->subcomm_type_name, subcomm_type_name, sizeof(layout->subcomm_type_name)));
   PetscCall(VecGetSize(original_template, &layout->global_dofs));
+  PetscCall(VecGetLocalSize(original_template, &original_local));
+  PetscCall(VecGetOwnershipRange(original_template, &original_start, &original_end));
   PetscCall(VecGetBlockSize(original_template, &layout->block_size));
   PetscCall(VecGetType(original_template, &vec_type));
   PetscCall(PMGResolveActiveRanks(comm, requested_active_ranks, &layout->active_ranks, &layout->reduction_factor));
@@ -2192,12 +2289,18 @@ static PetscErrorCode PMGActiveLayoutCreate(MPI_Comm comm, Vec original_template
   PetscCallMPI(MPI_Comm_split(comm, layout->active ? 0 : MPI_UNDEFINED, rank, &layout->subcomm));
   if (layout->active) {
     PetscCall(VecCreate(layout->subcomm, &layout->sub_template));
-    PetscCall(VecSetSizes(layout->sub_template, PETSC_DECIDE, layout->global_dofs));
+    PetscCall(VecSetSizes(layout->sub_template, layout->active_ranks == (PetscInt)size ? original_local : PETSC_DECIDE, layout->global_dofs));
     PetscCall(VecSetBlockSize(layout->sub_template, layout->block_size));
     if (vec_type) PetscCall(VecSetType(layout->sub_template, vec_type));
     PetscCall(VecSetFromOptions(layout->sub_template));
     PetscCall(VecGetLocalSize(layout->sub_template, &layout->local_dofs));
     PetscCall(VecGetOwnershipRange(layout->sub_template, &layout->ownership_start, &layout->ownership_end));
+    if (layout->active_ranks == (PetscInt)size) {
+      PetscCheck(layout->local_dofs == original_local && layout->ownership_start == original_start && layout->ownership_end == original_end, comm, PETSC_ERR_PLIB,
+                 "All-active PMG layout failed to preserve original ownership: original [%" PetscInt_FMT ",%" PetscInt_FMT ") local %" PetscInt_FMT
+                 ", active [%" PetscInt_FMT ",%" PetscInt_FMT ") local %" PetscInt_FMT,
+                 original_start, original_end, original_local, layout->ownership_start, layout->ownership_end, layout->local_dofs);
+    }
   } else {
     layout->local_dofs      = 0;
     layout->ownership_start = 0;
@@ -2407,6 +2510,15 @@ typedef struct {
   Vec            p2_delta;
   Vec            p1_rhs;
   Vec            p1_x;
+  PetscBool      debug_capture;
+  Vec            debug_fine_pre;
+  Vec            debug_fine_residual;
+  Vec            debug_p2_rhs;
+  Vec            debug_p2_pre;
+  Vec            debug_p2_residual;
+  Vec            debug_p1_rhs;
+  Vec            debug_p1_x;
+  Vec            debug_p2_post;
   PetscInt       apply_calls;
   PetscInt       operator_updates;
   PetscLogDouble fine_smooth_time;
@@ -2635,6 +2747,15 @@ static PetscErrorCode PMGShellResidual(Mat A, Vec rhs, Vec x, Vec r, Vec tmp, Pe
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode PMGShellDebugCapture(PMGShellVCycleCtx *ctx, Vec src, Vec *dst)
+{
+  PetscFunctionBeginUser;
+  if (!ctx->debug_capture || !src) PetscFunctionReturn(PETSC_SUCCESS);
+  if (!*dst) PetscCall(VecDuplicate(src, dst));
+  PetscCall(VecCopy(src, *dst));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode PMGShellVCycleSetUp(PC pc)
 {
   PMGShellVCycleCtx *ctx = NULL;
@@ -2667,15 +2788,18 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(KSPSolve(ctx->smooth4, x, y));
   PetscCall(PetscTime(&t1));
   ctx->fine_smooth_time += t1 - t0;
+  PetscCall(PMGShellDebugCapture(ctx, y, &ctx->debug_fine_pre));
   PetscCall(PetscLogStagePop());
 
   PetscCall(PMGShellResidual(ctx->A4, x, y, ctx->r4, ctx->tmp4, &ctx->residual_time));
+  PetscCall(PMGShellDebugCapture(ctx, ctx->r4, &ctx->debug_fine_residual));
   PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
   PetscCall(PetscTime(&t0));
   PetscCall(MatMultTranspose(ctx->P42, ctx->r4, ctx->p2_rhs_full));
   PetscCall(PetscTime(&t1));
   ctx->restrict_time += t1 - t0;
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p2_layout, ctx->p2_rhs_full, ctx->p2_rhs));
+  PetscCall(PMGShellDebugCapture(ctx, ctx->p2_rhs, &ctx->debug_p2_rhs));
   PetscCall(PetscLogStagePop());
 
   if (ctx->p2_layout.active) {
@@ -2685,8 +2809,10 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_rhs, ctx->p2_x));
     PetscCall(PetscTime(&t1));
     ctx->p2_smooth_time += t1 - t0;
+    PetscCall(PMGShellDebugCapture(ctx, ctx->p2_x, &ctx->debug_p2_pre));
     PetscCall(PetscLogStagePop());
     PetscCall(PMGShellResidual(ctx->A2_sub, ctx->p2_rhs, ctx->p2_x, ctx->p2_r, ctx->p2_delta, &ctx->residual_time));
+    PetscCall(PMGShellDebugCapture(ctx, ctx->p2_r, &ctx->debug_p2_residual));
   }
   PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
   PetscCall(PMGActiveLayoutCopySubToFull(&ctx->p2_layout, ctx->p2_r, ctx->p2_r_full));
@@ -2695,6 +2821,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(PetscTime(&t1));
   ctx->restrict_time += t1 - t0;
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p1_layout, ctx->p1_rhs_full, ctx->p1_rhs));
+  PetscCall(PMGShellDebugCapture(ctx, ctx->p1_rhs, &ctx->debug_p1_rhs));
   PetscCall(PetscLogStagePop());
 
   if (ctx->p1_layout.active) {
@@ -2704,6 +2831,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
     PetscCall(KSPSolve(ctx->coarse1, ctx->p1_rhs, ctx->p1_x));
     PetscCall(PetscTime(&t1));
     ctx->coarse_solve_time += t1 - t0;
+    PetscCall(PMGShellDebugCapture(ctx, ctx->p1_x, &ctx->debug_p1_x));
     PetscCall(PetscLogStagePop());
   }
   PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
@@ -2721,6 +2849,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_rhs, ctx->p2_x));
     PetscCall(PetscTime(&t1));
     ctx->p2_smooth_time += t1 - t0;
+    PetscCall(PMGShellDebugCapture(ctx, ctx->p2_x, &ctx->debug_p2_post));
     PetscCall(PetscLogStagePop());
   }
   PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
@@ -2779,6 +2908,14 @@ static PetscErrorCode PMGShellVCycleDestroy(PC pc)
   PetscCall(VecDestroy(&ctx->p2_delta));
   PetscCall(VecDestroy(&ctx->p1_rhs));
   PetscCall(VecDestroy(&ctx->p1_x));
+  PetscCall(VecDestroy(&ctx->debug_fine_pre));
+  PetscCall(VecDestroy(&ctx->debug_fine_residual));
+  PetscCall(VecDestroy(&ctx->debug_p2_rhs));
+  PetscCall(VecDestroy(&ctx->debug_p2_pre));
+  PetscCall(VecDestroy(&ctx->debug_p2_residual));
+  PetscCall(VecDestroy(&ctx->debug_p1_rhs));
+  PetscCall(VecDestroy(&ctx->debug_p1_x));
+  PetscCall(VecDestroy(&ctx->debug_p2_post));
   PetscCall(PMGActiveLayoutDestroy(&ctx->p2_layout));
   PetscCall(PMGActiveLayoutDestroy(&ctx->p1_layout));
   PetscCall(DMDestroy(&ctx->dm_p1));
@@ -3209,6 +3346,7 @@ static PetscErrorCode ResidualNormFree(AssemblyCtx *actx, Vec residual, PetscRea
 }
 
 static PetscErrorCode LinearSolverClearOrthBasis(LinearSolverCtx *solver);
+static PetscErrorCode LinearSolverClearRecycleBasis(LinearSolverCtx *solver);
 
 static PetscErrorCode LinearSolverInit(LinearSolverCtx *solver, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A)
 {
@@ -3219,6 +3357,8 @@ static PetscErrorCode LinearSolverInit(LinearSolverCtx *solver, DM dm, AssemblyC
   solver->app   = app;
   solver->A     = A;
   solver->reuse = app->reuse_linear_solver;
+  solver->recycle_temp_start_raw = -1;
+  solver->force_reuse_preconditioner = PETSC_FALSE;
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "LINEAR_SOLVER_REUSE enabled=%s\n", solver->reuse ? "true" : "false"));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -3227,10 +3367,14 @@ static PetscErrorCode LinearSolverDestroy(LinearSolverCtx *solver)
 {
   PetscFunctionBeginUser;
   PetscCall(LinearSolverClearOrthBasis(solver));
+  PetscCall(LinearSolverClearRecycleBasis(solver));
   for (PetscInt i = 0; i < solver->n_raw_basis; ++i) PetscCall(VecDestroy(&solver->raw_basis[i]));
   PetscCall(PetscFree(solver->raw_basis));
+  PetscCall(PetscFree(solver->raw_basis_tol));
   PetscCall(PetscFree(solver->orth_basis));
+  PetscCall(PetscFree(solver->left_basis));
   PetscCall(PetscFree(solver->Aorth_basis));
+  PetscCall(PetscFree(solver->recycle_basis));
   PetscCall(KSPDestroy(&solver->ksp));
   PetscCall(LinearSolverDestroyPMGHierarchy(solver));
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -3288,13 +3432,20 @@ static PetscErrorCode LinearSolverClearOrthBasis(LinearSolverCtx *solver)
   PetscFunctionBeginUser;
   for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
     PetscCall(VecDestroy(&solver->orth_basis[i]));
+    PetscCall(VecDestroy(&solver->left_basis[i]));
     PetscCall(VecDestroy(&solver->Aorth_basis[i]));
   }
   solver->n_orth_basis = 0;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode LinearSolverAppendRawBasis(LinearSolverCtx *solver, Vec v, const char label[])
+static Vec LinearSolverTestBasis(const LinearSolverCtx *solver, PetscInt i)
+{
+  if (solver->app->deflation_projector == DEFLATION_PROJECTOR_BIORTHOGONAL && solver->left_basis && solver->left_basis[i]) return solver->left_basis[i];
+  return solver->orth_basis[i];
+}
+
+static PetscErrorCode LinearSolverAppendRawBasisWithTol(LinearSolverCtx *solver, Vec v, const char label[], PetscReal basis_tol)
 {
   Vec copy = NULL;
 
@@ -3306,19 +3457,32 @@ static PetscErrorCode LinearSolverAppendRawBasis(LinearSolverCtx *solver, Vec v,
     const PetscInt new_cap = solver->raw_basis_cap ? 2 * solver->raw_basis_cap : 8;
 
     PetscCall(PetscRealloc((size_t)new_cap * sizeof(Vec), &solver->raw_basis));
+    PetscCall(PetscRealloc((size_t)new_cap * sizeof(PetscReal), &solver->raw_basis_tol));
     for (PetscInt i = solver->raw_basis_cap; i < new_cap; ++i) solver->raw_basis[i] = NULL;
     solver->raw_basis_cap = new_cap;
   }
-  solver->raw_basis[solver->n_raw_basis++] = copy;
+  solver->raw_basis[solver->n_raw_basis]     = copy;
+  solver->raw_basis_tol[solver->n_raw_basis] = basis_tol;
+  solver->n_raw_basis++;
   copy                                = NULL;
   if (solver->app->deflation_max_vectors > 0 && solver->n_raw_basis > solver->app->deflation_max_vectors) {
     PetscCall(VecDestroy(&solver->raw_basis[0]));
-    for (PetscInt i = 1; i < solver->n_raw_basis; ++i) solver->raw_basis[i - 1] = solver->raw_basis[i];
+    for (PetscInt i = 1; i < solver->n_raw_basis; ++i) {
+      solver->raw_basis[i - 1]     = solver->raw_basis[i];
+      solver->raw_basis_tol[i - 1] = solver->raw_basis_tol[i];
+    }
     solver->raw_basis[--solver->n_raw_basis] = NULL;
   }
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
-                        "DEFLATION_BASIS_ADD label=\"%s\" raw_cols=%" PetscInt_FMT " max_cols=%" PetscInt_FMT "\n",
-                        label, solver->n_raw_basis, solver->app->deflation_max_vectors));
+                        "DEFLATION_BASIS_ADD label=\"%s\" raw_cols=%" PetscInt_FMT " max_cols=%" PetscInt_FMT " basis_tol=%.6e\n",
+                        label, solver->n_raw_basis, solver->app->deflation_max_vectors, (double)basis_tol));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverAppendRawBasis(LinearSolverCtx *solver, Vec v, const char label[])
+{
+  PetscFunctionBeginUser;
+  PetscCall(LinearSolverAppendRawBasisWithTol(solver, v, label, solver->app->deflation_basis_tol));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -3329,35 +3493,385 @@ static PetscErrorCode LinearSolverTruncateRawBasis(LinearSolverCtx *solver, Pets
   if (n_keep >= solver->n_raw_basis) PetscFunctionReturn(PETSC_SUCCESS);
   for (PetscInt i = n_keep; i < solver->n_raw_basis; ++i) PetscCall(VecDestroy(&solver->raw_basis[i]));
   solver->n_raw_basis = n_keep;
+  for (PetscInt i = n_keep; i < solver->raw_basis_cap; ++i) {
+    if (solver->raw_basis) solver->raw_basis[i] = NULL;
+  }
+  solver->recycle_temp_basis_active = PETSC_FALSE;
+  solver->recycle_temp_start_raw    = -1;
   PetscCall(LinearSolverClearOrthBasis(solver));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATION_BASIS_RESTORE raw_cols=%" PetscInt_FMT "\n", solver->n_raw_basis));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode LinearSolverStoreOrthVector(LinearSolverCtx *solver, Vec v, Vec Av)
+static PetscErrorCode LinearSolverClearRecycleBasis(LinearSolverCtx *solver)
 {
-  Vec copy = NULL, Acopy = NULL;
+  PetscFunctionBeginUser;
+  for (PetscInt i = 0; i < solver->n_recycle_basis; ++i) PetscCall(VecDestroy(&solver->recycle_basis[i]));
+  solver->n_recycle_basis = 0;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverCaptureRecycleVector(LinearSolverCtx *solver, Vec v)
+{
+  Vec copy = NULL;
+
+  PetscFunctionBeginUser;
+  if (!solver->capture_recycle_basis) PetscFunctionReturn(PETSC_SUCCESS);
+  if (solver->app->deflation_recycle_max_vectors > 0 && solver->n_recycle_basis >= solver->app->deflation_recycle_max_vectors) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(VecDuplicate(v, &copy));
+  PetscCall(VecCopy(v, copy));
+  if (solver->recycle_basis_cap == solver->n_recycle_basis) {
+    const PetscInt new_cap = solver->recycle_basis_cap ? 2 * solver->recycle_basis_cap : 8;
+
+    PetscCall(PetscRealloc((size_t)new_cap * sizeof(Vec), &solver->recycle_basis));
+    for (PetscInt i = solver->recycle_basis_cap; i < new_cap; ++i) solver->recycle_basis[i] = NULL;
+    solver->recycle_basis_cap = new_cap;
+  }
+  solver->recycle_basis[solver->n_recycle_basis++] = copy;
+  copy = NULL;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverAppendPersistentKrylovVector(LinearSolverCtx *solver, Vec v, const char solve_label[], PetscInt krylov_it)
+{
+  char label[256];
+
+  PetscFunctionBeginUser;
+  if (!solver->app->deflation_krylov_persistent) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscSNPrintf(label, sizeof(label), "%s persistent Krylov direction %" PetscInt_FMT, solve_label, krylov_it + 1));
+  PetscCall(LinearSolverAppendRawBasisWithTol(solver, v, label, solver->app->deflation_krylov_basis_tol));
+  solver->deflation_krylov_persistent_added++;
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_KRYLOV_PERSISTENT_ADD solve=\"%s\" krylov_it=%" PetscInt_FMT " raw_cols=%" PetscInt_FMT " basis_tol=%.6e total_added=%" PetscInt_FMT "\n",
+                        solve_label, krylov_it + 1, solver->n_raw_basis, (double)solver->app->deflation_krylov_basis_tol,
+                        solver->deflation_krylov_persistent_added));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverBeginRecycleCapture(LinearSolverCtx *solver)
+{
+  PetscFunctionBeginUser;
+  PetscCall(LinearSolverClearRecycleBasis(solver));
+  solver->capture_recycle_basis = PETSC_TRUE;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverEndRecycleCapture(LinearSolverCtx *solver)
+{
+  PetscFunctionBeginUser;
+  solver->capture_recycle_basis = PETSC_FALSE;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverAppendTemporaryRecycleBasis(LinearSolverCtx *solver, const char label[], PetscInt *added)
+{
+  PetscFunctionBeginUser;
+  *added = 0;
+  solver->recycle_temp_start_raw    = solver->n_raw_basis;
+  solver->recycle_temp_basis_active = (PetscBool)(solver->n_recycle_basis > 0);
+  for (PetscInt i = 0; i < solver->n_recycle_basis; ++i) {
+    PetscCall(LinearSolverAppendRawBasisWithTol(solver, solver->recycle_basis[i], label, solver->app->deflation_recycle_basis_tol));
+    ++(*added);
+  }
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_INTRANEWTON_TEMP label=\"%s\" captured=%" PetscInt_FMT " added=%" PetscInt_FMT " max=%" PetscInt_FMT " temp_start_raw=%" PetscInt_FMT " recycle_tol=%.6e\n",
+                        label, solver->n_recycle_basis, *added, solver->app->deflation_recycle_max_vectors,
+                        solver->recycle_temp_start_raw, (double)solver->app->deflation_recycle_basis_tol));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverStoreOrthVector(LinearSolverCtx *solver, Vec v, Vec Av, Vec w)
+{
+  Vec copy = NULL, Acopy = NULL, wcopy = NULL;
 
   PetscFunctionBeginUser;
   if (solver->orth_basis_cap == solver->n_orth_basis) {
     const PetscInt new_cap = solver->orth_basis_cap ? 2 * solver->orth_basis_cap : PetscMax(1, solver->n_raw_basis);
 
     PetscCall(PetscRealloc((size_t)new_cap * sizeof(Vec), &solver->orth_basis));
+    PetscCall(PetscRealloc((size_t)new_cap * sizeof(Vec), &solver->left_basis));
     PetscCall(PetscRealloc((size_t)new_cap * sizeof(Vec), &solver->Aorth_basis));
     for (PetscInt i = solver->orth_basis_cap; i < new_cap; ++i) {
       solver->orth_basis[i]  = NULL;
+      solver->left_basis[i]  = NULL;
       solver->Aorth_basis[i] = NULL;
     }
     solver->orth_basis_cap = new_cap;
   }
   PetscCall(VecDuplicate(v, &copy));
   PetscCall(VecCopy(v, copy));
+  if (w) {
+    PetscCall(VecDuplicate(w, &wcopy));
+    PetscCall(VecCopy(w, wcopy));
+  }
   PetscCall(VecDuplicate(Av, &Acopy));
   PetscCall(VecCopy(Av, Acopy));
   solver->orth_basis[solver->n_orth_basis]  = copy;
+  solver->left_basis[solver->n_orth_basis]   = wcopy;
   solver->Aorth_basis[solver->n_orth_basis] = Acopy;
   solver->n_orth_basis++;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverDropOrthVector(LinearSolverCtx *solver, PetscInt idx)
+{
+  PetscFunctionBeginUser;
+  PetscCheck(idx >= 0 && idx < solver->n_orth_basis, PetscObjectComm((PetscObject)solver->dm), PETSC_ERR_ARG_OUTOFRANGE,
+             "Invalid orthogonal basis index %" PetscInt_FMT " for %" PetscInt_FMT " columns", idx, solver->n_orth_basis);
+  PetscCall(VecDestroy(&solver->orth_basis[idx]));
+  PetscCall(VecDestroy(&solver->left_basis[idx]));
+  PetscCall(VecDestroy(&solver->Aorth_basis[idx]));
+  for (PetscInt i = idx + 1; i < solver->n_orth_basis; ++i) {
+    solver->orth_basis[i - 1]  = solver->orth_basis[i];
+    solver->left_basis[i - 1]  = solver->left_basis[i];
+    solver->Aorth_basis[i - 1] = solver->Aorth_basis[i];
+  }
+  solver->n_orth_basis--;
+  solver->orth_basis[solver->n_orth_basis]  = NULL;
+  solver->left_basis[solver->n_orth_basis]  = NULL;
+  solver->Aorth_basis[solver->n_orth_basis] = NULL;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverRenormalizeOrthVector(LinearSolverCtx *solver, PetscInt idx, PetscInt *dropped)
+{
+  PetscScalar norm_scalar;
+  PetscReal   norm_a;
+
+  PetscFunctionBeginUser;
+  *dropped = 0;
+  PetscCall(VecDot(solver->orth_basis[idx], solver->Aorth_basis[idx], &norm_scalar));
+  norm_a = PetscRealPart(norm_scalar);
+  if (norm_a <= 0.0) {
+    PetscCall(LinearSolverDropOrthVector(solver, idx));
+    *dropped = 1;
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  {
+    const PetscReal inv_norm = 1.0 / PetscSqrtReal(norm_a);
+
+    PetscCall(VecScale(solver->orth_basis[idx], inv_norm));
+    PetscCall(VecScale(solver->Aorth_basis[idx], inv_norm));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverReorthogonalizeBasis(LinearSolverCtx *solver, const char label[])
+{
+  PetscInt dropped_total = 0;
+
+  PetscFunctionBeginUser;
+  if (solver->app->deflation_reorthogonalize_sweeps <= 0 || solver->n_orth_basis <= 1) PetscFunctionReturn(PETSC_SUCCESS);
+  for (PetscInt sweep = 0; sweep < solver->app->deflation_reorthogonalize_sweeps; ++sweep) {
+    PetscInt dropped_sweep = 0;
+
+    for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
+      for (PetscInt j = 0; j < i; ++j) {
+        PetscScalar coeff;
+
+        PetscCall(VecDot(solver->orth_basis[j], solver->Aorth_basis[i], &coeff));
+        PetscCall(VecAXPY(solver->orth_basis[i], -coeff, solver->orth_basis[j]));
+        PetscCall(VecAXPY(solver->Aorth_basis[i], -coeff, solver->Aorth_basis[j]));
+      }
+      {
+        PetscInt dropped = 0;
+
+        PetscCall(LinearSolverRenormalizeOrthVector(solver, i, &dropped));
+        if (dropped) {
+          ++dropped_sweep;
+          --i;
+        }
+      }
+    }
+    for (PetscInt i = solver->n_orth_basis; i-- > 0;) {
+      for (PetscInt j = solver->n_orth_basis; j-- > i + 1;) {
+        PetscScalar coeff;
+
+        PetscCall(VecDot(solver->orth_basis[j], solver->Aorth_basis[i], &coeff));
+        PetscCall(VecAXPY(solver->orth_basis[i], -coeff, solver->orth_basis[j]));
+        PetscCall(VecAXPY(solver->Aorth_basis[i], -coeff, solver->Aorth_basis[j]));
+      }
+      {
+        PetscInt dropped = 0;
+
+        PetscCall(LinearSolverRenormalizeOrthVector(solver, i, &dropped));
+        if (dropped) ++dropped_sweep;
+      }
+    }
+    dropped_total += dropped_sweep;
+    PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                          "DEFLATION_REORTHO_SWEEP label=\"%s\" sweep=%" PetscInt_FMT " cols=%" PetscInt_FMT " dropped=%" PetscInt_FMT "\n",
+                          label, sweep + 1, solver->n_orth_basis, dropped_sweep));
+  }
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_REORTHO_SUMMARY label=\"%s\" sweeps=%" PetscInt_FMT " cols=%" PetscInt_FMT " dropped=%" PetscInt_FMT "\n",
+                        label, solver->app->deflation_reorthogonalize_sweeps, solver->n_orth_basis, dropped_total));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverCheckAOrthonormality(LinearSolverCtx *solver, const char label[])
+{
+  PetscReal max_diag_err = 0.0, max_offdiag = 0.0, max_lower = 0.0, max_upper = 0.0, max_asym = 0.0;
+  PetscReal min_diag = PETSC_MAX_REAL, max_diag = -PETSC_MAX_REAL;
+  PetscInt  max_diag_i = -1, max_off_i = -1, max_off_j = -1, max_asym_i = -1, max_asym_j = -1;
+  const char *mode = solver->app->deflation_projector == DEFLATION_PROJECTOR_BIORTHOGONAL ? "biorthogonal" : "a_orthonormal";
+
+  PetscFunctionBeginUser;
+  if (!solver->app->deflation_check_orthonormality) PetscFunctionReturn(PETSC_SUCCESS);
+  for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
+    PetscScalar gii;
+    PetscReal   diag, diag_err;
+
+    PetscCall(VecDot(LinearSolverTestBasis(solver, i), solver->Aorth_basis[i], &gii));
+    diag     = PetscRealPart(gii);
+    diag_err = PetscAbsScalar(gii - 1.0);
+    if (diag < min_diag) min_diag = diag;
+    if (diag > max_diag) max_diag = diag;
+    if (diag_err > max_diag_err) {
+      max_diag_err = diag_err;
+      max_diag_i   = i;
+    }
+    for (PetscInt j = i + 1; j < solver->n_orth_basis; ++j) {
+      PetscScalar gij, gji;
+      PetscReal   abs_ij, abs_ji, asym;
+
+      PetscCall(VecDot(LinearSolverTestBasis(solver, i), solver->Aorth_basis[j], &gij));
+      PetscCall(VecDot(LinearSolverTestBasis(solver, j), solver->Aorth_basis[i], &gji));
+      abs_ij = PetscAbsScalar(gij);
+      abs_ji = PetscAbsScalar(gji);
+      asym   = PetscAbsScalar(gij - gji);
+      if (abs_ij > max_upper) max_upper = abs_ij;
+      if (abs_ji > max_lower) max_lower = abs_ji;
+      if (abs_ij > max_offdiag) {
+        max_offdiag = abs_ij;
+        max_off_i   = i;
+        max_off_j   = j;
+      }
+      if (abs_ji > max_offdiag) {
+        max_offdiag = abs_ji;
+        max_off_i   = j;
+        max_off_j   = i;
+      }
+      if (asym > max_asym) {
+        max_asym   = asym;
+        max_asym_i = i;
+        max_asym_j = j;
+      }
+    }
+  }
+  if (!solver->n_orth_basis) {
+    min_diag = 0.0;
+    max_diag = 0.0;
+  }
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_GRAM_CHECK label=\"%s\" mode=%s cols=%" PetscInt_FMT " max_diag_err=%.6e max_offdiag=%.6e max_lower=%.6e max_upper=%.6e max_asym=%.6e min_diag=%.6e max_diag=%.6e max_diag_i=%" PetscInt_FMT " max_off_i=%" PetscInt_FMT " max_off_j=%" PetscInt_FMT " max_asym_i=%" PetscInt_FMT " max_asym_j=%" PetscInt_FMT " warn_tol=%.6e ok=%s\n",
+                        label, mode, solver->n_orth_basis, (double)max_diag_err, (double)max_offdiag, (double)max_lower,
+                        (double)max_upper, (double)max_asym, (double)min_diag, (double)max_diag, max_diag_i, max_off_i,
+                        max_off_j, max_asym_i, max_asym_j, (double)solver->app->deflation_orthonormality_warn_tol,
+                        (max_diag_err <= solver->app->deflation_orthonormality_warn_tol &&
+                         max_offdiag <= solver->app->deflation_orthonormality_warn_tol) ? "true" : "false"));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverBiorthogonalizeBasis(LinearSolverCtx *solver, Mat A, const char label[])
+{
+  Vec            v = NULL, w = NULL, Av = NULL;
+  PetscInt       skipped_small = 0, skipped_pivot = 0;
+  PetscLogDouble t0, t1;
+  const PetscInt passes = PetscMax((PetscInt)1, solver->app->deflation_reorthogonalize_sweeps + 1);
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscLogStagePush(log_stage_deflation_orthogonalize));
+  PetscCall(PetscTime(&t0));
+  PetscCall(LinearSolverClearOrthBasis(solver));
+  if (!solver->n_raw_basis) {
+    PetscCall(PetscTime(&t1));
+    solver->deflation_orthogonalization_time += t1 - t0;
+    PetscCall(PetscLogStagePop());
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  PetscCall(VecDuplicate(solver->raw_basis[0], &v));
+  PetscCall(VecDuplicate(solver->raw_basis[0], &w));
+  PetscCall(VecDuplicate(solver->raw_basis[0], &Av));
+
+  /*
+    Build an oblique projector basis V,W with W^T A V = I.  V is the
+    correction space used in the coarse component; W is only the test space
+    used for coefficients.  As in the one-sided path, recent raw vectors get
+    priority when near-dependent candidates are skipped.
+  */
+  for (PetscInt src = solver->n_raw_basis; src-- > 0;) {
+    PetscScalar gamma;
+    PetscReal   abs_gamma, basis_tol, w_norm, Av_norm, pivot_tol, pivot_threshold;
+
+    PetscCall(VecCopy(solver->raw_basis[src], v));
+    PetscCall(VecCopy(solver->raw_basis[src], w));
+    PetscCall(MatMult(A, v, Av));
+
+    for (PetscInt pass = 0; pass < passes; ++pass) {
+      for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
+        PetscScalar alpha, beta;
+
+        PetscCall(VecDot(LinearSolverTestBasis(solver, i), Av, &alpha));
+        PetscCall(VecAXPY(v, -alpha, solver->orth_basis[i]));
+        PetscCall(VecAXPY(Av, -alpha, solver->Aorth_basis[i]));
+        PetscCall(VecDot(w, solver->Aorth_basis[i], &beta));
+        PetscCall(VecAXPY(w, -beta, LinearSolverTestBasis(solver, i)));
+      }
+    }
+
+    PetscCall(VecDot(w, Av, &gamma));
+    PetscCall(VecNorm(w, NORM_2, &w_norm));
+    PetscCall(VecNorm(Av, NORM_2, &Av_norm));
+    abs_gamma = PetscAbsScalar(gamma);
+    basis_tol = solver->raw_basis_tol ? solver->raw_basis_tol[src] : solver->app->deflation_basis_tol;
+    pivot_tol = solver->app->deflation_biorthogonal_pivot_tol * w_norm * Av_norm;
+    pivot_threshold = PetscMax(PetscMax(basis_tol, pivot_tol), 1.0e-30);
+    if (PetscIsInfOrNanReal(abs_gamma) || abs_gamma <= pivot_threshold) {
+      ++skipped_small;
+      if (abs_gamma <= PetscMax(pivot_tol, 1.0e-30)) ++skipped_pivot;
+      continue;
+    }
+    {
+      const PetscReal sign = PetscRealPart(gamma) < 0.0 ? -1.0 : 1.0;
+      const PetscReal scale_right = sign / PetscSqrtReal(abs_gamma);
+      const PetscReal scale_left  = 1.0 / PetscSqrtReal(abs_gamma);
+
+      PetscCall(VecScale(v, scale_right));
+      PetscCall(VecScale(Av, scale_right));
+      PetscCall(VecScale(w, scale_left));
+    }
+    PetscCall(LinearSolverStoreOrthVector(solver, v, Av, w));
+  }
+  for (PetscInt i = 0; i < solver->n_orth_basis / 2; ++i) {
+    Vec tmp = solver->orth_basis[i];
+    Vec wtmp = solver->left_basis[i];
+    Vec Atmp = solver->Aorth_basis[i];
+
+    solver->orth_basis[i] = solver->orth_basis[solver->n_orth_basis - 1 - i];
+    solver->orth_basis[solver->n_orth_basis - 1 - i] = tmp;
+    solver->left_basis[i] = solver->left_basis[solver->n_orth_basis - 1 - i];
+    solver->left_basis[solver->n_orth_basis - 1 - i] = wtmp;
+    solver->Aorth_basis[i] = solver->Aorth_basis[solver->n_orth_basis - 1 - i];
+    solver->Aorth_basis[solver->n_orth_basis - 1 - i] = Atmp;
+  }
+  PetscCall(VecDestroy(&v));
+  PetscCall(VecDestroy(&w));
+  PetscCall(VecDestroy(&Av));
+  PetscCall(PetscTime(&t1));
+  solver->deflation_orthogonalization_time += t1 - t0;
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_BIORTHO label=\"%s\" raw_cols=%" PetscInt_FMT " orth_cols=%" PetscInt_FMT " skipped_small=%" PetscInt_FMT " skipped_pivot=%" PetscInt_FMT " passes=%" PetscInt_FMT " default_tol=%.6e pivot_tol=%.6e recycle_active=%s recycle_start=%" PetscInt_FMT " recycle_tol=%.6e krylov_tol=%.6e time=%.6g\n",
+                        label, solver->n_raw_basis, solver->n_orth_basis, skipped_small, skipped_pivot, passes,
+                        (double)solver->app->deflation_basis_tol, (double)solver->app->deflation_biorthogonal_pivot_tol,
+                        solver->recycle_temp_basis_active ? "true" : "false", solver->recycle_temp_start_raw, (double)solver->app->deflation_recycle_basis_tol,
+                        (double)solver->app->deflation_krylov_basis_tol, (double)(t1 - t0)));
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
+                        "DEFLATION_CACHE_CONFIG orth_cols=%" PetscInt_FMT " cached_A_cols=%" PetscInt_FMT " left_cols=%" PetscInt_FMT " projector=biorthogonal\n",
+                        solver->n_orth_basis, solver->n_orth_basis, solver->n_orth_basis));
+  PetscCall(LinearSolverCheckAOrthonormality(solver, label));
+  PetscCall(PetscLogStagePop());
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -3368,6 +3882,10 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
   PetscLogDouble t0, t1;
 
   PetscFunctionBeginUser;
+  if (solver->app->deflation_projector == DEFLATION_PROJECTOR_BIORTHOGONAL) {
+    PetscCall(LinearSolverBiorthogonalizeBasis(solver, A, label));
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
   PetscCall(PetscLogStagePush(log_stage_deflation_orthogonalize));
   PetscCall(PetscTime(&t0));
   PetscCall(LinearSolverClearOrthBasis(solver));
@@ -3404,9 +3922,13 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
       ++skipped_nonpositive;
       continue;
     }
-    if (norm_a <= solver->app->deflation_basis_tol) {
-      ++skipped_small;
-      continue;
+    {
+      const PetscReal basis_tol = solver->raw_basis_tol ? solver->raw_basis_tol[src] : solver->app->deflation_basis_tol;
+
+      if (norm_a <= basis_tol) {
+        ++skipped_small;
+        continue;
+      }
     }
     {
       const PetscReal inv_norm = 1.0 / PetscSqrtReal(norm_a);
@@ -3414,7 +3936,7 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
       PetscCall(VecScale(v, inv_norm));
       PetscCall(VecScale(Av, inv_norm));
     }
-    PetscCall(LinearSolverStoreOrthVector(solver, v, Av));
+    PetscCall(LinearSolverStoreOrthVector(solver, v, Av, NULL));
   }
   for (PetscInt i = 0; i < solver->n_orth_basis / 2; ++i) {
     Vec tmp = solver->orth_basis[i];
@@ -3425,17 +3947,21 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
     solver->Aorth_basis[i] = solver->Aorth_basis[solver->n_orth_basis - 1 - i];
     solver->Aorth_basis[solver->n_orth_basis - 1 - i] = Atmp;
   }
+  PetscCall(LinearSolverReorthogonalizeBasis(solver, label));
   PetscCall(VecDestroy(&v));
   PetscCall(VecDestroy(&Av));
   PetscCall(PetscTime(&t1));
   solver->deflation_orthogonalization_time += t1 - t0;
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
-                        "DEFLATION_ORTHO label=\"%s\" raw_cols=%" PetscInt_FMT " orth_cols=%" PetscInt_FMT " skipped_small=%" PetscInt_FMT " skipped_nonpositive=%" PetscInt_FMT " tol=%.6e time=%.6g\n",
+                        "DEFLATION_ORTHO label=\"%s\" raw_cols=%" PetscInt_FMT " orth_cols=%" PetscInt_FMT " skipped_small=%" PetscInt_FMT " skipped_nonpositive=%" PetscInt_FMT " default_tol=%.6e recycle_active=%s recycle_start=%" PetscInt_FMT " recycle_tol=%.6e krylov_tol=%.6e time=%.6g\n",
                         label, solver->n_raw_basis, solver->n_orth_basis, skipped_small, skipped_nonpositive,
-                        (double)solver->app->deflation_basis_tol, (double)(t1 - t0)));
+                        (double)solver->app->deflation_basis_tol, solver->recycle_temp_basis_active ? "true" : "false",
+                        solver->recycle_temp_start_raw, (double)solver->app->deflation_recycle_basis_tol,
+                        (double)solver->app->deflation_krylov_basis_tol, (double)(t1 - t0)));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
-                        "DEFLATION_CACHE_CONFIG orth_cols=%" PetscInt_FMT " cached_A_cols=%" PetscInt_FMT "\n",
+                        "DEFLATION_CACHE_CONFIG orth_cols=%" PetscInt_FMT " cached_A_cols=%" PetscInt_FMT " left_cols=0 projector=a_orthonormal\n",
                         solver->n_orth_basis, solver->n_orth_basis));
+  PetscCall(LinearSolverCheckAOrthonormality(solver, label));
   PetscCall(PetscLogStagePop());
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -3452,7 +3978,7 @@ static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A
   for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
     PetscScalar coeff;
 
-    PetscCall(VecDot(solver->orth_basis[i], rhs, &coeff));
+    PetscCall(VecDot(LinearSolverTestBasis(solver, i), rhs, &coeff));
     PetscCall(VecAXPY(x, coeff, solver->orth_basis[i]));
     PetscCall(VecAXPY(r, -coeff, solver->Aorth_basis[i]));
   }
@@ -3482,7 +4008,7 @@ static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, 
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
       PetscScalar coeff;
 
-      PetscCall(VecDot(solver->orth_basis[i], Az, &coeff));
+      PetscCall(VecDot(LinearSolverTestBasis(solver, i), Az, &coeff));
       PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
       PetscCall(VecAXPY(Az, -coeff, solver->Aorth_basis[i]));
     }
@@ -3511,7 +4037,7 @@ static PetscErrorCode DeflationApplyMatlabProjectedPC(LinearSolverCtx *solver, M
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
       PetscScalar coeff;
 
-      PetscCall(VecDot(solver->orth_basis[i], work, &coeff));
+      PetscCall(VecDot(LinearSolverTestBasis(solver, i), work, &coeff));
       PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
     }
     PetscCall(PetscLogStagePop());
@@ -3702,6 +4228,8 @@ static PetscErrorCode DeflatedFGMRESSolve(LinearSolverCtx *solver, KSP ksp, Vec 
     PetscReal hnext, res_norm;
 
     PetscCall(DeflationApplyProjectedPC(solver, A, pc, V[j], Z[j], Az, PETSC_TRUE));
+    PetscCall(LinearSolverCaptureRecycleVector(solver, Z[j]));
+    PetscCall(LinearSolverAppendPersistentKrylovVector(solver, Z[j], label, j));
     for (PetscInt i = 0; i <= j; ++i) {
       PetscScalar hij;
 
@@ -3768,7 +4296,7 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
   for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
     PetscScalar coeff;
 
-    PetscCall(VecDot(solver->orth_basis[i], rhs, &coeff));
+    PetscCall(VecDot(LinearSolverTestBasis(solver, i), rhs, &coeff));
     PetscCall(VecAXPY(x, coeff, solver->orth_basis[i]));
   }
   PetscCall(MatMult(A, x, work));
@@ -3795,6 +4323,8 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
 
     PetscCall(DeflationApplyMatlabProjectedPC(solver, A, pc, V[j], Z[j], work));
     PetscCall(MatMult(A, Z[j], work));
+    PetscCall(LinearSolverCaptureRecycleVector(solver, Z[j]));
+    PetscCall(LinearSolverAppendPersistentKrylovVector(solver, Z[j], label, j));
     for (PetscInt i = 0; i <= j; ++i) {
       PetscScalar hij;
 
@@ -3941,11 +4471,13 @@ static PetscErrorCode SolveLinearSystem(LinearSolverCtx *solver, Vec rhs, Vec x,
         const PetscBool rebuild = (PetscBool)(lag <= 1 || idx % lag == 0);
 
         reuse_pc = (PetscBool)!rebuild;
+        if (solver->force_reuse_preconditioner) reuse_pc = PETSC_TRUE;
         PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
-                              "PMG_LAG_PRECONDITIONER solve_index=%" PetscInt_FMT " lag=%" PetscInt_FMT " rebuild=%s reuse_preconditioner=%s\n",
-                              idx, lag, rebuild ? "true" : "false", reuse_pc ? "true" : "false"));
+                              "PMG_LAG_PRECONDITIONER solve_index=%" PetscInt_FMT " lag=%" PetscInt_FMT " rebuild=%s forced_reuse=%s reuse_preconditioner=%s\n",
+                              idx, lag, rebuild ? "true" : "false", solver->force_reuse_preconditioner ? "true" : "false", reuse_pc ? "true" : "false"));
         solver->pmg_lag_solve_index++;
       }
+      if (solver->force_reuse_preconditioner) reuse_pc = PETSC_TRUE;
       PetscCall(RefreshKSPOperators(solver->ksp, solver->app, solver->A, PETSC_FALSE, reuse_pc));
     }
     ksp = solver->ksp;
@@ -4295,16 +4827,110 @@ static PetscErrorCode IndirectNewtonLineSearch(AssemblyCtx *actx, AppCtx *app, V
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver, Mat Areg, Mat Kelastic, Mat Ktangent, Vec f_ext, Vec u, PetscReal *lambda, PetscReal omega_target, PetscReal rhs_norm, const char criterion[], PetscReal stop_tol, NewtonStats *stats)
+typedef struct {
+  PetscInt  iteration;
+  PetscReal lambda;
+  PetscReal r;
+  PetscReal alpha;
+  PetscReal delta_lambda;
+  PetscReal accepted_delta_lambda;
+  PetscReal rel_residual;
+  PetscReal rel_correction;
+  PetscReal stopping_value;
+  PetscInt  dW_iterations;
+  PetscInt  dV_iterations;
+  PetscInt  linear_iterations;
+  PetscInt  line_search_iterations;
+  PetscInt  deflation_basis_dim_solve;
+  PetscInt  deflation_basis_dim_end;
+  char      status[32];
+} StepReplayExpectedRow;
+
+typedef struct {
+  PetscBool              loaded;
+  PetscInt               nrows;
+  StepReplayExpectedRow *rows;
+} StepReplayExpected;
+
+static PetscErrorCode StepReplayExpectedLoad(MPI_Comm comm, const char dir[], StepReplayExpected *expected)
+{
+  char path[PETSC_MAX_PATH_LEN], line[1024];
+  FILE *fh = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscMemzero(expected, sizeof(*expected)));
+  if (!dir || !dir[0]) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscSNPrintf(path, sizeof(path), "%s/step_expected.csv", dir));
+  fh = fopen(path, "r");
+  if (!fh) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscCalloc1(1024, &expected->rows));
+  if (!fgets(line, sizeof(line), fh)) {
+    fclose(fh);
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  while (fgets(line, sizeof(line), fh)) {
+    StepReplayExpectedRow row;
+    int                   nscan;
+    long long             iteration, dW_iterations, dV_iterations, linear_iterations, line_search_iterations, basis_solve, basis_end;
+
+    PetscCall(PetscMemzero(&row, sizeof(row)));
+    nscan = sscanf(line,
+                   "%lld,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lld,%lld,%lld,%lld,%lld,%lld,%31[^,\n]",
+                   &iteration, &row.lambda, &row.r, &row.alpha, &row.delta_lambda, &row.accepted_delta_lambda,
+                   &row.rel_residual, &row.rel_correction, &row.stopping_value, &dW_iterations, &dV_iterations,
+                   &linear_iterations, &line_search_iterations, &basis_solve, &basis_end, row.status);
+    if (nscan < 15) continue;
+    row.iteration                   = (PetscInt)iteration;
+    row.dW_iterations               = (PetscInt)dW_iterations;
+    row.dV_iterations               = (PetscInt)dV_iterations;
+    row.linear_iterations           = (PetscInt)linear_iterations;
+    row.line_search_iterations      = (PetscInt)line_search_iterations;
+    row.deflation_basis_dim_solve   = (PetscInt)basis_solve;
+    row.deflation_basis_dim_end     = (PetscInt)basis_end;
+    PetscCheck(expected->nrows < 1024, comm, PETSC_ERR_ARG_SIZ, "Too many step replay expected rows in %s", path);
+    expected->rows[expected->nrows++] = row;
+  }
+  fclose(fh);
+  expected->loaded = PETSC_TRUE;
+  PetscCall(PetscPrintf(comm, "STEP_REPLAY_EXPECTED file=%s rows=%" PetscInt_FMT "\n", path, expected->nrows));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static const StepReplayExpectedRow *StepReplayExpectedFind(const StepReplayExpected *expected, PetscInt iteration)
+{
+  if (!expected || !expected->loaded) return NULL;
+  for (PetscInt i = 0; i < expected->nrows; ++i) {
+    if (expected->rows[i].iteration == iteration) return &expected->rows[i];
+  }
+  return NULL;
+}
+
+static PetscErrorCode StepReplayExpectedDestroy(StepReplayExpected *expected)
+{
+  PetscFunctionBeginUser;
+  PetscCall(PetscFree(expected->rows));
+  expected->loaded = PETSC_FALSE;
+  expected->nrows  = 0;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver, Mat Areg, Mat Kelastic, Mat Ktangent, Vec f_ext, Vec u, PetscReal *lambda, PetscReal omega_target, PetscReal rhs_norm, PetscReal initial_r, const char criterion[], PetscReal stop_tol, NewtonStats *stats)
 {
   Vec            residual = NULL, residual_eps = NULL, G = NULL, rhsW = NULL, rhsV = NULL, dW = NULL, dV = NULL, dU = NULL, u_trial = NULL, r_trial = NULL;
-  PetscReal      rel = PETSC_MAX_REAL, rel_corr = PETSC_MAX_REAL, r = app->r_min, abs_dlambda = PETSC_MAX_REAL;
+  PetscReal      rel = PETSC_MAX_REAL, rel_corr = PETSC_MAX_REAL, r = PetscMax(initial_r, app->r_min), abs_dlambda = PETSC_MAX_REAL;
   PetscInt       total_linear_its = 0, newton_its = 0, line_search_its = 0;
+  PetscInt       prev_itsW = -1, prev_itsV = -1;
   PetscLogDouble t_start, t0, t1, assembly_time = 0.0, solve_time = 0.0;
   PetscBool      stop = PETSC_FALSE, compute_diffs = PETSC_TRUE;
+  PetscBool      have_pair_matrix = PETSC_FALSE;
+  PetscInt       pair_matrix_start_it = -1;
+  PetscReal      pair_matrix_r = r;
+  const PetscInt krylov_persistent_start_added = solver->deflation_krylov_persistent_added;
+  StepReplayExpected expected;
 
   PetscFunctionBeginUser;
   PetscCall(PetscMemzero(stats, sizeof(*stats)));
+  PetscCall(StepReplayExpectedLoad(PetscObjectComm((PetscObject)dm), app->step_replay_dir, &expected));
   PetscCall(PetscTime(&t_start));
   PetscCall(VecDuplicate(f_ext, &residual));
   PetscCall(VecDuplicate(f_ext, &residual_eps));
@@ -4316,19 +4942,43 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
   PetscCall(VecDuplicate(f_ext, &dU));
   PetscCall(VecDuplicate(f_ext, &u_trial));
   PetscCall(VecDuplicate(f_ext, &r_trial));
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                        "DEFLATION_KRYLOV_PERSISTENT_CONFIG enabled=%s basis_tol=%.6e raw_cols_start=%" PetscInt_FMT " total_added_start=%" PetscInt_FMT "\n",
+                        app->deflation_krylov_persistent ? "true" : "false", (double)app->deflation_krylov_basis_tol,
+                        solver->n_raw_basis, krylov_persistent_start_added));
 
   for (PetscInt it = 0; it < app->newton_max_it; ++it) {
     PetscInt  itsW = 0, itsV = 0, ls_its = 0;
     PetscReal denom, numer, alpha = 0.0, trial_rel = PETSC_MAX_REAL, dU_norm, u_norm;
     PetscScalar dot;
+    const PetscReal lambda_start = *lambda;
+    const PetscReal r_start = r;
+    const PetscInt  basis_start = solver->n_raw_basis;
 
     PetscCall(PetscTime(&t0));
-    PetscCall(AssemblePlasticResidualJacobian(actx, *lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
+    const PetscBool freeze_pair_matrix =
+      (PetscBool)(app->indirect_newton_pair_freeze_matrix && have_pair_matrix && (it % 2 == 1));
+
+    if (freeze_pair_matrix) {
+      PetscCall(AssemblePlasticResidualJacobian(actx, *lambda, u, f_ext, NULL, residual, PETSC_FALSE));
+    } else {
+      PetscCall(AssemblePlasticResidualJacobian(actx, *lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
+    }
     PetscCall(ResidualNormFree(actx, residual, rhs_norm, &rel));
     if (compute_diffs) PetscCall(ComputeLambdaDerivativeFD(actx, app, *lambda, u, f_ext, residual, residual_eps, G));
-    PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, r));
+    if (!freeze_pair_matrix) {
+      PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, r));
+      have_pair_matrix    = PETSC_TRUE;
+      pair_matrix_start_it = it;
+      pair_matrix_r        = r;
+    }
     PetscCall(PetscTime(&t1));
     assembly_time += t1 - t0;
+    PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                          "SSR_PAIR_MATRIX omega=%.8e it=%" PetscInt_FMT " enabled=%s mode=%s pair_start_it=%" PetscInt_FMT " current_r=%.6e matrix_r=%.6e force_pc_reuse=%s\n",
+                          (double)omega_target, it, app->indirect_newton_pair_freeze_matrix ? "true" : "false",
+                          freeze_pair_matrix ? "frozen" : "fresh", pair_matrix_start_it, (double)r, (double)pair_matrix_r,
+                          freeze_pair_matrix ? "true" : "false"));
 
     PetscCall(StoppingByCriterion(criterion, rel, rel_corr, abs_dlambda, stop_tol, PETSC_FALSE, &stop));
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
@@ -4349,11 +4999,56 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
     PetscCall(VecZeroEntries(dW));
     PetscCall(VecZeroEntries(dV));
     PetscCall(PetscTime(&t0));
-    PetscCall(SolveLinearSystem(solver, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
-    PetscCall(SolveLinearSystem(solver, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
+    {
+      const PetscBool saved_force_reuse = solver->force_reuse_preconditioner;
+
+    if (app->deflation_intra_newton_recycle && app->use_deflation && solver->n_raw_basis > 0) {
+      const PetscBool cheap_is_v = (PetscBool)(prev_itsW >= 0 && prev_itsV >= 0 && prev_itsV < prev_itsW);
+      const PetscInt  raw_snapshot = solver->n_raw_basis;
+      PetscInt        temp_added = 0;
+
+      PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                            "DEFLATION_INTRANEWTON_SELECT omega=%.8e it=%" PetscInt_FMT " enabled=true previous_w=%" PetscInt_FMT " previous_v=%" PetscInt_FMT " first=%s target=%s raw_cols=%" PetscInt_FMT "\n",
+                            (double)omega_target, it, prev_itsW, prev_itsV, cheap_is_v ? "dV" : "dW", cheap_is_v ? "dW" : "dV",
+                            raw_snapshot));
+      if (cheap_is_v) {
+        solver->force_reuse_preconditioner = freeze_pair_matrix;
+        PetscCall(LinearSolverBeginRecycleCapture(solver));
+        PetscCall(SolveLinearSystem(solver, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
+        PetscCall(LinearSolverEndRecycleCapture(solver));
+        PetscCall(LinearSolverAppendTemporaryRecycleBasis(solver, "SSR intra-newton dV-to-dW", &temp_added));
+        solver->force_reuse_preconditioner = PETSC_TRUE;
+        PetscCall(SolveLinearSystem(solver, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
+      } else {
+        solver->force_reuse_preconditioner = freeze_pair_matrix;
+        PetscCall(LinearSolverBeginRecycleCapture(solver));
+        PetscCall(SolveLinearSystem(solver, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
+        PetscCall(LinearSolverEndRecycleCapture(solver));
+        PetscCall(LinearSolverAppendTemporaryRecycleBasis(solver, "SSR intra-newton dW-to-dV", &temp_added));
+        solver->force_reuse_preconditioner = PETSC_TRUE;
+        PetscCall(SolveLinearSystem(solver, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
+      }
+      PetscCall(LinearSolverTruncateRawBasis(solver, raw_snapshot));
+      PetscCall(LinearSolverClearRecycleBasis(solver));
+      PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                            "DEFLATION_INTRANEWTON_RESULT omega=%.8e it=%" PetscInt_FMT " first=%s temp_added=%" PetscInt_FMT " linear_w=%" PetscInt_FMT " linear_v=%" PetscInt_FMT "\n",
+                            (double)omega_target, it, cheap_is_v ? "dV" : "dW", temp_added, itsW, itsV));
+    } else {
+      PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                            "DEFLATION_INTRANEWTON_SELECT omega=%.8e it=%" PetscInt_FMT " enabled=false previous_w=%" PetscInt_FMT " previous_v=%" PetscInt_FMT " raw_cols=%" PetscInt_FMT "\n",
+                            (double)omega_target, it, prev_itsW, prev_itsV, solver->n_raw_basis));
+      solver->force_reuse_preconditioner = freeze_pair_matrix;
+      PetscCall(SolveLinearSystem(solver, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
+      solver->force_reuse_preconditioner = PETSC_TRUE;
+      PetscCall(SolveLinearSystem(solver, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
+    }
+      solver->force_reuse_preconditioner = saved_force_reuse;
+    }
     PetscCall(PetscTime(&t1));
     solve_time += t1 - t0;
     total_linear_its += itsW + itsV;
+    prev_itsW = itsW;
+    prev_itsV = itsV;
     ++newton_its;
 
     PetscCall(VecDot(f_ext, dW, &dot));
@@ -4373,9 +5068,23 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
 
     PetscCall(StoppingByCriterion(criterion, rel, rel_corr, abs_dlambda, stop_tol, (PetscBool)(alpha > 0.0), &stop));
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
-                          "SSR_NEWTON_ACCEPT omega=%.8e it=%" PetscInt_FMT " alpha=%.6e lambda=%.8e d_lambda=%.6e rel_res=%.6e trial_rel=%.6e rel_corr=%.6e linear_its=%" PetscInt_FMT " stop=%s\n",
+                          "SSR_NEWTON_ACCEPT omega=%.8e it=%" PetscInt_FMT " alpha=%.6e lambda=%.8e d_lambda=%.6e rel_res=%.6e trial_rel=%.6e rel_corr=%.6e linear_w=%" PetscInt_FMT " linear_v=%" PetscInt_FMT " linear_its=%" PetscInt_FMT " stop=%s\n",
                           (double)omega_target, it, (double)alpha, (double)*lambda, (double)(-numer / denom), (double)rel, (double)trial_rel,
-                          (double)rel_corr, itsW + itsV, stop ? "true" : "false"));
+                          (double)rel_corr, itsW, itsV, itsW + itsV, stop ? "true" : "false"));
+    {
+      const StepReplayExpectedRow *erow = StepReplayExpectedFind(&expected, it + 1);
+
+      if (erow) {
+        PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                              "STEP_REPLAY_NEWTON_COMPARE it=%" PetscInt_FMT " expected_w=%" PetscInt_FMT " c_w=%" PetscInt_FMT " expected_v=%" PetscInt_FMT " c_v=%" PetscInt_FMT " expected_total=%" PetscInt_FMT " c_total=%" PetscInt_FMT " expected_alpha=%.17e c_alpha=%.17e expected_lambda=%.17e c_lambda=%.17e expected_r=%.17e c_r=%.17e expected_dlambda=%.17e c_dlambda=%.17e expected_rel_res=%.17e c_rel_res=%.17e expected_rel_corr=%.17e c_rel_corr=%.17e expected_ls=%" PetscInt_FMT " c_ls=%" PetscInt_FMT " expected_basis=%" PetscInt_FMT " c_basis=%" PetscInt_FMT " expected_status=%s c_stop=%s\n",
+                              it + 1, erow->dW_iterations, itsW, erow->dV_iterations, itsV, erow->linear_iterations,
+                              itsW + itsV, (double)erow->alpha, (double)alpha, (double)erow->lambda, (double)lambda_start,
+                              (double)erow->r, (double)r_start, (double)erow->delta_lambda, (double)(-numer / denom),
+                              (double)erow->rel_residual, (double)rel, (double)erow->rel_correction, (double)rel_corr,
+                              erow->line_search_iterations, ls_its, erow->deflation_basis_dim_solve, basis_start,
+                              erow->status, stop ? "true" : "false"));
+      }
+    }
     if (alpha > 0.0) {
       PetscCall(VecCopy(u_trial, u));
       PetscCall(ScaleToOmega(f_ext, u, omega_target));
@@ -4387,6 +5096,18 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
       break;
     }
     compute_diffs = PETSC_TRUE;
+    {
+      PetscBool appended_pair_solutions = PETSC_FALSE;
+
+      if (app->indirect_newton_pair_freeze_matrix && alpha > 0.0) {
+        PetscCall(LinearSolverAppendRawBasis(solver, dW, "SSR indirect pair dW"));
+        PetscCall(LinearSolverAppendRawBasis(solver, dV, "SSR indirect pair dV"));
+        appended_pair_solutions = PETSC_TRUE;
+        PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                              "DEFLATION_PAIR_SOLUTIONS_ADD omega=%.8e it=%" PetscInt_FMT " raw_cols=%" PetscInt_FMT " alpha=%.6e\n",
+                              (double)omega_target, it, solver->n_raw_basis, (double)alpha));
+      }
+
     if (alpha < 0.1) {
       if (alpha == 0.0) {
         compute_diffs = PETSC_FALSE;
@@ -4395,12 +5116,17 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
         r *= PetscPowReal(2.0, 0.25);
       }
     } else if (alpha > 0.5) {
-      PetscCall(LinearSolverAppendRawBasis(solver, dW, "SSR indirect dW"));
-      PetscCall(LinearSolverAppendRawBasis(solver, dV, "SSR indirect dV"));
+      if (!appended_pair_solutions) {
+        PetscCall(LinearSolverAppendRawBasis(solver, dW, "SSR indirect dW"));
+        PetscCall(LinearSolverAppendRawBasis(solver, dV, "SSR indirect dV"));
+      }
       r = PetscMax(r / PetscSqrtReal(2.0), app->r_min);
     } else {
-      PetscCall(LinearSolverAppendRawBasis(solver, dW, "SSR indirect dW"));
-      PetscCall(LinearSolverAppendRawBasis(solver, dV, "SSR indirect dV"));
+      if (!appended_pair_solutions) {
+        PetscCall(LinearSolverAppendRawBasis(solver, dW, "SSR indirect dW"));
+        PetscCall(LinearSolverAppendRawBasis(solver, dV, "SSR indirect dV"));
+      }
+    }
     }
     if (alpha == 0.0 && r > 1.0) break;
   }
@@ -4421,6 +5147,12 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
                         (double)omega_target, stats->converged ? "true" : "false", (double)*lambda, (double)stats->final_rel,
                         (double)stats->final_rel_correction, stats->newton_its, stats->total_linear_its, stats->line_search_its,
                         (double)stats->assembly_time, (double)stats->solve_time, (double)stats->wall_time));
+  PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                        "DEFLATION_KRYLOV_PERSISTENT_SUMMARY enabled=%s added_this_newton=%" PetscInt_FMT " added_total=%" PetscInt_FMT " raw_cols_end=%" PetscInt_FMT "\n",
+                        app->deflation_krylov_persistent ? "true" : "false",
+                        solver->deflation_krylov_persistent_added - krylov_persistent_start_added,
+                        solver->deflation_krylov_persistent_added, solver->n_raw_basis));
+  PetscCall(StepReplayExpectedDestroy(&expected));
 
   PetscCall(VecDestroy(&residual));
   PetscCall(VecDestroy(&residual_eps));
@@ -4553,7 +5285,7 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
     lambda_guess = lambda_cur + alpha_sec * (lambda_cur - lambda_prev);
     PetscCall(PetscPrintf(comm, "SSR_ATTEMPT step=%" PetscInt_FMT " target_omega=%.8e d_omega=%.8e lambda_predict=%.8e basis_snapshot=%" PetscInt_FMT "\n",
                           step, (double)target, (double)d_omega, (double)lambda_guess, basis_snapshot));
-    PetscCall(IndirectNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_guess, &lambda_guess, target, rhs_norm, app->newton_stopping_criterion, app->newton_stopping_tol, &nstats));
+    PetscCall(IndirectNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_guess, &lambda_guess, target, rhs_norm, app->r_min, app->newton_stopping_criterion, app->newton_stopping_tol, &nstats));
     attempts++;
     if (!nstats.converged) {
       PetscCall(LinearSolverTruncateRawBasis(solver, basis_snapshot));
@@ -4621,6 +5353,7 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
 }
 
 typedef struct {
+  char      kind[64];
   PetscReal lambda;
   PetscReal omega;
   PetscReal r;
@@ -4632,6 +5365,14 @@ typedef struct {
   PetscInt  expected_dV_iterations;
   PetscReal expected_dW_reported_residual_final;
   PetscReal expected_dV_reported_residual_final;
+  PetscInt  expected_iterations;
+  PetscReal expected_reported_residual_final;
+  PetscReal expected_true_residual_final;
+  PetscReal expected_alpha;
+  PetscInt  expected_line_search_iterations;
+  PetscReal expected_initial_decrease;
+  PetscReal expected_rel_correction;
+  PetscBool expected_stop;
 } LinearReplayMeta;
 
 static PetscErrorCode LinearReplayReadMeta(MPI_Comm comm, const char dir[], LinearReplayMeta *meta)
@@ -4642,11 +5383,20 @@ static PetscErrorCode LinearReplayReadMeta(MPI_Comm comm, const char dir[], Line
 
   PetscFunctionBeginUser;
   PetscCall(PetscMemzero(meta, sizeof(*meta)));
+  PetscCall(PetscStrncpy(meta->kind, "indirect_linear", sizeof(meta->kind)));
   meta->r = 1.0e-4;
   meta->expected_dW_iterations = -1;
   meta->expected_dV_iterations = -1;
   meta->expected_dW_reported_residual_final = PETSC_MAX_REAL;
   meta->expected_dV_reported_residual_final = PETSC_MAX_REAL;
+  meta->expected_iterations = -1;
+  meta->expected_reported_residual_final = PETSC_MAX_REAL;
+  meta->expected_true_residual_final = PETSC_MAX_REAL;
+  meta->expected_alpha = PETSC_MAX_REAL;
+  meta->expected_line_search_iterations = -1;
+  meta->expected_initial_decrease = PETSC_MAX_REAL;
+  meta->expected_rel_correction = PETSC_MAX_REAL;
+  meta->expected_stop = PETSC_FALSE;
   PetscCallMPI(MPI_Comm_rank(comm, &rank));
   PetscCall(PetscSNPrintf(path, sizeof(path), "%s/meta.txt", dir));
   fh = fopen(path, "r");
@@ -4654,7 +5404,8 @@ static PetscErrorCode LinearReplayReadMeta(MPI_Comm comm, const char dir[], Line
   while (!feof(fh)) {
     char key[128], value[256];
     if (fscanf(fh, "%127s %255s", key, value) != 2) break;
-    if (!strcmp(key, "sample_id")) meta->sample_id = (PetscInt)strtol(value, NULL, 10);
+    if (!strcmp(key, "kind")) PetscCall(PetscStrncpy(meta->kind, value, sizeof(meta->kind)));
+    else if (!strcmp(key, "sample_id")) meta->sample_id = (PetscInt)strtol(value, NULL, 10);
     else if (!strcmp(key, "omega")) meta->omega = (PetscReal)strtod(value, NULL);
     else if (!strcmp(key, "lambda")) meta->lambda = (PetscReal)strtod(value, NULL);
     else if (!strcmp(key, "r")) meta->r = (PetscReal)strtod(value, NULL);
@@ -4665,12 +5416,20 @@ static PetscErrorCode LinearReplayReadMeta(MPI_Comm comm, const char dir[], Line
     else if (!strcmp(key, "expected_dV_iterations")) meta->expected_dV_iterations = (PetscInt)strtol(value, NULL, 10);
     else if (!strcmp(key, "expected_dW_reported_residual_final")) meta->expected_dW_reported_residual_final = (PetscReal)strtod(value, NULL);
     else if (!strcmp(key, "expected_dV_reported_residual_final")) meta->expected_dV_reported_residual_final = (PetscReal)strtod(value, NULL);
+    else if (!strcmp(key, "expected_iterations")) meta->expected_iterations = (PetscInt)strtol(value, NULL, 10);
+    else if (!strcmp(key, "expected_reported_residual_final")) meta->expected_reported_residual_final = (PetscReal)strtod(value, NULL);
+    else if (!strcmp(key, "expected_true_residual_final")) meta->expected_true_residual_final = (PetscReal)strtod(value, NULL);
+    else if (!strcmp(key, "expected_alpha")) meta->expected_alpha = (PetscReal)strtod(value, NULL);
+    else if (!strcmp(key, "expected_line_search_iterations")) meta->expected_line_search_iterations = (PetscInt)strtol(value, NULL, 10);
+    else if (!strcmp(key, "expected_initial_decrease")) meta->expected_initial_decrease = (PetscReal)strtod(value, NULL);
+    else if (!strcmp(key, "expected_rel_correction")) meta->expected_rel_correction = (PetscReal)strtod(value, NULL);
+    else if (!strcmp(key, "expected_stop")) meta->expected_stop = (PetscBool)(!strcmp(value, "true"));
   }
   fclose(fh);
   PetscCall(PetscPrintf(comm,
-                        "REPLAY_META dir=%s sample_id=%" PetscInt_FMT " omega=%.8e lambda=%.8e r=%.8e newton_iteration=%" PetscInt_FMT " basis_cols=%" PetscInt_FMT " expected_dW=%" PetscInt_FMT " expected_dV=%" PetscInt_FMT "\n",
-                        dir, meta->sample_id, (double)meta->omega, (double)meta->lambda, (double)meta->r, meta->newton_iteration,
-                        meta->basis_cols, meta->expected_dW_iterations, meta->expected_dV_iterations));
+                        "REPLAY_META dir=%s kind=%s sample_id=%" PetscInt_FMT " omega=%.8e lambda=%.8e r=%.8e newton_iteration=%" PetscInt_FMT " basis_cols=%" PetscInt_FMT " expected_dW=%" PetscInt_FMT " expected_dV=%" PetscInt_FMT " expected_iterations=%" PetscInt_FMT "\n",
+                        dir, meta->kind, meta->sample_id, (double)meta->omega, (double)meta->lambda, (double)meta->r, meta->newton_iteration,
+                        meta->basis_cols, meta->expected_dW_iterations, meta->expected_dV_iterations, meta->expected_iterations));
   (void)rank;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -5264,9 +6023,55 @@ static PetscErrorCode LinearReplayLoadMappedVec(MPI_Comm comm, const char dir[],
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode LinearReplayLoadMappedVecRaw(MPI_Comm comm, const char dir[], const char name[], Vec template_vec, const PetscInt c_to_export[], PetscBool mapped, Vec *v)
+{
+  char              path[PETSC_MAX_PATH_LEN];
+  FILE             *fh = NULL;
+  long long         nll = 0;
+  PetscInt          n = 0, nloc, lo = 0, hi = 0;
+  PetscScalar      *values = NULL;
+  PetscScalar      *array = NULL;
+  PetscMPIInt       rank;
+
+  PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_rank(comm, &rank));
+  PetscCall(PetscSNPrintf(path, sizeof(path), "%s/%s", dir, name));
+  if (rank == 0) {
+    fh = fopen(path, "rb");
+    PetscCheck(fh, comm, PETSC_ERR_FILE_OPEN, "Could not open raw replay vector %s", path);
+    PetscCheck(fread(&nll, sizeof(nll), 1, fh) == 1, comm, PETSC_ERR_FILE_READ, "Could not read raw replay vector length from %s", path);
+  }
+  PetscCallMPI(MPI_Bcast(&nll, 1, MPI_LONG_LONG, 0, comm));
+  PetscCheck(nll >= 0, comm, PETSC_ERR_FILE_UNEXPECTED, "Invalid raw replay vector length %lld in %s", nll, path);
+  n = (PetscInt)nll;
+  PetscCall(PetscMalloc1(n, &values));
+  if (rank == 0) {
+    PetscCheck(fread(values, sizeof(PetscScalar), (size_t)n, fh) == (size_t)n, comm, PETSC_ERR_FILE_READ, "Could not read raw replay vector payload from %s", path);
+    fclose(fh);
+  }
+  PetscCallMPI(MPI_Bcast(values, n, MPIU_SCALAR, 0, comm));
+  PetscCall(VecDuplicate(template_vec, v));
+  PetscCall(VecGetLocalSize(*v, &nloc));
+  PetscCall(VecGetOwnershipRange(*v, &lo, &hi));
+  PetscCall(VecGetArray(*v, &array));
+  if (mapped) {
+    for (PetscInt i = 0; i < nloc; ++i) {
+      PetscCheck(c_to_export[i] >= 0 && c_to_export[i] < n, comm, PETSC_ERR_ARG_OUTOFRANGE,
+                 "Replay raw vector index %" PetscInt_FMT " outside length %" PetscInt_FMT, c_to_export[i], n);
+      array[i] = values[c_to_export[i]];
+    }
+  } else {
+    PetscCheck(hi <= n, comm, PETSC_ERR_ARG_SIZ, "Replay raw vector length %" PetscInt_FMT " shorter than local range end %" PetscInt_FMT, n, hi);
+    for (PetscInt i = 0; i < nloc; ++i) array[i] = values[lo + i];
+  }
+  PetscCall(VecRestoreArray(*v, &array));
+  PetscCall(PetscFree(values));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode LinearReplayLoadMappedVecOptional(MPI_Comm comm, const char dir[], const char name[], Vec template_vec, const PetscInt c_to_export[], PetscBool mapped, Vec *v, PetscBool *present)
 {
-  char path[PETSC_MAX_PATH_LEN];
+  char path[PETSC_MAX_PATH_LEN], raw_name[PETSC_MAX_PATH_LEN], *dot = NULL;
   FILE *fh = NULL;
 
   PetscFunctionBeginUser;
@@ -5274,10 +6079,23 @@ static PetscErrorCode LinearReplayLoadMappedVecOptional(MPI_Comm comm, const cha
   *present = PETSC_FALSE;
   PetscCall(PetscSNPrintf(path, sizeof(path), "%s/%s", dir, name));
   fh = fopen(path, "rb");
+  if (fh) {
+    fclose(fh);
+    *present = PETSC_TRUE;
+    PetscCall(LinearReplayLoadMappedVec(comm, dir, name, template_vec, c_to_export, mapped, v));
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+
+  PetscCall(PetscStrncpy(raw_name, name, sizeof(raw_name)));
+  dot = strrchr(raw_name, '.');
+  if (dot) PetscCall(PetscStrncpy(dot, ".raw", sizeof(raw_name) - (size_t)(dot - raw_name)));
+  else PetscCall(PetscStrlcat(raw_name, ".raw", sizeof(raw_name)));
+  PetscCall(PetscSNPrintf(path, sizeof(path), "%s/%s", dir, raw_name));
+  fh = fopen(path, "rb");
   if (!fh) PetscFunctionReturn(PETSC_SUCCESS);
   fclose(fh);
   *present = PETSC_TRUE;
-  PetscCall(LinearReplayLoadMappedVec(comm, dir, name, template_vec, c_to_export, mapped, v));
+  PetscCall(LinearReplayLoadMappedVecRaw(comm, dir, raw_name, template_vec, c_to_export, mapped, v));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -5317,7 +6135,7 @@ static PetscErrorCode LinearReplayMappedVecRoundtrip(MPI_Comm comm, const char d
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode LinearReplayLoadMappedMat(MPI_Comm comm, const char dir[], Vec template_vec, const PetscInt c_to_export[], PetscBool mapped, Mat *A)
+static PetscErrorCode LinearReplayLoadMappedMatNamed(MPI_Comm comm, const char dir[], const char filename[], Vec template_vec, const PetscInt c_to_export[], PetscBool mapped, Mat *A)
 {
   char        path[PETSC_MAX_PATH_LEN];
   FILE       *fh = NULL;
@@ -5329,7 +6147,7 @@ static PetscErrorCode LinearReplayLoadMappedMat(MPI_Comm comm, const char dir[],
   PetscFunctionBeginUser;
   *A = NULL;
   if (!mapped) PetscFunctionReturn(PETSC_SUCCESS);
-  PetscCall(PetscSNPrintf(path, sizeof(path), "%s/A_free.mat", dir));
+  PetscCall(PetscSNPrintf(path, sizeof(path), "%s/%s", dir, filename));
   fh = fopen(path, "rb");
   if (!fh) PetscFunctionReturn(PETSC_SUCCESS);
   fclose(fh);
@@ -5354,6 +6172,13 @@ static PetscErrorCode LinearReplayLoadMappedMat(MPI_Comm comm, const char dir[],
   }
   PetscCall(ISDestroy(&is));
   PetscCall(MatDestroy(&raw));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearReplayLoadMappedMat(MPI_Comm comm, const char dir[], Vec template_vec, const PetscInt c_to_export[], PetscBool mapped, Mat *A)
+{
+  PetscFunctionBeginUser;
+  PetscCall(LinearReplayLoadMappedMatNamed(comm, dir, "A_free.mat", template_vec, c_to_export, mapped, A));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -5394,12 +6219,89 @@ static PetscErrorCode LinearReplayVecDiff(MPI_Comm comm, const char label[], Vec
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode InitReplayVecDiff(MPI_Comm comm, const char label[], Vec a, Vec b)
+{
+  Vec       diff = NULL;
+  PetscReal norm_a, norm_b, norm_diff;
+
+  PetscFunctionBeginUser;
+  if (!a || !b) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(VecDuplicate(a, &diff));
+  PetscCall(VecCopy(a, diff));
+  PetscCall(VecAXPY(diff, -1.0, b));
+  PetscCall(VecNorm(a, NORM_2, &norm_a));
+  PetscCall(VecNorm(b, NORM_2, &norm_b));
+  PetscCall(VecNorm(diff, NORM_2, &norm_diff));
+  PetscCall(PetscPrintf(comm, "INIT_REPLAY_VEC_DIFF label=%s norm_export=%.8e norm_C=%.8e diff=%.8e rel_to_export=%.8e\n",
+                        label, (double)norm_a, (double)norm_b, (double)norm_diff, (double)(norm_diff / PetscMax(norm_a, 1.0e-300))));
+  PetscCall(VecDestroy(&diff));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearReplayMatrixActionDiff(MPI_Comm comm, const char label[], Mat A_exported, Mat A_c)
+{
+  Vec       x = NULL, y_exp = NULL, y_c = NULL, diff = NULL;
+  PetscInt  lo, hi;
+  PetscReal norm_exp, norm_c, norm_diff;
+  PetscScalar *arr = NULL;
+
+  PetscFunctionBeginUser;
+  if (!A_exported || !A_c) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(MatCreateVecs(A_c, &x, &y_c));
+  PetscCall(VecDuplicate(y_c, &y_exp));
+  PetscCall(VecDuplicate(y_c, &diff));
+  PetscCall(VecGetOwnershipRange(x, &lo, &hi));
+  PetscCall(VecGetArray(x, &arr));
+  for (PetscInt i = lo; i < hi; ++i) {
+    const PetscReal v = PetscSinReal(0.131 * (PetscReal)(i + 1)) + 0.25 * PetscCosReal(0.017 * (PetscReal)(i + 3));
+    arr[i - lo] = v;
+  }
+  PetscCall(VecRestoreArray(x, &arr));
+  PetscCall(MatMult(A_exported, x, y_exp));
+  PetscCall(MatMult(A_c, x, y_c));
+  PetscCall(VecCopy(y_exp, diff));
+  PetscCall(VecAXPY(diff, -1.0, y_c));
+  PetscCall(VecNorm(y_exp, NORM_2, &norm_exp));
+  PetscCall(VecNorm(y_c, NORM_2, &norm_c));
+  PetscCall(VecNorm(diff, NORM_2, &norm_diff));
+  PetscCall(PetscPrintf(comm,
+                        "INIT_REPLAY_MATRIX_DIFF label=%s norm_export=%.8e norm_C=%.8e action_diff=%.8e rel_to_export=%.8e\n",
+                        label, (double)norm_exp, (double)norm_c, (double)norm_diff, (double)(norm_diff / PetscMax(norm_exp, 1.0e-300))));
+  PetscCall(VecDestroy(&diff));
+  PetscCall(VecDestroy(&y_exp));
+  PetscCall(VecDestroy(&y_c));
+  PetscCall(VecDestroy(&x));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearReplayProbeCompareStage(MPI_Comm comm, AppCtx *app, const char probe_label[], const char key[], Vec template_vec, Vec c_vec,
+                                                    const PetscInt c_to_export[], PetscBool mapped)
+{
+  Vec       exp = NULL;
+  PetscBool have = PETSC_FALSE;
+  char      name[128], diff_label[160];
+
+  PetscFunctionBeginUser;
+  if (!template_vec || !c_vec) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscSNPrintf(name, sizeof(name), "probe_%s_%s.vec", probe_label, key));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->linear_replay_dir, name, template_vec, c_to_export, mapped, &exp, &have));
+  if (have) {
+    PetscCall(PetscSNPrintf(diff_label, sizeof(diff_label), "probe_%s_%s_exported_minus_C", probe_label, key));
+    PetscCall(LinearReplayVecDiff(comm, diff_label, exp, c_vec));
+  }
+  PetscCall(VecDestroy(&exp));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode LinearReplayProbeOne(DM dm, AppCtx *app, LinearSolverCtx *solver, Mat A, PC pc, const char label[], Vec template_vec, PetscInt c_to_export[], PetscBool mapped)
 {
   MPI_Comm  comm = PetscObjectComm((PetscObject)dm);
-  Vec       v0_exp = NULL, pc_exp = NULL, z_exp = NULL, Az_exp = NULL, arn_exp = NULL;
+  Vec       v0_exp = NULL, pc_exp = NULL, z_exp = NULL, Az_exp = NULL, arn_exp = NULL, fine_pre_exp = NULL, fine_resid_exp = NULL;
   Vec       pc_c = NULL, z_c = NULL, Az_c = NULL, arn_c = NULL;
   PetscBool have_v0 = PETSC_FALSE, have_pc = PETSC_FALSE, have_z = PETSC_FALSE, have_Az = PETSC_FALSE, have_arn = PETSC_FALSE;
+  PetscBool have_fine_pre = PETSC_FALSE, have_fine_resid = PETSC_FALSE, is_shell = PETSC_FALSE;
+  PCType    pc_type = NULL;
+  PMGShellVCycleCtx *shell_ctx = NULL;
   char      name[128], diff_label[128];
 
   PetscFunctionBeginUser;
@@ -5414,12 +6316,38 @@ static PetscErrorCode LinearReplayProbeOne(DM dm, AppCtx *app, LinearSolverCtx *
   PetscCall(LinearReplayLoadMappedVecOptional(comm, app->linear_replay_dir, name, template_vec, c_to_export, mapped, &Az_exp, &have_Az));
   PetscCall(PetscSNPrintf(name, sizeof(name), "probe_%s_arnoldi_residual0_local.vec", label));
   PetscCall(LinearReplayLoadMappedVecOptional(comm, app->linear_replay_dir, name, template_vec, c_to_export, mapped, &arn_exp, &have_arn));
+  PetscCall(PetscSNPrintf(name, sizeof(name), "probe_%s_mg_fine_pre_local.vec", label));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->linear_replay_dir, name, template_vec, c_to_export, mapped, &fine_pre_exp, &have_fine_pre));
+  PetscCall(PetscSNPrintf(name, sizeof(name), "probe_%s_mg_fine_residual_local.vec", label));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->linear_replay_dir, name, template_vec, c_to_export, mapped, &fine_resid_exp, &have_fine_resid));
+
+  PetscCall(PCGetType(pc, &pc_type));
+  if (pc_type) PetscCall(PetscStrcmp(pc_type, PCSHELL, &is_shell));
+  if (is_shell) PetscCall(PCShellGetContext(pc, (void **)&shell_ctx));
 
   PetscCall(VecDuplicate(template_vec, &pc_c));
   PetscCall(VecDuplicate(template_vec, &z_c));
   PetscCall(VecDuplicate(template_vec, &Az_c));
   PetscCall(VecDuplicate(template_vec, &arn_c));
+  if (shell_ctx) shell_ctx->debug_capture = PETSC_TRUE;
   PetscCall(PCApply(pc, v0_exp, pc_c));
+  if (shell_ctx) shell_ctx->debug_capture = PETSC_FALSE;
+  if (shell_ctx && have_fine_pre && shell_ctx->debug_fine_pre) {
+    PetscCall(PetscSNPrintf(diff_label, sizeof(diff_label), "probe_%s_mg_fine_pre_exported_minus_C", label));
+    PetscCall(LinearReplayVecDiff(comm, diff_label, fine_pre_exp, shell_ctx->debug_fine_pre));
+  }
+  if (shell_ctx && have_fine_resid && shell_ctx->debug_fine_residual) {
+    PetscCall(PetscSNPrintf(diff_label, sizeof(diff_label), "probe_%s_mg_fine_residual_exported_minus_C", label));
+    PetscCall(LinearReplayVecDiff(comm, diff_label, fine_resid_exp, shell_ctx->debug_fine_residual));
+  }
+  if (shell_ctx) {
+    PetscCall(LinearReplayProbeCompareStage(comm, app, label, "mg_p2_rhs_local", shell_ctx->p2_rhs, shell_ctx->debug_p2_rhs, NULL, PETSC_FALSE));
+    PetscCall(LinearReplayProbeCompareStage(comm, app, label, "mg_p2_pre_local", shell_ctx->p2_rhs, shell_ctx->debug_p2_pre, NULL, PETSC_FALSE));
+    PetscCall(LinearReplayProbeCompareStage(comm, app, label, "mg_p2_residual_local", shell_ctx->p2_rhs, shell_ctx->debug_p2_residual, NULL, PETSC_FALSE));
+    PetscCall(LinearReplayProbeCompareStage(comm, app, label, "mg_p1_rhs_local", shell_ctx->p1_rhs, shell_ctx->debug_p1_rhs, NULL, PETSC_FALSE));
+    PetscCall(LinearReplayProbeCompareStage(comm, app, label, "mg_p1_x_local", shell_ctx->p1_rhs, shell_ctx->debug_p1_x, NULL, PETSC_FALSE));
+    PetscCall(LinearReplayProbeCompareStage(comm, app, label, "mg_p2_post_local", shell_ctx->p2_rhs, shell_ctx->debug_p2_post, NULL, PETSC_FALSE));
+  }
   if (have_pc) {
     PetscCall(PetscSNPrintf(diff_label, sizeof(diff_label), "probe_%s_pc_v0_exported_minus_C", label));
     PetscCall(LinearReplayVecDiff(comm, diff_label, pc_exp, pc_c));
@@ -5454,6 +6382,8 @@ static PetscErrorCode LinearReplayProbeOne(DM dm, AppCtx *app, LinearSolverCtx *
   PetscCall(VecDestroy(&z_exp));
   PetscCall(VecDestroy(&Az_exp));
   PetscCall(VecDestroy(&arn_exp));
+  PetscCall(VecDestroy(&fine_pre_exp));
+  PetscCall(VecDestroy(&fine_resid_exp));
   PetscCall(VecDestroy(&pc_c));
   PetscCall(VecDestroy(&z_c));
   PetscCall(VecDestroy(&Az_c));
@@ -5468,8 +6398,7 @@ static PetscErrorCode LinearReplayProbePC(DM dm, AppCtx *app, LinearSolverCtx *s
   PetscBool owned_ksp = PETSC_FALSE;
 
   PetscFunctionBeginUser;
-  if (!solver->n_raw_basis) PetscFunctionReturn(PETSC_SUCCESS);
-  PetscCall(LinearSolverAOrthogonalizeBasis(solver, A, "REPLAY PC probe"));
+  if (solver->n_raw_basis) PetscCall(LinearSolverAOrthogonalizeBasis(solver, A, "REPLAY PC probe"));
   if (solver->reuse) {
     if (!solver->ksp) {
       PetscCall(KSPCreate(PetscObjectComm((PetscObject)dm), &solver->ksp));
@@ -5485,6 +6414,7 @@ static PetscErrorCode LinearReplayProbePC(DM dm, AppCtx *app, LinearSolverCtx *s
   }
   PetscCall(KSPSetUp(ksp));
   PetscCall(KSPGetPC(ksp, &pc));
+  PetscCall(LinearReplayProbeOne(dm, app, solver, A, pc, "du", template_vec, c_to_export, mapped));
   PetscCall(LinearReplayProbeOne(dm, app, solver, A, pc, "dW", template_vec, c_to_export, mapped));
   PetscCall(LinearReplayProbeOne(dm, app, solver, A, pc, "dV", template_vec, c_to_export, mapped));
   if (owned_ksp) PetscCall(KSPDestroy(&ksp));
@@ -5635,7 +6565,7 @@ static PetscErrorCode LinearReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Lin
 
   solveA    = replayA ? replayA : Areg;
   solver->A = solveA;
-  PetscCall(LinearReplayProbePC(dm, app, solver, solveA, f_ext, c_to_export, mapped));
+  if (app->linear_replay_check_pc_probe) PetscCall(LinearReplayProbePC(dm, app, solver, solveA, f_ext, c_to_export, mapped));
   PetscCall(VecZeroEntries(dW));
   PetscCall(VecZeroEntries(dV));
   PetscCall(SolveLinearSystem(solver, rhsW, dW, "REPLAY dW", u, PETSC_TRUE, &itsW));
@@ -5668,6 +6598,243 @@ static PetscErrorCode LinearReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Lin
   PetscCall(VecDestroy(&dW_exp));
   PetscCall(VecDestroy(&dV_exp));
   PetscCall(MatDestroy(&replayA));
+  PetscCall(PetscFree(c_to_export));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode StepReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver, Mat Areg, Mat Kelastic, Mat Ktangent, Vec f_ext, PetscReal rhs_norm, NewtonStats *stats)
+{
+  MPI_Comm       comm = PetscObjectComm((PetscObject)dm);
+  LinearReplayMeta meta;
+  PetscInt      *c_to_export = NULL;
+  PetscBool      mapped = PETSC_FALSE;
+  Vec            u = NULL, residual = NULL, residual_eps = NULL, G = NULL, F = NULL, F_eps = NULL, rhsW = NULL, rhsV = NULL;
+  Vec            f_exp = NULL, F_exp = NULL, G_exp = NULL, F_eps_exp = NULL, rhsW_exp = NULL, rhsV_exp = NULL;
+  Mat            replayA = NULL;
+  PetscBool      have_f = PETSC_FALSE, have_F = PETSC_FALSE, have_G = PETSC_FALSE, have_F_eps = PETSC_FALSE, have_rhsW = PETSC_FALSE, have_rhsV = PETSC_FALSE;
+  PetscReal      lambda;
+  PetscLogDouble t0, t1;
+
+  PetscFunctionBeginUser;
+  PetscCall(LinearReplayReadMeta(comm, app->step_replay_dir, &meta));
+  PetscCall(PetscPrintf(comm,
+                        "STEP_REPLAY_META dir=%s kind=%s sample_id=%" PetscInt_FMT " omega=%.8e lambda_start=%.8e r_start=%.8e exported_newton_iteration=%" PetscInt_FMT " exported_basis_cols=%" PetscInt_FMT " exported_first_dW=%" PetscInt_FMT " exported_first_dV=%" PetscInt_FMT "\n",
+                        app->step_replay_dir, meta.kind, meta.sample_id, (double)meta.omega, (double)meta.lambda, (double)meta.r,
+                        meta.newton_iteration, meta.basis_cols, meta.expected_dW_iterations, meta.expected_dV_iterations));
+
+  PetscCall(LinearReplayBuildCToExportMap(dm, actx->basis, app->step_replay_dir, f_ext, &c_to_export, &mapped));
+  PetscCall(PetscPrintf(comm, "STEP_REPLAY_MAP_CHECK mapped=%s\n", mapped ? "true" : "false"));
+  PetscCall(LinearReplayLoadMappedVec(comm, app->step_replay_dir, "u.vec", f_ext, c_to_export, mapped, &u));
+  PetscCall(LinearReplayMappedVecRoundtrip(comm, app->step_replay_dir, "u.vec", "u", u, f_ext, c_to_export, mapped));
+  PetscCall(VecDuplicate(f_ext, &residual));
+  PetscCall(VecDuplicate(f_ext, &residual_eps));
+  PetscCall(VecDuplicate(f_ext, &G));
+  PetscCall(VecDuplicate(f_ext, &F));
+  PetscCall(VecDuplicate(f_ext, &F_eps));
+  PetscCall(VecDuplicate(f_ext, &rhsW));
+  PetscCall(VecDuplicate(f_ext, &rhsV));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "f_free.vec", f_ext, c_to_export, mapped, &f_exp, &have_f));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "F_free.vec", f_ext, c_to_export, mapped, &F_exp, &have_F));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "G_free.vec", f_ext, c_to_export, mapped, &G_exp, &have_G));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "F_eps_free.vec", f_ext, c_to_export, mapped, &F_eps_exp, &have_F_eps));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "rhs_w.vec", f_ext, c_to_export, mapped, &rhsW_exp, &have_rhsW));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "rhs_v.vec", f_ext, c_to_export, mapped, &rhsV_exp, &have_rhsV));
+
+  PetscCall(PetscTime(&t0));
+  PetscCall(AssemblePlasticResidualJacobian(actx, meta.lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
+  PetscCall(ComputeLambdaDerivativeFD(actx, app, meta.lambda, u, f_ext, residual, residual_eps, G));
+  PetscCall(VecWAXPY(F, 1.0, residual, f_ext));
+  PetscCall(VecWAXPY(F_eps, 1.0, residual_eps, f_ext));
+  PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, meta.r));
+  PetscCall(PetscTime(&t1));
+  PetscCall(PetscPrintf(comm, "STEP_REPLAY_ASSEMBLY_CHECK time=%.6g\n", (double)(t1 - t0)));
+
+  PetscCall(VecCopy(G, rhsW));
+  PetscCall(VecScale(rhsW, -1.0));
+  PetscCall(VecCopy(residual, rhsV));
+  PetscCall(VecScale(rhsV, -1.0));
+  PetscCall(ZeroConstrainedVector(actx->constrained_is, rhsW));
+  PetscCall(ZeroConstrainedVector(actx->constrained_is, rhsV));
+  if (have_f) PetscCall(LinearReplayVecDiff(comm, "step_f_free_exported_minus_C", f_exp, f_ext));
+  if (have_F) PetscCall(LinearReplayVecDiff(comm, "step_F_free_exported_minus_C", F_exp, F));
+  if (have_G) PetscCall(LinearReplayVecDiff(comm, "step_G_free_exported_minus_C", G_exp, G));
+  if (have_F_eps) PetscCall(LinearReplayVecDiff(comm, "step_F_eps_free_exported_minus_C", F_eps_exp, F_eps));
+  if (have_rhsW) PetscCall(LinearReplayVecDiff(comm, "step_rhsW_exported_minus_C", rhsW_exp, rhsW));
+  if (have_rhsV) PetscCall(LinearReplayVecDiff(comm, "step_rhsV_exported_minus_C", rhsV_exp, rhsV));
+  PetscCall(LinearReplayLoadMappedMat(comm, app->step_replay_dir, f_ext, c_to_export, mapped, &replayA));
+  if (replayA) PetscCall(LinearReplayMatrixActionDiff(comm, "step_Areg_exported_minus_C", replayA, Areg));
+
+  PetscCall(PetscPrintf(comm, "STEP_REPLAY_BASIS_LOAD cols=%" PetscInt_FMT "\n", meta.basis_cols));
+  for (PetscInt i = 0; i < meta.basis_cols; ++i) {
+    char name[64];
+    Vec  b = NULL;
+
+    PetscCall(PetscSNPrintf(name, sizeof(name), "basis_%04" PetscInt_FMT ".vec", i));
+    PetscCall(LinearReplayLoadMappedVec(comm, app->step_replay_dir, name, f_ext, c_to_export, mapped, &b));
+    PetscCall(LinearSolverAppendRawBasis(solver, b, "step replay exported basis"));
+    PetscCall(VecDestroy(&b));
+  }
+  {
+    char saved_linear_replay_dir[PETSC_MAX_PATH_LEN];
+
+    PetscCall(PetscStrncpy(saved_linear_replay_dir, app->linear_replay_dir, sizeof(saved_linear_replay_dir)));
+    PetscCall(PetscStrncpy(app->linear_replay_dir, app->step_replay_dir, sizeof(app->linear_replay_dir)));
+    solver->A = Areg;
+    if (app->linear_replay_check_pc_probe) PetscCall(LinearReplayProbePC(dm, app, solver, Areg, f_ext, c_to_export, mapped));
+    PetscCall(PetscStrncpy(app->linear_replay_dir, saved_linear_replay_dir, sizeof(app->linear_replay_dir)));
+  }
+
+  lambda = meta.lambda;
+  PetscCall(IndirectNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u, &lambda, meta.omega, rhs_norm, meta.r, app->newton_stopping_criterion, app->newton_stopping_tol, stats));
+  PetscCall(PetscPrintf(comm,
+                        "STEP_REPLAY_RESULT dir=%s omega=%.8e lambda_start=%.8e lambda_end=%.8e converged=%s newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT " final_rel=%.6e final_rel_correction=%.6e basis_cols_end=%" PetscInt_FMT "\n",
+                        app->step_replay_dir, (double)meta.omega, (double)meta.lambda, (double)lambda, stats->converged ? "true" : "false",
+                        stats->newton_its, stats->total_linear_its, (double)stats->final_rel, (double)stats->final_rel_correction,
+                        solver->n_raw_basis));
+
+  PetscCall(VecDestroy(&u));
+  PetscCall(VecDestroy(&residual));
+  PetscCall(VecDestroy(&residual_eps));
+  PetscCall(VecDestroy(&G));
+  PetscCall(VecDestroy(&F));
+  PetscCall(VecDestroy(&F_eps));
+  PetscCall(VecDestroy(&rhsW));
+  PetscCall(VecDestroy(&rhsV));
+  PetscCall(VecDestroy(&f_exp));
+  PetscCall(VecDestroy(&F_exp));
+  PetscCall(VecDestroy(&G_exp));
+  PetscCall(VecDestroy(&F_eps_exp));
+  PetscCall(VecDestroy(&rhsW_exp));
+  PetscCall(VecDestroy(&rhsV_exp));
+  PetscCall(MatDestroy(&replayA));
+  PetscCall(PetscFree(c_to_export));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode InitReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver, Mat Areg, Mat Kelastic, Mat Ktangent, Vec f_ext, PetscReal rhs_norm)
+{
+  MPI_Comm       comm = PetscObjectComm((PetscObject)dm);
+  LinearReplayMeta meta;
+  PetscInt      *c_to_export = NULL;
+  PetscBool      mapped = PETSC_FALSE;
+  Vec            u_exp = NULL, u = NULL, residual = NULL, F = NULL, rhs_c = NULL, rhs_exp = NULL, du_exp = NULL, du_c = NULL, u_after_exp = NULL;
+  Vec            u_after_c = NULL, damping_trial = NULL;
+  Mat            Areg_exp = NULL, Ktangent_exp = NULL, Kelastic_exp = NULL, solveA = NULL;
+  PetscBool      have_F_exp = PETSC_FALSE, have_f_exp = PETSC_FALSE;
+  Vec            F_exp = NULL, f_exp = NULL;
+  PetscInt       its = 0;
+  PetscReal      rel = PETSC_MAX_REAL, alpha_c = 0.0, initial_decrease_c = PETSC_MAX_REAL, du_norm, u_norm, rel_corr_c;
+  PetscInt       ls_c = 0;
+  PetscLogDouble t0, t1;
+
+  PetscFunctionBeginUser;
+  PetscCall(LinearReplayReadMeta(comm, app->init_replay_dir, &meta));
+  PetscCall(PetscPrintf(comm,
+                        "INIT_REPLAY_META dir=%s kind=%s sample_id=%" PetscInt_FMT " lambda=%.8e r=%.8e it=%" PetscInt_FMT " basis_cols=%" PetscInt_FMT "\n",
+                        app->init_replay_dir, meta.kind, meta.sample_id, (double)meta.lambda, (double)meta.r, meta.newton_iteration,
+                        meta.basis_cols));
+  PetscCall(LinearReplayBuildCToExportMap(dm, actx->basis, app->init_replay_dir, f_ext, &c_to_export, &mapped));
+  PetscCall(PetscPrintf(comm, "INIT_REPLAY_MAP_CHECK mapped=%s\n", mapped ? "true" : "false"));
+  PetscCall(LinearReplayLoadMappedVec(comm, app->init_replay_dir, "u_before.vec", f_ext, c_to_export, mapped, &u_exp));
+  PetscCall(LinearReplayMappedVecRoundtrip(comm, app->init_replay_dir, "u_before.vec", "u_before", u_exp, f_ext, c_to_export, mapped));
+  PetscCall(VecDuplicate(f_ext, &u));
+  if (app->init_replay_use_exported_u) PetscCall(VecCopy(u_exp, u));
+  else PetscCall(VecZeroEntries(u));
+  PetscCall(VecDuplicate(f_ext, &residual));
+  PetscCall(VecDuplicate(f_ext, &F));
+  PetscCall(VecDuplicate(f_ext, &rhs_c));
+  PetscCall(VecDuplicate(f_ext, &du_c));
+  PetscCall(VecDuplicate(f_ext, &u_after_c));
+  PetscCall(VecDuplicate(f_ext, &damping_trial));
+  PetscCall(LinearReplayLoadMappedVec(comm, app->init_replay_dir, "rhs.vec", f_ext, c_to_export, mapped, &rhs_exp));
+  PetscCall(LinearReplayLoadMappedVec(comm, app->init_replay_dir, "du.vec", f_ext, c_to_export, mapped, &du_exp));
+  PetscCall(LinearReplayLoadMappedVec(comm, app->init_replay_dir, "u_after.vec", f_ext, c_to_export, mapped, &u_after_exp));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->init_replay_dir, "F_free.vec", f_ext, c_to_export, mapped, &F_exp, &have_F_exp));
+  PetscCall(LinearReplayLoadMappedVecOptional(comm, app->init_replay_dir, "f_free.vec", f_ext, c_to_export, mapped, &f_exp, &have_f_exp));
+  PetscCall(LinearReplayLoadMappedMatNamed(comm, app->init_replay_dir, "Areg_free.mat", f_ext, c_to_export, mapped, &Areg_exp));
+  PetscCall(LinearReplayLoadMappedMatNamed(comm, app->init_replay_dir, "Ktangent_free.mat", f_ext, c_to_export, mapped, &Ktangent_exp));
+  PetscCall(LinearReplayLoadMappedMatNamed(comm, app->init_replay_dir, "Kelastic_free.mat", f_ext, c_to_export, mapped, &Kelastic_exp));
+
+  PetscCall(PetscTime(&t0));
+  PetscCall(AssemblePlasticResidualJacobian(actx, meta.lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
+  PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, meta.r));
+  PetscCall(PetscTime(&t1));
+  PetscCall(PetscPrintf(comm, "INIT_REPLAY_ASSEMBLY time=%.6g\n", (double)(t1 - t0)));
+  PetscCall(ResidualNormFree(actx, residual, rhs_norm, &rel));
+  PetscCall(VecWAXPY(F, 1.0, residual, f_ext));
+  PetscCall(VecCopy(residual, rhs_c));
+  PetscCall(VecScale(rhs_c, -1.0));
+  PetscCall(ZeroConstrainedVector(actx->constrained_is, rhs_c));
+
+  PetscCall(InitReplayVecDiff(comm, "u_before_exported_minus_C", u_exp, u));
+  if (have_f_exp) PetscCall(InitReplayVecDiff(comm, "f_free_exported_minus_C", f_exp, f_ext));
+  if (have_F_exp) PetscCall(InitReplayVecDiff(comm, "F_free_exported_minus_C", F_exp, F));
+  PetscCall(InitReplayVecDiff(comm, "rhs_exported_minus_C", rhs_exp, rhs_c));
+  if (Areg_exp) PetscCall(LinearReplayMatrixActionDiff(comm, "Areg_exported_minus_C", Areg_exp, Areg));
+  if (Ktangent_exp) PetscCall(LinearReplayMatrixActionDiff(comm, "Ktangent_exported_minus_C", Ktangent_exp, Ktangent));
+  if (Kelastic_exp) PetscCall(LinearReplayMatrixActionDiff(comm, "Kelastic_exported_minus_C", Kelastic_exp, Kelastic));
+
+  PetscCall(PetscPrintf(comm, "INIT_REPLAY_BASIS_LOAD cols=%" PetscInt_FMT "\n", meta.basis_cols));
+  for (PetscInt i = 0; i < meta.basis_cols; ++i) {
+    char name[64];
+    Vec  b = NULL;
+
+    PetscCall(PetscSNPrintf(name, sizeof(name), "basis_%04" PetscInt_FMT ".vec", i));
+    PetscCall(LinearReplayLoadMappedVec(comm, app->init_replay_dir, name, f_ext, c_to_export, mapped, &b));
+    PetscCall(LinearSolverAppendRawBasis(solver, b, "init replay exported basis"));
+    PetscCall(VecDestroy(&b));
+  }
+  PetscCall(PetscPrintf(comm, "INIT_REPLAY_BASIS_COMPARE exported_cols=%" PetscInt_FMT " C_raw_cols=%" PetscInt_FMT "\n", meta.basis_cols, solver->n_raw_basis));
+
+  solveA = (app->init_replay_use_exported_matrix && Areg_exp) ? Areg_exp : Areg;
+  solver->A = solveA;
+  PetscCall(PetscStrncpy(app->linear_replay_dir, app->init_replay_dir, sizeof(app->linear_replay_dir)));
+  if (app->linear_replay_check_pc_probe) PetscCall(LinearReplayProbePC(dm, app, solver, solveA, f_ext, c_to_export, mapped));
+  PetscCall(VecZeroEntries(du_c));
+  PetscCall(SolveLinearSystem(solver, app->init_replay_use_exported_rhs ? rhs_exp : rhs_c, du_c, "INIT REPLAY fixed-lambda Newton correction", u, PETSC_TRUE, &its));
+  PetscCall(InitReplayVecDiff(comm, "du_exported_minus_C_solve", du_exp, du_c));
+  PetscCall(PetscPrintf(comm,
+                        "INIT_REPLAY_LINEAR_RESULT dir=%s exported_matrix=%s exported_rhs=%s expected_iterations=%" PetscInt_FMT " C_iterations=%" PetscInt_FMT " expected_reported_final=%.8e rel_residual_C_state=%.8e\n",
+                        app->init_replay_dir, (app->init_replay_use_exported_matrix && Areg_exp) ? "true" : "false",
+                        app->init_replay_use_exported_rhs ? "true" : "false", meta.expected_iterations, its,
+                        (double)meta.expected_reported_residual_final, (double)rel));
+
+  if (app->init_replay_check_damping) {
+    PetscCall(FixedLambdaDirectionalDamping(actx, app, meta.lambda, u, du_exp, residual, f_ext, damping_trial, u_after_c,
+                                            &alpha_c, &ls_c, &initial_decrease_c));
+    PetscCall(VecNorm(du_exp, NORM_2, &du_norm));
+    PetscCall(VecNorm(u, NORM_2, &u_norm));
+    rel_corr_c = (alpha_c * du_norm) / PetscMax(u_norm, 1.0e-30);
+    PetscCall(VecWAXPY(u_after_c, alpha_c, du_exp, u));
+    PetscCall(InitReplayVecDiff(comm, "u_after_exported_minus_C_damping_on_exported_du", u_after_exp, u_after_c));
+    PetscCall(PetscPrintf(comm,
+                          "INIT_REPLAY_DAMPING_COMPARE expected_alpha=%.17e C_alpha=%.17e alpha_diff=%.8e expected_ls=%" PetscInt_FMT " C_ls=%" PetscInt_FMT " expected_initial_decrease=%.17e C_initial_decrease=%.17e expected_rel_correction=%.17e C_rel_correction=%.17e\n",
+                          (double)meta.expected_alpha, (double)alpha_c, (double)PetscAbsReal(meta.expected_alpha - alpha_c),
+                          meta.expected_line_search_iterations, ls_c, (double)meta.expected_initial_decrease, (double)initial_decrease_c,
+                          (double)meta.expected_rel_correction, (double)rel_corr_c));
+  }
+  PetscCall(PetscPrintf(comm,
+                        "INIT_REPLAY_UPDATE_COMPARE dir=%s use_exported_u=%s use_exported_matrix=%s use_exported_rhs=%s\n",
+                        app->init_replay_dir, app->init_replay_use_exported_u ? "true" : "false",
+                        (app->init_replay_use_exported_matrix && Areg_exp) ? "true" : "false",
+                        app->init_replay_use_exported_rhs ? "true" : "false"));
+
+  PetscCall(VecDestroy(&u_exp));
+  PetscCall(VecDestroy(&u));
+  PetscCall(VecDestroy(&residual));
+  PetscCall(VecDestroy(&F));
+  PetscCall(VecDestroy(&rhs_c));
+  PetscCall(VecDestroy(&rhs_exp));
+  PetscCall(VecDestroy(&du_exp));
+  PetscCall(VecDestroy(&du_c));
+  PetscCall(VecDestroy(&u_after_exp));
+  PetscCall(VecDestroy(&u_after_c));
+  PetscCall(VecDestroy(&damping_trial));
+  PetscCall(VecDestroy(&F_exp));
+  PetscCall(VecDestroy(&f_exp));
+  PetscCall(MatDestroy(&Areg_exp));
+  PetscCall(MatDestroy(&Ktangent_exp));
+  PetscCall(MatDestroy(&Kelastic_exp));
   PetscCall(PetscFree(c_to_export));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -5746,6 +6913,51 @@ int main(int argc, char **argv)
     }
   }
   PetscCall(VecZeroEntries(u));
+  if (app.init_replay_dir[0]) {
+    PetscCall(InitReplayRun(dm, &actx, &app, &lsolver, Areg, Kelastic, Ktangent, f_ext, rhs_norm));
+    PetscCall(PetscTime(&t_end));
+    PetscCall(PetscPrintf(PETSC_COMM_WORLD,
+                          "RESULT variant=%s init_replay=true global_dofs=%" PetscInt_FMT " wall_time=%.6g deflation=%s deflation_solver=%s init_replay_dir=%s\n",
+                          app.variant_name, global_dofs, (double)(t_end - t_start), app.use_deflation ? "true" : "false",
+                          app.deflation_solver_name, app.init_replay_dir));
+    PetscCall(LinearSolverDestroy(&lsolver));
+    PetscCall(AssemblyCtxDestroy(&actx));
+    PetscCall(VecDestroy(&f_ext));
+    PetscCall(VecDestroy(&u));
+    PetscCall(MatDestroy(&Ktangent));
+    PetscCall(MatDestroy(&Kelastic));
+    PetscCall(MatDestroy(&Areg));
+    PetscCall(DMDestroy(&dm));
+    PetscCall(P4BasisDestroy(&basis));
+    PetscCall(PetscFinalize());
+    return 0;
+  }
+  if (app.step_replay_dir[0]) {
+    NewtonStats step_stats;
+
+    PetscCall(StepReplayRun(dm, &actx, &app, &lsolver, Areg, Kelastic, Ktangent, f_ext, rhs_norm, &step_stats));
+    PetscCall(PetscTime(&t_end));
+    PetscCall(PetscPrintf(PETSC_COMM_WORLD,
+                          "DEFLATION_TIMING orthogonalization_time=%.6g coarse_initial_time=%.6g coarse_initial_calls=%" PetscInt_FMT " pc_apply_time=%.6g projector_time=%.6g projected_pc_calls=%" PetscInt_FMT "\n",
+                          (double)lsolver.deflation_orthogonalization_time, (double)lsolver.deflation_coarse_time, lsolver.deflation_coarse_calls,
+                          (double)lsolver.deflation_pc_apply_time, (double)lsolver.deflation_projector_time, lsolver.deflation_projected_pc_calls));
+    PetscCall(PetscPrintf(PETSC_COMM_WORLD,
+                          "RESULT variant=%s step_replay=true global_dofs=%" PetscInt_FMT " newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT " wall_time=%.6g deflation=%s deflation_solver=%s step_replay_dir=%s converged=%s final_rel=%.6e final_rel_correction=%.6e\n",
+                          app.variant_name, global_dofs, step_stats.newton_its, step_stats.total_linear_its, (double)(t_end - t_start),
+                          app.use_deflation ? "true" : "false", app.deflation_solver_name, app.step_replay_dir,
+                          step_stats.converged ? "true" : "false", (double)step_stats.final_rel, (double)step_stats.final_rel_correction));
+    PetscCall(LinearSolverDestroy(&lsolver));
+    PetscCall(AssemblyCtxDestroy(&actx));
+    PetscCall(VecDestroy(&f_ext));
+    PetscCall(VecDestroy(&u));
+    PetscCall(MatDestroy(&Ktangent));
+    PetscCall(MatDestroy(&Kelastic));
+    PetscCall(MatDestroy(&Areg));
+    PetscCall(DMDestroy(&dm));
+    PetscCall(P4BasisDestroy(&basis));
+    PetscCall(PetscFinalize());
+    return 0;
+  }
   if (app.linear_replay_dir[0]) {
     PetscCall(LinearReplayRun(dm, &actx, &app, &lsolver, Areg, Kelastic, Ktangent, f_ext, rhs_norm));
     PetscCall(PetscTime(&t_end));

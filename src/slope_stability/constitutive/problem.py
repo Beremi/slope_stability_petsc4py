@@ -2010,6 +2010,7 @@ class ConstitutiveOperator:
 
     def reduction(self, lam: float):
         t0 = perf_counter()
+        self.current_reduction_lambda = float(lam)
         self._clear_owned_reduction_cache()
         if self._use_owned_constitutive():
             pattern = self.owned_tangent_pattern

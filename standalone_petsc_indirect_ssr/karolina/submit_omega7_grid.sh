@@ -39,7 +39,11 @@ submit_one() {
     exit 2
   fi
   case "$engine" in c|py) ;; *) echo "ERROR: unknown engine=$engine" >&2; exit 2 ;; esac
-  case "$profile" in baseline|petsc4py) ;; *) echo "ERROR: unknown profile=$profile" >&2; exit 2 ;; esac
+  case "$profile" in baseline|petsc4py|split) ;; *) echo "ERROR: unknown profile=$profile" >&2; exit 2 ;; esac
+  if [[ "$engine" != "c" && "$profile" == "split" ]]; then
+    echo "ERROR: profile=split is a C-only shell V-cycle profile; use ENGINES=c." >&2
+    exit 2
+  fi
 
   run_label="${engine}_${profile}_${nodes}n${tasks_per_node}ppn_r${ranks}_omega${OMEGA_MAX:-7e6}_rtol${LINEAR_RTOL:-1e-1}"
   job_name="ssr_${engine}_${profile}_${nodes}n_${tasks_per_node}ppn"

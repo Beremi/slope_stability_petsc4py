@@ -19,6 +19,11 @@ engine=c|py
 profile=baseline|petsc4py
 ```
 
+The C-only `split` profile runs the current local best-fit scalable variant,
+`options/pmg_shell_split_smoother.opts`: shell V-cycle, P2/P1 active ranks
+`64/32`, interlaced layout, GAMG coarse solve, fine smoother `5`, and P2
+smoother `10`.
+
 Submit a dry run first:
 
 ```bash
@@ -38,6 +43,13 @@ Useful overrides:
 PARTITION=qcpu_exp TIME_LIMIT=02:00:00 ./submit_omega7_grid.sh
 LAYOUTS="1:64 1:128 2:128" ENGINES="c py" PROFILES="baseline petsc4py" ./submit_omega7_grid.sh
 BUILD_BEFORE_RUN=1 ENGINES=c PROFILES=baseline ./submit_omega7_grid.sh
+```
+
+Submit only the split-smoother C scalability check requested after local
+validation:
+
+```bash
+LAYOUTS="1:128 2:128" ENGINES=c PROFILES=split TIME_LIMIT=02:00:00 ./submit_omega7_grid.sh
 ```
 
 Collect after the jobs finish:

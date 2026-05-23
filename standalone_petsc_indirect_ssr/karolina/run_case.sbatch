@@ -91,8 +91,9 @@ fi
 profile_options_file() {
   case "$PROFILE" in
     baseline) printf '%s\n' "${OPTIONS_FILE:-options/pmg_shell_vcycle.opts}" ;;
+    split) printf '%s\n' "${OPTIONS_FILE:-options/pmg_shell_split_smoother.opts}" ;;
     petsc4py) printf '%s\n' "${OPTIONS_FILE:-options/pmg_shell_petsc4py.opts}" ;;
-    *) echo "ERROR: unknown PROFILE=$PROFILE, expected baseline or petsc4py." >&2; return 2 ;;
+    *) echo "ERROR: unknown PROFILE=$PROFILE, expected baseline, split, or petsc4py." >&2; return 2 ;;
   esac
 }
 
@@ -107,8 +108,12 @@ write_py_config() {
     petsc4py)
       petsc_opt='"pc_hypre_boomeramg_max_iter=4", "pc_hypre_boomeramg_tol=0.0"'
       ;;
+    split)
+      echo "ERROR: PROFILE=split is only implemented for ENGINE=c." >&2
+      return 2
+      ;;
     *)
-      echo "ERROR: unknown PROFILE=$PROFILE, expected baseline or petsc4py." >&2
+      echo "ERROR: unknown PROFILE=$PROFILE, expected baseline, split, or petsc4py." >&2
       return 2
       ;;
   esac

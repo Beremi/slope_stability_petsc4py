@@ -796,6 +796,15 @@ class _ManualPMGShellPC:
         prolongations = self.state.prolongations
         if level_count < 2:
             raise RuntimeError("manualmg backend requires at least two levels")
+        replay_probe = getattr(self.solver, "_linear_replay_current_probe", None)
+
+        def _capture_probe_vec(key: str, vec) -> None:
+            if not isinstance(replay_probe, dict) or key in replay_probe:
+                return
+            sizes = replay_probe.setdefault("_vector_global_sizes", {})
+            if isinstance(sizes, dict):
+                sizes[key] = int(vec.getSize())
+            replay_probe[key] = np.asarray(vec.getArray(readonly=True), dtype=np.float64).copy()
 
         fine_pre_s = 0.0
         fine_post_s = 0.0
@@ -812,6 +821,7 @@ class _ManualPMGShellPC:
         for work in self._level_work:
             work["e"].set(0.0)
         self._copy_vec(self._level_work[fine_idx]["rhs"], x)
+        _capture_probe_vec("mg_fine_rhs_local", self._level_work[fine_idx]["rhs"])
 
         for level_idx in range(fine_idx, 0, -1):
             work = self._level_work[level_idx]
@@ -825,8 +835,10 @@ class _ManualPMGShellPC:
             pre_s = perf_counter() - t
             if level_idx == fine_idx:
                 fine_pre_s += pre_s
+                _capture_probe_vec("mg_fine_pre_local", e)
             else:
                 mid_pre_s += pre_s
+                _capture_probe_vec("mg_p2_pre_local", e)
 
             t = perf_counter()
             self.A_levels_free[level_idx].mult(e, A_e)
@@ -834,8 +846,10 @@ class _ManualPMGShellPC:
             resid_s = perf_counter() - t
             if level_idx == fine_idx:
                 fine_resid_s += resid_s
+                _capture_probe_vec("mg_fine_residual_local", residual)
             else:
                 mid_resid_s += resid_s
+                _capture_probe_vec("mg_p2_residual_local", residual)
 
             t = perf_counter()
             if restrictions:
@@ -845,8 +859,10 @@ class _ManualPMGShellPC:
             restrict_s = perf_counter() - t
             if level_idx == fine_idx:
                 restrict_f2m_s += restrict_s
+                _capture_probe_vec("mg_p2_rhs_local", self._level_work[level_idx - 1]["rhs"])
             else:
                 restrict_m2c_s += restrict_s
+                _capture_probe_vec("mg_p1_rhs_local", self._level_work[level_idx - 1]["rhs"])
 
         rhs_coarse_free = self._coarse_work["rhs_coarse_free"]
         ecoarse_free = self._coarse_work["ecoarse_free"]
@@ -864,6 +880,7 @@ class _ManualPMGShellPC:
             self._copy_coarse_full_to_free(ecoarse_free, ecoarse, self.hierarchy.coarse_level)
         else:
             self._copy_vec(ecoarse_free, ecoarse)
+        _capture_probe_vec("mg_p1_x_local", ecoarse_free)
 
         for level_idx in range(1, level_count):
             work = self._level_work[level_idx]
@@ -881,8 +898,10 @@ class _ManualPMGShellPC:
             post_s = perf_counter() - t
             if level_idx == fine_idx:
                 fine_post_s += post_s
+                _capture_probe_vec("mg_fine_post_local", work["e"])
             else:
                 mid_post_s += post_s
+                _capture_probe_vec("mg_p2_post_local", work["e"])
 
         t = perf_counter()
         self._copy_vec(y, self._level_work[fine_idx]["e"])
@@ -3949,9 +3968,18 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
 
             def _timed_prec(v: np.ndarray) -> np.ndarray:
                 t_prec = perf_counter()
-                out = self._apply_inner_preconditioner(v)
-                timing_stats["preconditioner_apply_s"] = timing_stats.get("preconditioner_apply_s", 0.0) + (perf_counter() - t_prec)
-                return out
+                capture_probe = replay_probe is not None and not bool(replay_probe.get("_manualmg_capture_done"))
+                if capture_probe:
+                    self._linear_replay_current_probe = replay_probe
+                try:
+                    out = self._apply_inner_preconditioner(v)
+                    if capture_probe:
+                        replay_probe["_manualmg_capture_done"] = True
+                    return out
+                finally:
+                    if capture_probe and hasattr(self, "_linear_replay_current_probe"):
+                        self._linear_replay_current_probe = None
+                    timing_stats["preconditioner_apply_s"] = timing_stats.get("preconditioner_apply_s", 0.0) + (perf_counter() - t_prec)
 
             if use_distributed_local:
                 r0, r1 = self._ownership_range
@@ -3971,9 +3999,18 @@ class PetscMatlabExactDFGMRESSolver(PetscKSPMatlabDeflatedFGMRESSolver):
 
                 def _timed_prec_local(v_local: np.ndarray) -> np.ndarray:
                     t_prec = perf_counter()
-                    out = self._apply_inner_preconditioner_local(v_local)
-                    timing_stats["preconditioner_apply_s"] = timing_stats.get("preconditioner_apply_s", 0.0) + (perf_counter() - t_prec)
-                    return out
+                    capture_probe = replay_probe is not None and not bool(replay_probe.get("_manualmg_capture_done"))
+                    if capture_probe:
+                        self._linear_replay_current_probe = replay_probe
+                    try:
+                        out = self._apply_inner_preconditioner_local(v_local)
+                        if capture_probe:
+                            replay_probe["_manualmg_capture_done"] = True
+                        return out
+                    finally:
+                        if capture_probe and hasattr(self, "_linear_replay_current_probe"):
+                            self._linear_replay_current_probe = None
+                        timing_stats["preconditioner_apply_s"] = timing_stats.get("preconditioner_apply_s", 0.0) + (perf_counter() - t_prec)
 
                 compiled_outer = bool(self.preconditioner_options.get("compiled_outer", False))
                 if compiled_outer:
