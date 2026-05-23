@@ -6,6 +6,9 @@ For the maintained C continuation/scaling path, Karolina command templates,
 active-rank PMG tuning rules, and the known 1/2/4/8/16-node results, see
 [`C_SCALING_RUNBOOK.md`](C_SCALING_RUNBOOK.md).
 
+For the local C timing target used by the petsc4py DMPlex rewrite, plus the
+memory-sampling benchmark harness, see [`benchmarks/`](benchmarks/).
+
 Build:
 
 ```bash

@@ -1,0 +1,1 @@
+"""PETSc-specific compatibility helpers."""

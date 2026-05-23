@@ -52,6 +52,7 @@ from slope_stability.problem_asset_runtime import (
     load_mechanical_problem_spec,
     resolve_problem_asset,
 )
+from slope_stability.petsc.dmplex_compat import probe_dmplex_lagrange_layout
 from slope_stability.utils import (
     flatten_field,
     local_csr_to_petsc_aij_matrix,
@@ -121,6 +122,37 @@ def _parse_petsc_opt_entries(entries: list[str] | None) -> dict[str, str]:
             raise ValueError(f"Expected non-empty PETSc option key in {raw!r}")
         parsed[key] = value
     return parsed
+
+
+def _apply_c_compatible_pmg_defaults(options: dict[str, object], *, fine_ksp_max_it: int | None, p2_ksp_max_it: int | None) -> None:
+    """Install the maintained C split-smoother PMG defaults without hiding user overrides."""
+
+    defaults: dict[str, object] = {
+        "mg_levels_ksp_type": "chebyshev",
+        "mg_levels_ksp_max_it": 2,
+        "mg_levels_pc_type": "jacobi",
+        "mg_coarse_ksp_type": "fgmres",
+        "mg_coarse_rtol": 1.0e-3,
+        "mg_coarse_max_it": 5,
+        "mg_coarse_pc_type": "redundant",
+        "mg_coarse_pc_redundant_number": 1,
+        "mg_coarse_psubcomm_type": "interlaced",
+        "mg_coarse_redundant_ksp_type": "fgmres",
+        "mg_coarse_redundant_pc_type": "gamg",
+        "pc_gamg_aggressive_square_graph": False,
+        "pc_hypre_boomeramg_coarsen_type": "HMIS",
+        "pc_hypre_boomeramg_interp_type": "ext+i",
+    }
+    if fine_ksp_max_it is not None:
+        defaults["manualmg_fine_ksp_max_it"] = int(fine_ksp_max_it)
+    else:
+        defaults["manualmg_fine_ksp_max_it"] = 5
+    if p2_ksp_max_it is not None:
+        defaults["manualmg_mid_ksp_max_it"] = int(p2_ksp_max_it)
+    else:
+        defaults["manualmg_mid_ksp_max_it"] = 10
+
+    options.update(defaults)
 
 
 def _collector_snapshot(solver) -> dict:
@@ -683,6 +715,7 @@ def run_capture(
     asset_name: str,
     mesh_variant: str | None = None,
     profile: str | None = None,
+    mechanics_backend: str = "legacy_array",
     analysis: str = "ssr",
     elem_type: str = "P2",
     quadrature_rule: int | None = None,
@@ -757,8 +790,20 @@ def run_capture(
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE",
     factor_solver_type: str | None = None,
     pc_backend: str | None = "hypre",
+    pmg_profile: str | None = None,
     pmg_coarse_mesh_variant: str | None = None,
     pmg_fine_hierarchy_mode: str = "default",
+    pmg_shell_p2_active_ranks: int | None = None,
+    pmg_shell_p1_active_ranks: int | None = None,
+    pmg_shell_subcomm_type: str | None = None,
+    pmg_shell_fine_ksp_max_it: int | None = None,
+    pmg_shell_p2_ksp_max_it: int | None = None,
+    pmg_shell_p1_pc_type: str | None = None,
+    pmg_shell_p1_redundant_number: int | None = None,
+    pmg_shell_p1_redundant_ksp_type: str | None = None,
+    pmg_shell_p1_redundant_ksp_rtol: float | None = None,
+    pmg_shell_p1_redundant_ksp_max_it: int | None = None,
+    pmg_shell_p1_redundant_pc_type: str | None = None,
     preconditioner_matrix_source: str = "tangent",
     preconditioner_matrix_policy: str = "current",
     preconditioner_rebuild_policy: str = "every_newton",
@@ -805,6 +850,9 @@ def run_capture(
 ) -> dict:
     rank = int(PETSc.COMM_WORLD.getRank())
     stage_t0 = perf_counter()
+    mechanics_backend_norm = str(mechanics_backend or "legacy_array").strip().lower()
+    if mechanics_backend_norm not in {"legacy_array", "dmplex_c_compatible"}:
+        raise ValueError("mechanics_backend must be 'legacy_array' or 'dmplex_c_compatible'.")
     _stage_debug_log(
         rank,
         "start",
@@ -815,6 +863,7 @@ def run_capture(
         mesh_variant=None if mesh_variant is None else str(mesh_variant),
         elem_type=str(elem_type),
         pc_backend=None if pc_backend is None else str(pc_backend),
+        mechanics_backend=mechanics_backend_norm,
     )
     out_dir = _ensure_dir(output_dir) if rank == 0 else output_dir
     data_dir = out_dir / "data"
@@ -839,6 +888,21 @@ def run_capture(
         mesh_file=str(mesh_path),
         material_rows=len(material_rows),
     )
+    dmplex_probe: dict[str, object] | None = None
+    if mechanics_backend_norm == "dmplex_c_compatible":
+        dmplex_probe = probe_dmplex_lagrange_layout(
+            mesh_path,
+            degrees=(1, 2, 4),
+            dim=3,
+            field_dim=3,
+            comm=PETSc.COMM_WORLD,
+        )
+        _stage_debug_log(
+            rank,
+            "dmplex_compat_probe",
+            stage_t0,
+            **{f"probe_{key}": value for key, value in dmplex_probe.items()},
+        )
 
     solver_type_upper = str(solver_type).upper()
     effective_pc_backend = None
@@ -849,6 +913,11 @@ def run_capture(
             effective_pc_backend = "hypre"
         elif "GAMG" in solver_type_upper:
             effective_pc_backend = "gamg"
+    if mechanics_backend_norm == "dmplex_c_compatible":
+        if effective_pc_backend in {None, "hypre", "gamg"}:
+            effective_pc_backend = "pmg_shell"
+        if str(pmg_profile or "").strip() == "":
+            pmg_profile = "c_split_smoother"
 
     if effective_pc_backend in {"pmg", "pmg_shell"}:
         mixed_pmg_requested = pmg_coarse_mesh_variant is not None
@@ -1170,6 +1239,7 @@ def run_capture(
         "use_as_preconditioner": True,
         "factor_solver_type": factor_solver_type,
         "pc_backend": effective_pc_backend,
+        "pmg_profile": None if pmg_profile is None else str(pmg_profile),
         "pmg_coarse_mesh_variant": None if pmg_coarse_mesh_variant is None else str(pmg_coarse_mesh_variant),
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
         "preconditioner_matrix_source": str(preconditioner_matrix_source),
@@ -1221,6 +1291,32 @@ def run_capture(
                 "pmg_hierarchy": pmg_hierarchy,
             }
         )
+    if effective_pc_backend == "pmg_shell" and str(pmg_profile or "").strip().lower() in {
+        "c_split",
+        "c_split_smoother",
+        "c_baseline",
+        "dmplex_c_compatible",
+    }:
+        _apply_c_compatible_pmg_defaults(
+            preconditioner_options,
+            fine_ksp_max_it=pmg_shell_fine_ksp_max_it,
+            p2_ksp_max_it=pmg_shell_p2_ksp_max_it,
+        )
+    for key, value in (
+        ("pmg_shell_p2_active_ranks", pmg_shell_p2_active_ranks),
+        ("pmg_shell_p1_active_ranks", pmg_shell_p1_active_ranks),
+        ("pmg_shell_subcomm_type", pmg_shell_subcomm_type),
+        ("manualmg_fine_ksp_max_it", pmg_shell_fine_ksp_max_it),
+        ("manualmg_mid_ksp_max_it", pmg_shell_p2_ksp_max_it),
+        ("mg_coarse_pc_type", pmg_shell_p1_pc_type),
+        ("mg_coarse_pc_redundant_number", pmg_shell_p1_redundant_number),
+        ("mg_coarse_redundant_ksp_type", pmg_shell_p1_redundant_ksp_type),
+        ("mg_coarse_redundant_ksp_rtol", pmg_shell_p1_redundant_ksp_rtol),
+        ("mg_coarse_redundant_ksp_max_it", pmg_shell_p1_redundant_ksp_max_it),
+        ("mg_coarse_redundant_pc_type", pmg_shell_p1_redundant_pc_type),
+    ):
+        if value is not None:
+            preconditioner_options[key] = value
     if effective_pc_backend == "gamg":
         preconditioner_options.update(
             {
@@ -1424,8 +1520,13 @@ def run_capture(
         "newton_armijo_rescale_trial_to_omega": bool(newton_armijo_rescale_trial_to_omega),
         "newton_armijo_fallback_to_alg5": bool(newton_armijo_fallback_to_alg5),
         "factor_solver_type": factor_solver_type,
+        "mechanics_backend": mechanics_backend_norm,
         "pc_backend": effective_pc_backend,
+        "pmg_profile": None if pmg_profile is None else str(pmg_profile),
         "pmg_fine_hierarchy_mode": str(pmg_fine_hierarchy_mode),
+        "pmg_shell_p2_active_ranks": pmg_shell_p2_active_ranks,
+        "pmg_shell_p1_active_ranks": pmg_shell_p1_active_ranks,
+        "pmg_shell_subcomm_type": pmg_shell_subcomm_type,
         "preconditioner_matrix_source": str(preconditioner_matrix_source),
         "preconditioner_matrix_policy": str(preconditioner_matrix_policy),
         "preconditioner_rebuild_policy": str(preconditioner_rebuild_policy),
@@ -1769,10 +1870,12 @@ def run_capture(
             "mesh_elements": int(elem.shape[1]),
             "unknowns": int(q_mask.astype(bool).sum()),
             "analysis": analysis_key,
+            "mechanics_backend": mechanics_backend_norm,
             "solver_type": solver_type,
             "step_count": int(len(lambda_hist3)),
         },
         "params": params,
+        "dmplex_compat_probe": dmplex_probe,
         "mesh": {
             "mesh_file": str(mesh_path),
             "coord_shape": coord.shape,

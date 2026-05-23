@@ -1,0 +1,109 @@
+{
+  "benchmark_id": "c_l1_unrefined_20260523",
+  "description": "Local pure C/PETSc indirect SSR unrefined L1 target for the petsc4py DMPlex rewrite.",
+  "mesh": "standalone_petsc_indirect_ssr/data/adaptive_family_a_l1.msh",
+  "refine_levels": 0,
+  "omega_max": 7000000.0,
+  "linear_rtol": 0.1,
+  "ksp_max_it": 200,
+  "partitioner": "parmetis",
+  "profile": {
+    "options_file": "standalone_petsc_indirect_ssr/options/pmg_shell_split_smoother.opts",
+    "pmg_shell_p1_pc_type": "redundant",
+    "pmg_shell_p1_pc_redundant_number": 1,
+    "pmg_shell_p1_redundant_ksp_type": "fgmres",
+    "pmg_shell_p1_redundant_ksp_rtol": 0.001,
+    "pmg_shell_p1_redundant_ksp_max_it": 5,
+    "pmg_shell_p1_redundant_pc_type": "gamg"
+  },
+  "runs": [
+    {
+      "engine": "c",
+      "profile": "split_smoother_redundant_p1",
+      "ranks": 32,
+      "p4_dofs": 616322,
+      "wall_s": 146.56,
+      "continuation_s": 145.134,
+      "total_newton": 77,
+      "total_linear": 719,
+      "wall_per_linear_s": 0.20384,
+      "continuation_per_linear_s": 0.20186,
+      "final_lambda": 1.570195,
+      "final_rel": 0.02516848,
+      "deflation": {
+        "pc_apply_s": 62.0097,
+        "orthogonalize_s": 17.6717,
+        "projector_s": 8.18073,
+        "coarse_initial_s": 0.388398,
+        "projected_pc_calls": 718
+      },
+      "pmg_shell": {
+        "apply_calls": 719,
+        "operator_updates": 77,
+        "fine_smooth_s": 44.2263,
+        "p2_smooth_s": 4.11198,
+        "restrict_s": 1.10991,
+        "prolong_s": 0.151418,
+        "coarse_solve_s": 8.26598,
+        "residual_s": 4.19221,
+        "operator_update_s": 3.09342
+      },
+      "memory": {
+        "status": "sampled_2026-05-23",
+        "source": ".local/tmp/ssr_c_benchmark_refresh32_noover_20260523/c_r32",
+        "refresh_wall_s": 158.531,
+        "refresh_total_linear": 763,
+        "max_rss_kib_per_rank": 557940,
+        "avg_rss_kib_per_rank": 486115.375,
+        "total_rss_kib_max": 15411012
+      }
+    },
+    {
+      "engine": "c",
+      "profile": "split_smoother_redundant_p1",
+      "ranks": 64,
+      "p4_dofs": 616322,
+      "wall_s": 196.66,
+      "continuation_s": 195.04,
+      "total_newton": 87,
+      "total_linear": 803,
+      "wall_per_linear_s": 0.24491,
+      "continuation_per_linear_s": 0.24289,
+      "final_lambda": 1.569401,
+      "final_rel": 0.01031591,
+      "deflation": {
+        "pc_apply_s": 88.3578,
+        "orthogonalize_s": 27.0588,
+        "projector_s": 8.99736,
+        "coarse_initial_s": 0.832388,
+        "projected_pc_calls": 802
+      },
+      "pmg_shell": {
+        "apply_calls": 803,
+        "operator_updates": 87,
+        "fine_smooth_s": 58.2181,
+        "p2_smooth_s": 4.88696,
+        "restrict_s": 1.37202,
+        "prolong_s": 0.416085,
+        "coarse_solve_s": 18.2085,
+        "residual_s": 5.35452,
+        "operator_update_s": 3.77154
+      },
+      "memory": {
+        "status": "sampled_2026-05-23",
+        "source": ".local/tmp/ssr_c_benchmark_refresh2_20260523/c_r64",
+        "refresh_wall_s": 195.292,
+        "refresh_total_linear": 803,
+        "max_rss_kib_per_rank": 383116,
+        "avg_rss_kib_per_rank": 337441.75,
+        "total_rss_kib_max": 21479660
+      }
+    }
+  ],
+  "acceptance": {
+    "petsc4py_wall_per_linear_ratio_max": 1.1,
+    "petsc4py_continuation_per_linear_ratio_max": 1.1,
+    "petsc4py_linear_iteration_ratio_max": 1.1,
+    "petsc4py_memory_per_rank_ratio_initial_max": 1.2
+  }
+}

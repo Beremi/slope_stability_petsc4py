@@ -30,6 +30,7 @@ class ProblemConfig:
 
 @dataclass(frozen=True)
 class ExecutionConfig:
+    mechanics_backend: str = "legacy_array"
     node_ordering: str = "block_metis"
     mpi_distribute_by_nodes: bool = True
     constitutive_mode: str = "overlap"
@@ -103,8 +104,20 @@ class LinearSolverConfig:
     use_as_preconditioner: bool = True
     factor_solver_type: str | None = None
     pc_backend: str | None = "hypre"
+    pmg_profile: str | None = None
     pmg_coarse_mesh_variant: str | None = None
     pmg_fine_hierarchy_mode: str = "default"
+    pmg_shell_p2_active_ranks: int | None = None
+    pmg_shell_p1_active_ranks: int | None = None
+    pmg_shell_subcomm_type: str | None = None
+    pmg_shell_fine_ksp_max_it: int | None = None
+    pmg_shell_p2_ksp_max_it: int | None = None
+    pmg_shell_p1_pc_type: str | None = None
+    pmg_shell_p1_redundant_number: int | None = None
+    pmg_shell_p1_redundant_ksp_type: str | None = None
+    pmg_shell_p1_redundant_ksp_rtol: float | None = None
+    pmg_shell_p1_redundant_ksp_max_it: int | None = None
+    pmg_shell_p1_redundant_pc_type: str | None = None
     max_deflation_basis_vectors: int = 48
     preconditioner_matrix_source: str = "tangent"
     preconditioner_matrix_policy: str = "current"
@@ -320,6 +333,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         profile=None if problem_data.get("profile") is None else str(problem_data.get("profile")),
     )
     execution = ExecutionConfig(
+        mechanics_backend=str(execution_data.get("mechanics_backend", "legacy_array")),
         node_ordering=str(execution_data.get("node_ordering", "block_metis")),
         mpi_distribute_by_nodes=bool(execution_data.get("mpi_distribute_by_nodes", True)),
         constitutive_mode=str(execution_data.get("constitutive_mode", "overlap")),
@@ -443,10 +457,46 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
             None if linear_data.get("factor_solver_type") is None else str(linear_data.get("factor_solver_type"))
         ),
         pc_backend=str(linear_data.get("pc_backend", "hypre")),
+        pmg_profile=(
+            None if linear_data.get("pmg_profile") is None else str(linear_data.get("pmg_profile"))
+        ),
         pmg_coarse_mesh_variant=(
             None if linear_data.get("pmg_coarse_mesh_variant") is None else str(linear_data.get("pmg_coarse_mesh_variant"))
         ),
         pmg_fine_hierarchy_mode=str(linear_data.get("pmg_fine_hierarchy_mode", "default")),
+        pmg_shell_p2_active_ranks=(
+            None if linear_data.get("pmg_shell_p2_active_ranks") is None else int(linear_data.get("pmg_shell_p2_active_ranks"))
+        ),
+        pmg_shell_p1_active_ranks=(
+            None if linear_data.get("pmg_shell_p1_active_ranks") is None else int(linear_data.get("pmg_shell_p1_active_ranks"))
+        ),
+        pmg_shell_subcomm_type=(
+            None if linear_data.get("pmg_shell_subcomm_type") is None else str(linear_data.get("pmg_shell_subcomm_type"))
+        ),
+        pmg_shell_fine_ksp_max_it=(
+            None if linear_data.get("pmg_shell_fine_ksp_max_it") is None else int(linear_data.get("pmg_shell_fine_ksp_max_it"))
+        ),
+        pmg_shell_p2_ksp_max_it=(
+            None if linear_data.get("pmg_shell_p2_ksp_max_it") is None else int(linear_data.get("pmg_shell_p2_ksp_max_it"))
+        ),
+        pmg_shell_p1_pc_type=(
+            None if linear_data.get("pmg_shell_p1_pc_type") is None else str(linear_data.get("pmg_shell_p1_pc_type"))
+        ),
+        pmg_shell_p1_redundant_number=(
+            None if linear_data.get("pmg_shell_p1_redundant_number") is None else int(linear_data.get("pmg_shell_p1_redundant_number"))
+        ),
+        pmg_shell_p1_redundant_ksp_type=(
+            None if linear_data.get("pmg_shell_p1_redundant_ksp_type") is None else str(linear_data.get("pmg_shell_p1_redundant_ksp_type"))
+        ),
+        pmg_shell_p1_redundant_ksp_rtol=(
+            None if linear_data.get("pmg_shell_p1_redundant_ksp_rtol") is None else float(linear_data.get("pmg_shell_p1_redundant_ksp_rtol"))
+        ),
+        pmg_shell_p1_redundant_ksp_max_it=(
+            None if linear_data.get("pmg_shell_p1_redundant_ksp_max_it") is None else int(linear_data.get("pmg_shell_p1_redundant_ksp_max_it"))
+        ),
+        pmg_shell_p1_redundant_pc_type=(
+            None if linear_data.get("pmg_shell_p1_redundant_pc_type") is None else str(linear_data.get("pmg_shell_p1_redundant_pc_type"))
+        ),
         max_deflation_basis_vectors=int(linear_data.get("max_deflation_basis_vectors", 48)),
         preconditioner_matrix_source=str(linear_data.get("preconditioner_matrix_source", "tangent")),
         preconditioner_matrix_policy=str(linear_data.get("preconditioner_matrix_policy", "current")),

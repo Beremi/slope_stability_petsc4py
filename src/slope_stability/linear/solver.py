@@ -682,6 +682,10 @@ class _ManualPMGShellPC:
             "manualmg_level_orders": [int(v) for v in self.state.level_orders],
             "manualmg_level_global_sizes": [int(v) for v in self.state.level_global_sizes],
             "manualmg_level_owned_ranges": [[int(lo), int(hi)] for lo, hi in self.state.level_owned_ranges],
+            "manualmg_requested_p2_active_ranks": self.solver.preconditioner_options.get("pmg_shell_p2_active_ranks"),
+            "manualmg_requested_p1_active_ranks": self.solver.preconditioner_options.get("pmg_shell_p1_active_ranks"),
+            "manualmg_requested_subcomm_type": self.solver.preconditioner_options.get("pmg_shell_subcomm_type"),
+            "manualmg_active_layout_status": "not_yet_redistributed_in_petsc4py",
             "manualmg_transfer_shapes": [
                 [int(v) for v in mat.getSize()] for mat in self.state.prolongations
             ],
@@ -1925,7 +1929,7 @@ class PetscKSPFGMRESSolver:
         for key, value in self.preconditioner_options.items():
             if key in skip_keys:
                 continue
-            if key.startswith(("pc_", "mg_", "ksp_", "mat_")):
+            if key.startswith(("pc_", "mg_", "ksp_", "mat_", "manualmg_")):
                 self._set_petsc_option(opts, f"{prefix}{key}", value)
 
     def _pmg_hierarchy_spec(self):
