@@ -24,6 +24,11 @@ The C-only `split` profile runs the current local best-fit scalable variant,
 `64/32`, interlaced layout, GAMG coarse solve with max-it `5`, fine smoother
 `5`, and P2 smoother `10`.
 
+The submitter uses OpenMPI `mpiexec` for one-node jobs and Slurm
+`srun --mpi=pmix_v4` for multi-node jobs. This avoids OpenMPI singleton
+launches on Karolina while still using the MPI runtime linked into the PETSc
+build.
+
 Submit a dry run first:
 
 ```bash
@@ -40,7 +45,7 @@ Submit the default grid:
 Useful overrides:
 
 ```bash
-PARTITION=qcpu_exp TIME_LIMIT=02:00:00 ./submit_omega7_grid.sh
+PARTITION=qcpu_exp TIME_LIMIT=00:45:00 ./submit_omega7_grid.sh
 LAYOUTS="1:64 1:128 2:128" ENGINES="c py" PROFILES="baseline petsc4py" REFINE_LEVELS=0 ./submit_omega7_grid.sh
 BUILD_BEFORE_RUN=1 ENGINES=c PROFILES=baseline ./submit_omega7_grid.sh
 ```
@@ -49,13 +54,13 @@ Submit only the split-smoother C scalability check requested after local
 validation:
 
 ```bash
-LAYOUTS="1:128 2:128" ENGINES=c PROFILES=split REFINE_LEVELS=1 PMG_COARSE_MAX_IT=5 TIME_LIMIT=02:00:00 ./submit_omega7_grid.sh
+LAYOUTS="1:128 2:128" ENGINES=c PROFILES=split REFINE_LEVELS=1 PMG_COARSE_MAX_IT=5 TIME_LIMIT=00:45:00 ./submit_omega7_grid.sh
 ```
 
 Collect after the jobs finish:
 
 ```bash
-./collect_omega7_results.py runs/ssr_omega7_grid_YYYYMMDD_HHMMSS
+../../.venv/bin/python ./collect_omega7_results.py runs/ssr_omega7_grid_YYYYMMDD_HHMMSS
 ```
 
 The collector writes:

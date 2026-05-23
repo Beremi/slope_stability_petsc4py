@@ -7,7 +7,7 @@ REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 ACCOUNT="${ACCOUNT:-fta-26-40}"
 QOS="${QOS:-3571_6328}"
 PARTITION="${PARTITION:-qcpu_exp}"
-TIME_LIMIT="${TIME_LIMIT:-02:00:00}"
+TIME_LIMIT="${TIME_LIMIT:-00:45:00}"
 NODE_CORES="${NODE_CORES:-128}"
 LAYOUTS="${LAYOUTS:-1:128 2:128}"
 ENGINES="${ENGINES:-c}"
@@ -26,12 +26,17 @@ echo "ENGINES=$ENGINES"
 echo "PROFILES=$PROFILES"
 echo "REFINE_LEVELS=${REFINE_LEVELS:-1} OMEGA_MAX=${OMEGA_MAX:-7e6} CONTINUATION_STEP_MAX=${CONTINUATION_STEP_MAX:-100} LINEAR_RTOL=${LINEAR_RTOL:-1e-1} KSP_MAX_IT=${KSP_MAX_IT:-200} PMG_COARSE_MAX_IT=${PMG_COARSE_MAX_IT:-5}"
 
+OPENMPI_BIN="${OPENMPI_BIN:-/apps/all/OpenMPI/5.0.8-GCC-14.3.0/bin}"
+if ! command -v mpiexec >/dev/null 2>&1 && [[ -x "$OPENMPI_BIN/mpiexec" ]]; then
+  export PATH="$OPENMPI_BIN:$PATH"
+fi
+
 submit_one() {
   local engine="$1"
   local profile="$2"
   local nodes="$3"
   local tasks_per_node="$4"
-  local ranks run_label job_name export_arg job_id
+  local ranks run_label job_name export_arg job_id launcher srun_extra
 
   ranks=$(( nodes * tasks_per_node ))
   if (( nodes < 1 || tasks_per_node < 1 || tasks_per_node > NODE_CORES )); then
@@ -47,6 +52,18 @@ submit_one() {
 
   run_label="${engine}_${profile}_${nodes}n${tasks_per_node}ppn_r${ranks}_ref${REFINE_LEVELS:-1}_omega${OMEGA_MAX:-7e6}_rtol${LINEAR_RTOL:-1e-1}_p1max${PMG_COARSE_MAX_IT:-5}"
   job_name="ssr_${engine}_${profile}_${nodes}n_${tasks_per_node}ppn"
+  launcher="${LAUNCHER:-}"
+  srun_extra="${SRUN_EXTRA_ARGS:-}"
+  if [[ -z "$launcher" ]]; then
+    if (( nodes > 1 )); then
+      launcher="srun"
+    else
+      launcher="mpiexec"
+    fi
+  fi
+  if [[ "$launcher" == "srun" && -z "$srun_extra" ]]; then
+    srun_extra="--mpi=pmix_v4"
+  fi
 
   local exports=(
     ALL
@@ -72,7 +89,7 @@ submit_one() {
     PY_PETSC_OPTIONS="${PY_PETSC_OPTIONS:--log_view}"
     BUILD_BEFORE_RUN="${BUILD_BEFORE_RUN:-0}"
     LOG_VIEW="${LOG_VIEW:-1}"
-    LAUNCHER="${LAUNCHER:-mpiexec}"
+    LAUNCHER="$launcher"
   )
   if [[ -n "${EXTRA_PETSC_OPTIONS:-}" ]]; then
     exports+=(EXTRA_PETSC_OPTIONS="$EXTRA_PETSC_OPTIONS")
@@ -80,8 +97,8 @@ submit_one() {
   if [[ -n "${MPIEXEC_EXTRA_ARGS:-}" ]]; then
     exports+=(MPIEXEC_EXTRA_ARGS="$MPIEXEC_EXTRA_ARGS")
   fi
-  if [[ -n "${SRUN_EXTRA_ARGS:-}" ]]; then
-    exports+=(SRUN_EXTRA_ARGS="$SRUN_EXTRA_ARGS")
+  if [[ -n "$srun_extra" ]]; then
+    exports+=(SRUN_EXTRA_ARGS="$srun_extra")
   fi
 
   export_arg="$(IFS=,; echo "${exports[*]}")"

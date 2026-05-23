@@ -183,6 +183,10 @@ TOML
 }
 
 LAUNCHER="${LAUNCHER:-mpiexec}"
+OPENMPI_BIN="${OPENMPI_BIN:-/apps/all/OpenMPI/5.0.8-GCC-14.3.0/bin}"
+if [[ "$LAUNCHER" == "mpiexec" ]] && ! command -v mpiexec >/dev/null 2>&1 && [[ -x "$OPENMPI_BIN/mpiexec" ]]; then
+  export PATH="$OPENMPI_BIN:$PATH"
+fi
 case "$LAUNCHER" in
   srun)
     LAUNCH_ARGS=(-n "$TOTAL_RANKS" --cpu-bind="${SRUN_CPU_BIND:-cores}" --distribution="${SRUN_DISTRIBUTION:-block:block}")
