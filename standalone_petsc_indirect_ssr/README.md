@@ -2,6 +2,10 @@
 
 `p4_indirect_ssr` is a pure C/PETSc standalone port of the classic indirect SSR continuation path. It reuses the P4 tetrahedral mesh, Mohr-Coulomb material assembly, PMG shell V-cycle baseline, and explicit deflation machinery from `standalone_petsc_p4_plasticity`, then solves the indirect nonlinear system for both displacement and strength reduction factor `lambda`.
 
+For the maintained C continuation/scaling path, Karolina command templates,
+active-rank PMG tuning rules, and the known 1/2/4/8/16-node results, see
+[`C_SCALING_RUNBOOK.md`](C_SCALING_RUNBOOK.md).
+
 Build:
 
 ```bash
@@ -18,7 +22,7 @@ OMP_NUM_THREADS=1 mpiexec -n 1 ./p4_indirect_ssr \
   -pc_type lu \
   -omega_max 10 \
   -continuation_step_max 3 \
-  -curve_csv /tmp/indirect_ssr_tiny_curve.csv
+  -curve_csv ../.local/tmp/indirect_ssr_tiny_curve.csv
 ```
 
 Baseline PMG smoke:
@@ -37,11 +41,11 @@ Linear replay smoke:
 ```bash
 ./replay/export_petsc4py_linear_state.sh
 PETSC_DIR=$PWD/../.build/src/petsc-3.24.5 PETSC_ARCH=linux-c-opt make
-./replay/run_c_replay.sh /tmp/ssr_linear_replay_state/sample_0000 petsc4py
-./replay/run_c_replay.sh /tmp/ssr_linear_replay_state/sample_0000 baseline
-./replay/compare_replay.py /tmp/ssr_linear_replay_state/sample_0000 \
-  /tmp/c_linear_replay_petsc4py.log \
-  /tmp/c_linear_replay_baseline.log
+./replay/run_c_replay.sh ../.local/tmp/ssr_linear_replay_state/sample_0000 petsc4py
+./replay/run_c_replay.sh ../.local/tmp/ssr_linear_replay_state/sample_0000 baseline
+./replay/compare_replay.py ../.local/tmp/ssr_linear_replay_state/sample_0000 \
+  ../.local/tmp/c_linear_replay_petsc4py.log \
+  ../.local/tmp/c_linear_replay_baseline.log
 ```
 
 The replay path exports a petsc4py indirect-Newton linear state in free-DOF
