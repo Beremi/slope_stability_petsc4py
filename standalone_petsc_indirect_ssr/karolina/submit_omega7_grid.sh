@@ -13,6 +13,7 @@ LAYOUTS="${LAYOUTS:-1:128 2:128}"
 ENGINES="${ENGINES:-c}"
 PROFILES="${PROFILES:-split}"
 RUN_ROOT="${RUN_ROOT:-$SCRIPT_DIR/runs/ssr_omega7_grid_$(date +%Y%m%d_%H%M%S)}"
+COLLECT_PYTHON="${COLLECT_PYTHON:-${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}}"
 
 mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/results"
 
@@ -152,4 +153,4 @@ done
 
 echo "Manifest: $manifest"
 echo "Collect after completion with:"
-echo "  $SCRIPT_DIR/collect_omega7_results.py $RUN_ROOT"
+echo "  $COLLECT_PYTHON $SCRIPT_DIR/collect_omega7_results.py $RUN_ROOT"

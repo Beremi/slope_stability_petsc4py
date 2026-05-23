@@ -57,6 +57,16 @@ validation:
 LAYOUTS="1:128 2:128" ENGINES=c PROFILES=split REFINE_LEVELS=1 PMG_COARSE_MAX_IT=5 TIME_LIMIT=00:45:00 ./submit_omega7_grid.sh
 ```
 
+Submit the low-rank `qcpu` campaign:
+
+```bash
+./submit_omega7_low_rank_qcpu.sh
+```
+
+This submits only `1:4` and `1:8` layouts on `qcpu`, keeping the refined split
+profile, P1/GAMG coarse `max_it=5`, and the same profiling outputs. Override
+`TIME_LIMIT` if queue policy or runtime requires it.
+
 Collect after the jobs finish:
 
 ```bash
