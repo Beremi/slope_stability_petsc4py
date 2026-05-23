@@ -33,6 +33,8 @@ SUMMARY_FIELDS = (
     "nodes",
     "tasks_per_node",
     "ranks",
+    "refine_levels",
+    "pmg_coarse_max_it",
     "partition",
     "qos",
     "nodelist",
@@ -121,6 +123,8 @@ STEP_FIELDS = (
     "nodes",
     "tasks_per_node",
     "ranks",
+    "refine_levels",
+    "pmg_coarse_max_it",
     "step",
     "phase",
     "omega",
@@ -149,6 +153,8 @@ EVENT_FIELDS = (
     "nodes",
     "tasks_per_node",
     "ranks",
+    "refine_levels",
+    "pmg_coarse_max_it",
     "event",
     "count",
     "time",
@@ -258,7 +264,7 @@ def parse_event_rows(log_text: str, meta: dict[str, Any]) -> list[dict[str, Any]
         parts = line.split()
         if parts[0] not in EVENTS or len(parts) < 4:
             continue
-        row = {key: meta.get(key, "") for key in ("job_id", "run_label", "engine", "profile", "nodes", "tasks_per_node", "ranks")}
+        row = {key: meta.get(key, "") for key in ("job_id", "run_label", "engine", "profile", "nodes", "tasks_per_node", "ranks", "refine_levels", "pmg_coarse_max_it")}
         row.update(
             {
                 "event": parts[0],
@@ -288,6 +294,8 @@ def base_row(result_dir: Path, env: dict[str, str]) -> dict[str, Any]:
         "nodes": env.get("NODES", ""),
         "tasks_per_node": env.get("TASKS_PER_NODE", ""),
         "ranks": env.get("RANKS", ""),
+        "refine_levels": env.get("REFINE_LEVELS", ""),
+        "pmg_coarse_max_it": env.get("PMG_COARSE_MAX_IT", ""),
         "partition": env.get("PARTITION", ""),
         "qos": env.get("QOS", ""),
         "nodelist": env.get("NODELIST", ""),
@@ -381,7 +389,7 @@ def c_step_rows(result_dir: Path, meta: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with curve.open(newline="") as fh:
         for rec in csv.DictReader(fh):
-            row = {key: meta.get(key, "") for key in ("job_id", "run_label", "engine", "profile", "nodes", "tasks_per_node", "ranks")}
+            row = {key: meta.get(key, "") for key in ("job_id", "run_label", "engine", "profile", "nodes", "tasks_per_node", "ranks", "refine_levels", "pmg_coarse_max_it")}
             row.update(
                 {
                     "step": rec.get("step", ""),
@@ -524,7 +532,7 @@ def py_step_rows(result_dir: Path, meta: dict[str, Any]) -> list[dict[str, Any]]
             continue
         if rec.get("event") not in {"init_complete", "step_accepted"}:
             continue
-        row = {key: meta.get(key, "") for key in ("job_id", "run_label", "engine", "profile", "nodes", "tasks_per_node", "ranks")}
+        row = {key: meta.get(key, "") for key in ("job_id", "run_label", "engine", "profile", "nodes", "tasks_per_node", "ranks", "refine_levels", "pmg_coarse_max_it")}
         if rec.get("event") == "init_complete":
             row.update(
                 {

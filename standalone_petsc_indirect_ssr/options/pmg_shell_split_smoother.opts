@@ -1,8 +1,8 @@
 # C shell V-cycle profile used for the omega=7e6 SSR scalability follow-up.
 # It keeps the maintained scalable active-layout PMG baseline, but spends more
-# smoothing on the P4 and P2 shell levels. Local 32-rank omega=7e6 run:
-#   baseline smoother 2/2: 169.30s continuation wall, 1446 linear iterations
-#   split fine=5,p2=10:   149.15s continuation wall, 724 linear iterations
+# smoothing on the P4 and P2 shell levels. For the refined Karolina scaling
+# batch, keep the P1/GAMG coarse cap at 5 iterations; local refined 32-rank
+# comparison showed max_it=10 was not materially better.
 
 -pc_variant pmg
 -pmg_apply_backend shell_vcycle
@@ -18,7 +18,7 @@
 -pmg_shell_subcomm_type interlaced
 -pmg_coarse_telescope_ksp_type fgmres
 -pmg_coarse_telescope_ksp_rtol 1e-3
--pmg_coarse_telescope_ksp_max_it 100
+-pmg_coarse_telescope_ksp_max_it 5
 -pmg_coarse_telescope_pc_type gamg
 -pmg_p2_telescope_active_ranks 0
 -pmg_smoother_ksp_type chebyshev

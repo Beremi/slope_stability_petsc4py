@@ -72,9 +72,11 @@ metadata="$RESULT_DIR/job.env"
   echo "COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD)"
   echo "BRANCH=$(git -C "$REPO_ROOT" branch --show-current)"
   echo "OMEGA_MAX=${OMEGA_MAX:-7e6}"
+  echo "REFINE_LEVELS=${REFINE_LEVELS:-0}"
   echo "CONTINUATION_STEP_MAX=${CONTINUATION_STEP_MAX:-100}"
   echo "LINEAR_RTOL=${LINEAR_RTOL:-1e-1}"
   echo "KSP_MAX_IT=${KSP_MAX_IT:-200}"
+  echo "PMG_COARSE_MAX_IT=${PMG_COARSE_MAX_IT:-}"
   echo "PARTITIONER=${PARTITIONER:-parmetis}"
   echo "OPTIONS_FILE=${OPTIONS_FILE:-}"
   echo "START_TIME=$(date --iso-8601=seconds)"
@@ -213,6 +215,7 @@ if [[ "$ENGINE" == "c" ]]; then
     ./p4_indirect_ssr
     -options_file "$opts"
     -mesh "${MESH:-data/adaptive_family_a_l1.msh}"
+    -refine_levels "${REFINE_LEVELS:-0}"
     -omega_max "${OMEGA_MAX:-7e6}"
     -continuation_step_max "${CONTINUATION_STEP_MAX:-100}"
     -linear_rtol "${LINEAR_RTOL:-1e-1}"
@@ -225,6 +228,9 @@ if [[ "$ENGINE" == "c" ]]; then
   fi
   if [[ "${LOG_VIEW:-1}" == "1" ]]; then
     BASE_ARGS+=(-log_view)
+  fi
+  if [[ -n "${PMG_COARSE_MAX_IT:-}" ]]; then
+    BASE_ARGS+=(-pmg_coarse_telescope_ksp_max_it "$PMG_COARSE_MAX_IT")
   fi
   if [[ -n "${EXTRA_PETSC_OPTIONS:-}" ]]; then
     # shellcheck disable=SC2206
