@@ -10,6 +10,7 @@ Current target:
 - [`c_l1_unrefined_20260523.json`](c_l1_unrefined_20260523.json)
 - [`c_l1_unrefined_20260523.csv`](c_l1_unrefined_20260523.csv)
 - [`PETSC4PY_DMPLEX_REWRITE.md`](PETSC4PY_DMPLEX_REWRITE.md)
+- [`C_VS_PETSC4PY_CURRENT_20260524.md`](C_VS_PETSC4PY_CURRENT_20260524.md)
 
 Refresh the local C target, including memory samples:
 

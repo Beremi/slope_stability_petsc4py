@@ -359,13 +359,19 @@ def _run_case(args, *, engine: str, ranks: int, out_root: Path) -> dict[str, obj
             "mpiexec",
             "-n",
             str(ranks),
+        ]
+        if args.oversubscribe:
+            cmd.extend(["--map-by", ":OVERSUBSCRIBE"])
+        cmd.extend(
+            [
             python,
             "-m",
             "slope_stability.cli.run_case_from_config",
             str(cfg),
             "--out_dir",
             str(case_dir / "out"),
-        ]
+            ]
+        )
         match_markers = ["slope_stability.cli.run_case_from_config", str(cfg)]
         rank_executable_marker = Path(python).name
     else:
