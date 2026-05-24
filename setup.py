@@ -63,16 +63,17 @@ def _optional_petsc_ssr_extension() -> Extension | None:
     if not petsc_include_dirs and not any(flag == "-lpetsc" or flag.endswith("/libpetsc.so") for flag in petsc_flags):
         return None
     standalone = ROOT / "standalone_petsc_indirect_ssr"
+    standalone_rel = Path("standalone_petsc_indirect_ssr")
     link_flags = [flag for flag in petsc_flags if flag.startswith("-l") or flag.startswith("-L") or flag.startswith("-Wl,")]
     rpath_flags = ["-Wl,-rpath," + flag[2:] for flag in link_flags if flag.startswith("-L")]
     return Extension(
         name="slope_stability._petsc_ssr",
         sources=[
             str(Path("src") / "slope_stability" / "cython" / "_petsc_ssr.pyx"),
-            str(standalone / "p4_indirect_ssr.c"),
-            str(standalone / "assembly.c"),
-            str(standalone / "material_mc.c"),
-            str(standalone / "p4_basis.c"),
+            str(standalone_rel / "p4_indirect_ssr.c"),
+            str(standalone_rel / "assembly.c"),
+            str(standalone_rel / "material_mc.c"),
+            str(standalone_rel / "p4_basis.c"),
         ],
         include_dirs=[
             np.get_include(),
