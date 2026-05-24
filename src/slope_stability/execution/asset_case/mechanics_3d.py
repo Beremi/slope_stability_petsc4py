@@ -53,6 +53,7 @@ from slope_stability.problem_asset_runtime import (
     resolve_problem_asset,
 )
 from slope_stability.petsc.dmplex_compat import probe_dmplex_lagrange_layout
+from slope_stability.petsc.ssr_hotpath import run_c_hotpath_capture
 from slope_stability.utils import (
     flatten_field,
     local_csr_to_petsc_aij_matrix,
@@ -851,8 +852,8 @@ def run_capture(
     rank = int(PETSc.COMM_WORLD.getRank())
     stage_t0 = perf_counter()
     mechanics_backend_norm = str(mechanics_backend or "legacy_array").strip().lower()
-    if mechanics_backend_norm not in {"legacy_array", "dmplex_c_compatible"}:
-        raise ValueError("mechanics_backend must be 'legacy_array' or 'dmplex_c_compatible'.")
+    if mechanics_backend_norm not in {"legacy_array", "dmplex_c_compatible", "dmplex_c_hotpath"}:
+        raise ValueError("mechanics_backend must be 'legacy_array', 'dmplex_c_compatible', or 'dmplex_c_hotpath'.")
     _stage_debug_log(
         rank,
         "start",
@@ -888,6 +889,43 @@ def run_capture(
         mesh_file=str(mesh_path),
         material_rows=len(material_rows),
     )
+    if mechanics_backend_norm == "dmplex_c_hotpath":
+        if str(analysis).strip().lower() != "ssr":
+            raise ValueError("mechanics_backend='dmplex_c_hotpath' currently supports only analysis='ssr'.")
+        if str(elem_type).strip().upper() != "P4":
+            raise ValueError("mechanics_backend='dmplex_c_hotpath' currently supports only elem_type='P4'.")
+        return run_c_hotpath_capture(
+            output_dir,
+            mesh_path=mesh_path,
+            lambda_init=lambda_init,
+            d_lambda_init=d_lambda_init,
+            d_lambda_min=d_lambda_min,
+            d_lambda_diff_scaled_min=d_lambda_diff_scaled_min,
+            omega_max_stop=omega_max_stop,
+            step_max=step_max,
+            it_newt_max=it_newt_max,
+            it_damp_max=it_damp_max,
+            tol=tol,
+            r_min=r_min,
+            newton_stopping_criterion=newton_stopping_criterion,
+            newton_stopping_tol=newton_stopping_tol,
+            init_newton_stopping_criterion=init_newton_stopping_criterion,
+            init_newton_stopping_tol=init_newton_stopping_tol,
+            linear_tolerance=linear_tolerance,
+            linear_max_iter=linear_max_iter,
+            pmg_shell_p2_active_ranks=pmg_shell_p2_active_ranks,
+            pmg_shell_p1_active_ranks=pmg_shell_p1_active_ranks,
+            pmg_shell_subcomm_type=pmg_shell_subcomm_type,
+            pmg_shell_fine_ksp_max_it=pmg_shell_fine_ksp_max_it,
+            pmg_shell_p2_ksp_max_it=pmg_shell_p2_ksp_max_it,
+            pmg_shell_p1_pc_type=pmg_shell_p1_pc_type,
+            pmg_shell_p1_redundant_number=pmg_shell_p1_redundant_number,
+            pmg_shell_p1_redundant_ksp_type=pmg_shell_p1_redundant_ksp_type,
+            pmg_shell_p1_redundant_ksp_rtol=pmg_shell_p1_redundant_ksp_rtol,
+            pmg_shell_p1_redundant_ksp_max_it=pmg_shell_p1_redundant_ksp_max_it,
+            pmg_shell_p1_redundant_pc_type=pmg_shell_p1_redundant_pc_type,
+            petsc_opt=petsc_opt,
+        )
     dmplex_probe: dict[str, object] | None = None
     if mechanics_backend_norm == "dmplex_c_compatible":
         dmplex_probe = probe_dmplex_lagrange_layout(

@@ -11,7 +11,7 @@ that the C path applies with DMPlex `DMAddBoundary`.  The petsc4py rewrite is
 not considered DMPlex-parity complete until the constrained/free layouts match
 the C counts.
 
-## Opt-In petsc4py Path
+## Opt-In petsc4py Paths
 
 Config-driven runs can select:
 
@@ -42,16 +42,36 @@ array/CSR assembly and Python manual PMG apply remain the execution path until
 the next implementation step makes DMPlex DMs and active-rank subcommunicators
 the source of truth.
 
-Current memory status: a one-rank full-L1 smoke of this opt-in path reached
-about 18 GiB sampled RSS before it was stopped, because the existing petsc4py
-array/CSR path is still doing the heavy lifting.  That is intentionally worse
-than the C target and is the main reason the next rewrite step must replace
-the mesh/assembly ownership with PETSc DMPlex DMs, or wrap the C hot path.
+The performance-matching path is:
+
+```toml
+[execution]
+mechanics_backend = "dmplex_c_hotpath"
+```
+
+This routes the config-driven petsc4py runner into the pure C DMPlex SSR
+solver through the `slope_stability._petsc_ssr` Cython bridge.  Python still
+owns config parsing, benchmark orchestration, memory sampling, and the
+standard `run_info.json`/NPZ artifact shape; the mesh, P4 assembly, shell
+V-cycle PMG, deflation, and Krylov solves stay in C/PETSc.  The old
+`dmplex_c_compatible` backend remains available for the legacy petsc4py
+array/CSR comparison.
+
+Local unrefined L1 `omega_max=7e6` smoke after the C-hotpath bridge:
+
+| backend | ranks | wall | continuation | Newton | linear | wall/linear | max RSS/rank | total sampled RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `dmplex_c_hotpath` | 32 | 161.52s | 160.09s | 84 | 771 | 0.209s | 653 MiB | 18.29 GiB |
+| `dmplex_c_hotpath` | 64 | 203.28s | 201.32s | 89 | 820 | 0.248s | 485 MiB | 27.54 GiB |
+
+These runs were written under
+`.local/tmp/ssr_local_benchmark_hotpath_20260524`.  The 64-rank run is a local
+oversubscribed check, matching the earlier C benchmark protocol.
 
 ## Remaining Rewrite Work
 
-The major remaining performance gap is the C shell V-cycle's active-layout
-redistribution:
+The legacy petsc4py path still has the C shell V-cycle's active-layout
+redistribution gap:
 
 - C redistributes P2/P1 Galerkin operators onto active ranks and runs P2/P1
   KSPs on reduced communicators.
@@ -60,9 +80,10 @@ redistribution:
   not_yet_redistributed_in_petsc4py`.
 - The opt-in `dmplex_c_compatible` backend currently probes DMPlex Lagrange
   layouts and records DOF counts; it is not yet the assembled operator source.
-- Matching the C memory and time-per-linear target requires moving this layout
-  ownership into petsc4py, or wrapping the C shell V-cycle as a Cython/PETSc
-  PC implementation while keeping continuation orchestration in Python.
+- The new `dmplex_c_hotpath` backend closes the performance gap by wrapping
+  the complete C hot path.  A future deeper rewrite could expose individual C
+  DMPlex/PMG/deflation objects to Python, but the current maintained matching
+  backend deliberately keeps those objects opaque for memory parity.
 
 Use `run_local_ssr_benchmark.py --engines c py --ranks 32 64` after each
 implementation step.  The acceptance gate is:

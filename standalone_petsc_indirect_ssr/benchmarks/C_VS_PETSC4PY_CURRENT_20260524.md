@@ -50,6 +50,24 @@ Interpretation: petsc4py is not losing primarily through Krylov iteration
 count in this configuration.  It is losing through per-linear-iteration cost
 and memory.  The difference gets worse at 64 ranks.
 
+## C-Hotpath petsc4py Backend
+
+The follow-up implementation added `mechanics_backend = dmplex_c_hotpath`,
+which calls the maintained pure C DMPlex solver through a Cython bridge while
+preserving the config-driven petsc4py benchmark interface and artifact shape.
+
+| engine/backend | ranks | wall | continuation | Newton | linear | wall/linear | final lambda | max RSS/rank | total RSS peak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| C target | 32 | 158.53s | 157.13s | 82 | 763 | 0.208s | 1.569711 | 545 MiB | 14.70 GiB |
+| petsc4py `dmplex_c_hotpath` | 32 | 161.52s | 160.09s | 84 | 771 | 0.209s | 1.569526 | 653 MiB | 18.29 GiB |
+| C target | 64 | 195.29s | 193.34s | 87 | 803 | 0.243s | 1.569401 | 374 MiB | 20.48 GiB |
+| petsc4py `dmplex_c_hotpath` | 64 | 203.28s | 201.32s | 89 | 820 | 0.248s | 1.569388 | 485 MiB | 27.54 GiB |
+
+The C-hotpath backend meets the timing and iteration target on both local
+rank counts.  Max RSS/rank is within about 20-30% of the stored C memory
+refresh; total sampled RSS is higher, but far below the legacy petsc4py
+array/CSR path.  The 64-rank rows are oversubscribed local checks.
+
 ## Main Phase Timings
 
 The C timings are from parseable `DEFLATION_TIMING` and

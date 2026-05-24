@@ -207,6 +207,7 @@ def _parse_py_log(case_dir: Path, log_text: str) -> dict[str, object]:
         run_info = info.get("run_info", {})
         timings = info.get("timings", {})
         linear = timings.get("linear", {})
+        c_hotpath = info.get("c_hotpath_summary", {})
         row["wall_time"] = float(run_info.get("runtime_seconds", info.get("runtime", 0.0)))
         row["continuation_wall_time"] = float(timings.get("continuation_total_wall_time", row["wall_time"]))
         row["accepted_steps"] = int(run_info.get("step_count", info.get("steps", 0)))
@@ -216,6 +217,12 @@ def _parse_py_log(case_dir: Path, log_text: str) -> dict[str, object]:
         attempt = int(linear.get("attempt_linear_iterations_total", 0))
         row["total_linear_its"] = init + attempt
         row["total_newton_its"] = int(info.get("newton_iterations_total", 0))
+        if c_hotpath:
+            row["total_line_search_its"] = int(c_hotpath.get("total_line_search_its", 0))
+            row["final_rel"] = float(c_hotpath.get("final_rel", 0.0))
+            row["deflation_orthogonalization_s"] = float(c_hotpath.get("deflation_orthogonalization_time", 0.0))
+            row["deflation_pc_apply_s"] = float(c_hotpath.get("deflation_pc_apply_time", 0.0))
+            row["deflation_projector_s"] = float(c_hotpath.get("deflation_projector_time", 0.0))
         row["manualmg_apply_count"] = int(linear.get("manualmg_apply_count", 0))
         row["manualmg_active_layout_status"] = str(linear.get("manualmg_active_layout_status", ""))
     done = re.search(r"\[done\].*?steps=(\d+).*?lambda=([0-9.eE+-]+).*?omega=([0-9.eE+-]+)", log_text)
@@ -226,15 +233,18 @@ def _parse_py_log(case_dir: Path, log_text: str) -> dict[str, object]:
     return row
 
 
-def _write_py_config(path: Path, *, ranks: int, omega_max: float, ksp_max_it: int) -> None:
+def _write_py_config(path: Path, *, ranks: int, omega_max: float, ksp_max_it: int, refine_levels: int = 0) -> None:
+    petsc_opt = ""
+    if int(refine_levels) != 0:
+        petsc_opt = f'petsc_opt = ["-refine_levels={int(refine_levels)}"]\n'
     path.write_text(
         f"""[benchmark]
-title = "petsc4py C-compatible unrefined L1 SSR"
+title = "petsc4py DMPlex C-hotpath unrefined L1 SSR"
 comparison_kind = "continuation"
 mpi_ranks = {int(ranks)}
 
 [problem]
-name = "petsc4py_dmplex_c_compatible_l1"
+name = "petsc4py_dmplex_c_hotpath_l1"
 asset = "3d_hetero_slope"
 mesh_variant = "adaptive_family_a_l1.msh"
 analysis = "ssr"
@@ -242,7 +252,7 @@ elem_type = "P4"
 davis_type = "B"
 
 [execution]
-mechanics_backend = "dmplex_c_compatible"
+mechanics_backend = "dmplex_c_hotpath"
 node_ordering = "block_metis"
 mpi_distribute_by_nodes = true
 constitutive_mode = "overlap"
@@ -289,6 +299,7 @@ pmg_shell_p1_redundant_ksp_type = "fgmres"
 pmg_shell_p1_redundant_ksp_rtol = 1e-3
 pmg_shell_p1_redundant_ksp_max_it = 5
 pmg_shell_p1_redundant_pc_type = "gamg"
+{petsc_opt}
 
 [export]
 write_custom_debug_bundle = false
@@ -324,7 +335,7 @@ def _run_case(args, *, engine: str, ranks: int, out_root: Path) -> dict[str, obj
             "-mesh",
             str(SOLVER_DIR / "data/adaptive_family_a_l1.msh"),
             "-refine_levels",
-            "0",
+            str(args.refine_levels),
             "-omega_max",
             str(args.omega_max),
             "-linear_rtol",
@@ -353,7 +364,7 @@ def _run_case(args, *, engine: str, ranks: int, out_root: Path) -> dict[str, obj
         rank_executable_marker = "p4_indirect_ssr"
     elif engine == "py":
         cfg = case_dir / "case.toml"
-        _write_py_config(cfg, ranks=ranks, omega_max=args.omega_max, ksp_max_it=args.ksp_max_it)
+        _write_py_config(cfg, ranks=ranks, omega_max=args.omega_max, ksp_max_it=args.ksp_max_it, refine_levels=args.refine_levels)
         python = args.python or str(REPO / ".venv/bin/python")
         cmd = [
             "mpiexec",
@@ -423,6 +434,7 @@ def main() -> int:
     parser.add_argument("--out-root", type=Path, default=REPO / ".local/tmp/ssr_local_benchmark")
     parser.add_argument("--omega-max", type=float, default=7.0e6)
     parser.add_argument("--ksp-max-it", type=int, default=200)
+    parser.add_argument("--refine-levels", type=int, default=0)
     parser.add_argument("--memory-interval", type=float, default=0.5)
     parser.add_argument("--python", default=None)
     parser.add_argument("--oversubscribe", action="store_true", help="Pass Open MPI oversubscription mapping to mpiexec.")

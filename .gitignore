@@ -44,8 +44,11 @@ third_party/hypre-openmp/
 hypre_boomeramg_mex.mexa64
 
 # Generated extension artifacts
+build/
 src/slope_stability/_kernels.cpython-*.so
+src/slope_stability/_petsc_ssr.cpython-*.so
 src/slope_stability/cython/_kernels.c
+src/slope_stability/cython/_petsc_ssr.c
 src/slope_stability.egg-info/
 
 # Misc local files

@@ -21,6 +21,7 @@ static PetscLogStage log_stage_pmg_shell_p1            = -1;
 static PetscErrorCode RegisterLogStages(void)
 {
   PetscFunctionBeginUser;
+  if (log_stage_deflation_orthogonalize >= 0) PetscFunctionReturn(PETSC_SUCCESS);
   PetscCall(PetscLogStageRegister("deflation_orthogonalize", &log_stage_deflation_orthogonalize));
   PetscCall(PetscLogStageRegister("deflation_initial_guess", &log_stage_deflation_initial_guess));
   PetscCall(PetscLogStageRegister("deflation_projector", &log_stage_deflation_projector));
@@ -71,6 +72,7 @@ typedef struct {
   char      continuation_predictor[32];
   char      omega_step_controller[32];
   char      curve_csv[PETSC_MAX_PATH_LEN];
+  char      summary_json[PETSC_MAX_PATH_LEN];
   PetscReal ksp_rtol;
   PetscReal damping_min;
   PetscBool line_search;
@@ -275,6 +277,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscStrncpy(app->continuation_predictor, "secant", sizeof(app->continuation_predictor)));
   PetscCall(PetscStrncpy(app->omega_step_controller, "legacy", sizeof(app->omega_step_controller)));
   PetscCall(PetscStrncpy(app->curve_csv, "continuation_curve.csv", sizeof(app->curve_csv)));
+  app->summary_json[0] = '\0';
   app->ksp_rtol       = 1.0e-1;
   app->damping_min    = 1.0e-3;
   app->line_search    = PETSC_TRUE;
@@ -357,6 +360,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsString("-continuation_predictor", "Continuation predictor, currently only secant", NULL, app->continuation_predictor, app->continuation_predictor, sizeof(app->continuation_predictor), NULL));
   PetscCall(PetscOptionsString("-omega_step_controller", "Omega step controller, currently only legacy", NULL, app->omega_step_controller, app->omega_step_controller, sizeof(app->omega_step_controller), NULL));
   PetscCall(PetscOptionsString("-curve_csv", "Rank-0 CSV output path for accepted continuation curve", NULL, app->curve_csv, app->curve_csv, sizeof(app->curve_csv), NULL));
+  PetscCall(PetscOptionsString("-summary_json", "Rank-0 JSON output path for C-hotpath run summary", NULL, app->summary_json, app->summary_json, sizeof(app->summary_json), NULL));
   PetscCall(PetscOptionsReal("-newton_rtol", "Relative residual tolerance used for nonlinear residual safeguards", NULL, app->newton_rtol, &app->newton_rtol, NULL));
   PetscCall(PetscOptionsInt("-newton_max_it", "Maximum fixed-lambda or indirect Newton iterations", NULL, app->newton_max_it, &app->newton_max_it, NULL));
   PetscCall(PetscOptionsString("-newton_stopping_criterion", "Indirect Newton stop: absolute_delta_lambda|relative_residual|relative_correction", NULL, app->newton_stopping_criterion, app->newton_stopping_criterion, sizeof(app->newton_stopping_criterion), NULL));
@@ -4677,6 +4681,62 @@ static PetscErrorCode CurveWriteRow(FILE *fp, const SSRCurveRow *row)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode WriteSummaryJSON(const AppCtx *app, PetscMPIInt ranks, const char part_type[], PetscInt global_dofs, PetscLogDouble elastic_assembly_time, PetscLogDouble wall_time, const SSRStats *stats, const LinearSolverCtx *solver)
+{
+  PetscMPIInt rank;
+  FILE       *fp = NULL;
+
+  PetscFunctionBeginUser;
+  if (!app->summary_json[0]) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCallMPI(MPI_Comm_rank(PETSC_COMM_WORLD, &rank));
+  if (rank) PetscFunctionReturn(PETSC_SUCCESS);
+
+  fp = fopen(app->summary_json, "w");
+  PetscCheck(fp, PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN, "Failed to open summary JSON %s", app->summary_json);
+  PetscCheck(fprintf(fp,
+                     "{\n"
+                     "  \"engine\": \"petsc4py_dmplex_c_hotpath\",\n"
+                     "  \"variant\": \"%s\",\n"
+                     "  \"ranks\": %d,\n"
+                     "  \"partitioner\": \"%s\",\n"
+                     "  \"global_dofs\": %" PetscInt_FMT ",\n"
+                     "  \"accepted_steps\": %" PetscInt_FMT ",\n"
+                     "  \"total_newton_its\": %" PetscInt_FMT ",\n"
+                     "  \"total_linear_its\": %" PetscInt_FMT ",\n"
+                     "  \"total_line_search_its\": %" PetscInt_FMT ",\n"
+                     "  \"elastic_assembly_time\": %.17g,\n"
+                     "  \"continuation_wall_time\": %.17g,\n"
+                     "  \"wall_time\": %.17g,\n"
+                     "  \"omega_last\": %.17g,\n"
+                     "  \"lambda_last\": %.17g,\n"
+                     "  \"final_rel\": %.17g,\n"
+                     "  \"final_rel_correction\": %.17g,\n"
+                     "  \"stop_reason\": \"%s\",\n"
+                     "  \"deflation\": %s,\n"
+                     "  \"deflation_solver\": \"%s\",\n"
+                     "  \"deflation_basis_cols\": %" PetscInt_FMT ",\n"
+                     "  \"deflation_orthogonalization_time\": %.17g,\n"
+                     "  \"deflation_coarse_initial_time\": %.17g,\n"
+                     "  \"deflation_coarse_initial_calls\": %" PetscInt_FMT ",\n"
+                     "  \"deflation_pc_apply_time\": %.17g,\n"
+                     "  \"deflation_projector_time\": %.17g,\n"
+                     "  \"deflation_projected_pc_calls\": %" PetscInt_FMT ",\n"
+                     "  \"curve_csv\": \"%s\"\n"
+                     "}\n",
+                     app->variant_name, (int)ranks, part_type ? part_type : "unknown", global_dofs,
+                     stats->accepted_steps, stats->total_newton_its, stats->total_linear_its, stats->total_line_search_its,
+                     (double)elastic_assembly_time, (double)stats->wall_time, (double)wall_time,
+                     (double)stats->omega_last, (double)stats->lambda_last, (double)stats->final_rel,
+                     (double)stats->final_rel_correction, stats->stop_reason, app->use_deflation ? "true" : "false",
+                     app->deflation_solver_name, solver->n_raw_basis, (double)solver->deflation_orthogonalization_time,
+                     (double)solver->deflation_coarse_time, solver->deflation_coarse_calls,
+                     (double)solver->deflation_pc_apply_time, (double)solver->deflation_projector_time,
+                     solver->deflation_projected_pc_calls, app->curve_csv) > 0,
+             PETSC_COMM_SELF, PETSC_ERR_FILE_WRITE, "Failed to write summary JSON %s", app->summary_json);
+  fclose(fp);
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode FillCurveRow(SSRCurveRow *row, PetscInt step, const char phase[], PetscReal omega, PetscReal lambda, PetscReal d_omega, PetscReal d_lambda, Vec u, PetscInt attempts, const NewtonStats *stats, const char reason[])
 {
   PetscFunctionBeginUser;
@@ -6839,7 +6899,7 @@ static PetscErrorCode InitReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Linea
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-int main(int argc, char **argv)
+PetscErrorCode P4IndirectSSRRunFromOptions(void)
 {
   AppCtx          app;
   P4Basis         basis;
@@ -6854,7 +6914,7 @@ int main(int argc, char **argv)
   PetscReal       rhs_norm;
   PetscLogDouble  t_start, t_end, t0, t1, elastic_assembly_time;
 
-  PetscCall(PetscInitialize(&argc, &argv, NULL, "Standalone pure PETSc P4 indirect SSR case\n"));
+  PetscFunctionBeginUser;
   PetscCall(RegisterLogStages());
   PetscCall(PetscTime(&t_start));
   PetscCall(ParseOptions(PETSC_COMM_WORLD, &app));
@@ -6890,8 +6950,7 @@ int main(int argc, char **argv)
     PetscCall(MatDestroy(&Areg));
     PetscCall(DMDestroy(&dm));
     PetscCall(P4BasisDestroy(&basis));
-    PetscCall(PetscFinalize());
-    return 0;
+    PetscFunctionReturn(PETSC_SUCCESS);
   }
 
   PetscCall(PetscTime(&t0));
@@ -6929,8 +6988,7 @@ int main(int argc, char **argv)
     PetscCall(MatDestroy(&Areg));
     PetscCall(DMDestroy(&dm));
     PetscCall(P4BasisDestroy(&basis));
-    PetscCall(PetscFinalize());
-    return 0;
+    PetscFunctionReturn(PETSC_SUCCESS);
   }
   if (app.step_replay_dir[0]) {
     NewtonStats step_stats;
@@ -6955,8 +7013,7 @@ int main(int argc, char **argv)
     PetscCall(MatDestroy(&Areg));
     PetscCall(DMDestroy(&dm));
     PetscCall(P4BasisDestroy(&basis));
-    PetscCall(PetscFinalize());
-    return 0;
+    PetscFunctionReturn(PETSC_SUCCESS);
   }
   if (app.linear_replay_dir[0]) {
     PetscCall(LinearReplayRun(dm, &actx, &app, &lsolver, Areg, Kelastic, Ktangent, f_ext, rhs_norm));
@@ -6974,8 +7031,7 @@ int main(int argc, char **argv)
     PetscCall(MatDestroy(&Areg));
     PetscCall(DMDestroy(&dm));
     PetscCall(P4BasisDestroy(&basis));
-    PetscCall(PetscFinalize());
-    return 0;
+    PetscFunctionReturn(PETSC_SUCCESS);
   }
   PetscCall(SSRContinuationSolve(dm, &actx, &app, &lsolver, Areg, Kelastic, Ktangent, f_ext, rhs_norm, &ssr_stats));
   PetscCall(PetscTime(&t_end));
@@ -6998,6 +7054,7 @@ int main(int argc, char **argv)
                           (double)(t_end - t_start), (double)ssr_stats.omega_last, (double)ssr_stats.lambda_last, (double)ssr_stats.final_rel,
                           (double)ssr_stats.final_rel_correction, ssr_stats.stop_reason, app.use_deflation ? "true" : "false", app.deflation_solver_name,
                           lsolver.n_raw_basis, app.curve_csv));
+    PetscCall(WriteSummaryJSON(&app, size, part_type ? part_type : "unknown", global_dofs, elastic_assembly_time, t_end - t_start, &ssr_stats, &lsolver));
   }
 
   PetscCall(LinearSolverDestroy(&lsolver));
@@ -7009,6 +7066,23 @@ int main(int argc, char **argv)
   PetscCall(MatDestroy(&Areg));
   PetscCall(DMDestroy(&dm));
   PetscCall(P4BasisDestroy(&basis));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode P4IndirectSSRRunOptionsString(const char options[])
+{
+  PetscFunctionBeginUser;
+  if (options && options[0]) PetscCall(PetscOptionsInsertString(NULL, options));
+  PetscCall(P4IndirectSSRRunFromOptions());
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+#ifndef P4_INDIRECT_SSR_NO_MAIN
+int main(int argc, char **argv)
+{
+  PetscCall(PetscInitialize(&argc, &argv, NULL, "Standalone pure PETSc P4 indirect SSR case\n"));
+  PetscCall(P4IndirectSSRRunFromOptions());
   PetscCall(PetscFinalize());
   return 0;
 }
+#endif
