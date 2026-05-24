@@ -15,6 +15,11 @@ if [[ -z "${PETSC_DIR:-}" ]]; then
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
+OPENMPI_BIN="${OPENMPI_BIN:-/apps/all/OpenMPI/5.0.8-GCC-14.3.0/bin}"
+if [[ -x "$OPENMPI_BIN/mpicc" ]]; then
+  export PATH="$OPENMPI_BIN:$PATH"
+  export CC="${CC:-$OPENMPI_BIN/mpicc}"
+fi
 
 KAROLINA_BZIP2_ROOT="${KAROLINA_BZIP2_ROOT:-/apps/all/bzip2/1.0.8-GCCcore-14.3.0}"
 for libdir in "$KAROLINA_BZIP2_ROOT/lib64" "$KAROLINA_BZIP2_ROOT/lib"; do
