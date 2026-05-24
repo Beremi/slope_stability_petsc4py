@@ -30,6 +30,7 @@ SUMMARY_FIELDS = (
     "run_label",
     "engine",
     "profile",
+    "mechanics_backend",
     "nodes",
     "tasks_per_node",
     "ranks",
@@ -291,6 +292,7 @@ def base_row(result_dir: Path, env: dict[str, str]) -> dict[str, Any]:
         "run_label": env.get("RUN_LABEL", result_dir.name),
         "engine": env.get("ENGINE", ""),
         "profile": env.get("PROFILE", ""),
+        "mechanics_backend": env.get("MECHANICS_BACKEND", ""),
         "nodes": env.get("NODES", ""),
         "tasks_per_node": env.get("TASKS_PER_NODE", ""),
         "ranks": env.get("RANKS", ""),
@@ -423,6 +425,7 @@ def update_py_result(row: dict[str, Any], result_dir: Path, log_text: str) -> No
     timings = info.get("timings", {}) if isinstance(info.get("timings"), dict) else {}
     linear = timings.get("linear", {}) if isinstance(timings.get("linear"), dict) else {}
     constitutive = timings.get("constitutive", {}) if isinstance(timings.get("constitutive"), dict) else {}
+    c_hotpath = info.get("c_hotpath_summary", {}) if isinstance(info.get("c_hotpath_summary"), dict) else {}
     row["wall_time"] = info.get("runtime", run_info.get("runtime_seconds", ""))
     row["continuation_wall_time"] = timings.get("continuation_total_wall_time", "")
     row["accepted_steps"] = info.get("steps", run_info.get("step_count", ""))
@@ -437,6 +440,59 @@ def update_py_result(row: dict[str, Any], result_dir: Path, log_text: str) -> No
     if row["total_linear_its"] == "" and init_lin != "" and attempt_lin != "":
         row["total_linear_its"] = int(init_lin) + int(attempt_lin)
     row["stop_reason"] = info.get("stop_reason", "")
+    if c_hotpath:
+        for src_key, dst_key in (
+            ("global_dofs", "global_dofs"),
+            ("accepted_steps", "accepted_steps"),
+            ("total_newton_its", "total_newton_its"),
+            ("total_linear_its", "total_linear_its"),
+            ("total_line_search_its", "total_line_search_its"),
+            ("omega_last", "omega_last"),
+            ("lambda_last", "lambda_last"),
+            ("elastic_assembly_time", "elastic_assembly_time"),
+            ("continuation_wall_time", "continuation_wall_time"),
+            ("wall_time", "wall_time"),
+            ("final_rel", "final_rel"),
+            ("final_rel_correction", "final_rel_correction"),
+            ("stop_reason", "stop_reason"),
+            ("deflation_basis_cols", "deflation_basis_cols"),
+            ("deflation_orthogonalization_time", "deflation_orthogonalization_time"),
+            ("deflation_coarse_initial_time", "deflation_coarse_initial_time"),
+            ("deflation_pc_apply_time", "deflation_pc_apply_time"),
+            ("deflation_projector_time", "deflation_projector_time"),
+        ):
+            if src_key in c_hotpath:
+                row[dst_key] = c_hotpath[src_key]
+    defl_line = ""
+    pmg_line = ""
+    for line in log_text.splitlines():
+        if line.startswith("DEFLATION_TIMING "):
+            defl_line = line
+        elif line.startswith("PMG_SHELL_APPLY_SUMMARY "):
+            pmg_line = line
+    defl = kv_from_line(defl_line)
+    pmg = kv_from_line(pmg_line)
+    for src_key, dst_key in (
+        ("orthogonalization_time", "deflation_orthogonalization_time"),
+        ("coarse_initial_time", "deflation_coarse_initial_time"),
+        ("pc_apply_time", "deflation_pc_apply_time"),
+        ("projector_time", "deflation_projector_time"),
+    ):
+        if src_key in defl:
+            row[dst_key] = defl[src_key]
+    for src_key, dst_key in (
+        ("apply_calls", "pmg_apply_calls"),
+        ("operator_updates", "pmg_operator_updates"),
+        ("fine_smooth", "pmg_fine_smooth"),
+        ("p2_smooth", "pmg_p2_smooth"),
+        ("restrict", "pmg_restrict"),
+        ("prolong", "pmg_prolong"),
+        ("coarse_solve", "pmg_coarse_solve"),
+        ("residual", "pmg_residual"),
+        ("operator_update", "pmg_operator_update"),
+    ):
+        if src_key in pmg:
+            row[dst_key] = pmg[src_key]
     row.update(flatten_json("py_constitutive_", constitutive, (
         "reduction",
         "stress",
@@ -523,6 +579,31 @@ def update_py_result(row: dict[str, Any], result_dir: Path, log_text: str) -> No
 def py_step_rows(result_dir: Path, meta: dict[str, Any]) -> list[dict[str, Any]]:
     progress = result_dir / "out" / "data" / "progress.jsonl"
     rows: list[dict[str, Any]] = []
+    curve = result_dir / "out" / "data" / "continuation_curve.csv"
+    if not progress.exists() and curve.exists():
+        with curve.open(newline="") as fh:
+            for rec in csv.DictReader(fh):
+                row = {key: meta.get(key, "") for key in ("job_id", "run_label", "engine", "profile", "nodes", "tasks_per_node", "ranks", "refine_levels", "pmg_coarse_max_it")}
+                row.update(
+                    {
+                        "step": rec.get("step", ""),
+                        "phase": rec.get("phase", ""),
+                        "omega": rec.get("omega", ""),
+                        "lambda": rec.get("lambda", ""),
+                        "d_omega": rec.get("d_omega", ""),
+                        "d_lambda": rec.get("d_lambda", ""),
+                        "attempts": rec.get("attempts", ""),
+                        "newton_iterations": rec.get("newton_iterations", ""),
+                        "linear_iterations": rec.get("linear_iterations", ""),
+                        "line_search_iterations": rec.get("line_search_iterations", ""),
+                        "rel_residual": rec.get("rel_residual", ""),
+                        "rel_correction": rec.get("rel_correction", ""),
+                        "step_wall_time": rec.get("step_wall_time", ""),
+                        "stop_reason": rec.get("stop_reason", ""),
+                    }
+                )
+                rows.append(row)
+        return rows
     for line in read_text(progress).splitlines():
         if not line.strip():
             continue

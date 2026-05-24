@@ -18,7 +18,7 @@ COLLECT_PYTHON="${COLLECT_PYTHON:-${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}}"
 mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/results"
 
 manifest="$RUN_ROOT/submitted_ssr_omega7_jobs.csv"
-echo "job_id,engine,profile,nodes,tasks_per_node,ranks,refine_levels,omega_max,linear_rtol,ksp_max_it,pmg_coarse_max_it,partition,qos,time_limit,run_label" >"$manifest"
+echo "job_id,engine,profile,mechanics_backend,nodes,tasks_per_node,ranks,refine_levels,omega_max,linear_rtol,ksp_max_it,pmg_coarse_max_it,partition,qos,time_limit,run_label" >"$manifest"
 
 echo "RUN_ROOT=$RUN_ROOT"
 echo "ACCOUNT=$ACCOUNT QOS=$QOS PARTITION=$PARTITION TIME_LIMIT=$TIME_LIMIT NODE_CORES=$NODE_CORES"
@@ -45,10 +45,20 @@ submit_one() {
     exit 2
   fi
   case "$engine" in c|py) ;; *) echo "ERROR: unknown engine=$engine" >&2; exit 2 ;; esac
-  case "$profile" in baseline|petsc4py|split) ;; *) echo "ERROR: unknown profile=$profile" >&2; exit 2 ;; esac
+  case "$profile" in baseline|petsc4py|split|hotpath) ;; *) echo "ERROR: unknown profile=$profile" >&2; exit 2 ;; esac
   if [[ "$engine" != "c" && "$profile" == "split" ]]; then
     echo "ERROR: profile=split is a C-only shell V-cycle profile; use ENGINES=c." >&2
     exit 2
+  fi
+  if [[ "$engine" != "py" && "$profile" == "hotpath" ]]; then
+    echo "ERROR: profile=hotpath is a petsc4py C-hotpath profile; use ENGINES=py." >&2
+    exit 2
+  fi
+
+  local mechanics_backend
+  mechanics_backend="${MECHANICS_BACKEND:-}"
+  if [[ -z "$mechanics_backend" && "$engine" == "py" && "$profile" == "hotpath" ]]; then
+    mechanics_backend="dmplex_c_hotpath"
   fi
 
   run_label="${engine}_${profile}_${nodes}n${tasks_per_node}ppn_r${ranks}_ref${REFINE_LEVELS:-1}_omega${OMEGA_MAX:-7e6}_rtol${LINEAR_RTOL:-1e-1}_p1max${PMG_COARSE_MAX_IT:-5}"
@@ -79,6 +89,7 @@ submit_one() {
     RUN_LABEL="$run_label"
     ENGINE="$engine"
     PROFILE="$profile"
+    MECHANICS_BACKEND="$mechanics_backend"
     OMEGA_MAX="${OMEGA_MAX:-7e6}"
     REFINE_LEVELS="${REFINE_LEVELS:-1}"
     CONTINUATION_STEP_MAX="${CONTINUATION_STEP_MAX:-100}"
@@ -91,6 +102,16 @@ submit_one() {
     BUILD_BEFORE_RUN="${BUILD_BEFORE_RUN:-0}"
     LOG_VIEW="${LOG_VIEW:-1}"
     LAUNCHER="$launcher"
+    PMG_SHELL_P2_ACTIVE_RANKS="${PMG_SHELL_P2_ACTIVE_RANKS:-64}"
+    PMG_SHELL_P1_ACTIVE_RANKS="${PMG_SHELL_P1_ACTIVE_RANKS:-32}"
+    PMG_SHELL_SUBCOMM_TYPE="${PMG_SHELL_SUBCOMM_TYPE:-interlaced}"
+    PMG_SHELL_FINE_KSP_MAX_IT="${PMG_SHELL_FINE_KSP_MAX_IT:-5}"
+    PMG_SHELL_P2_KSP_MAX_IT="${PMG_SHELL_P2_KSP_MAX_IT:-10}"
+    PMG_SHELL_P1_PC_TYPE="${PMG_SHELL_P1_PC_TYPE:-redundant}"
+    PMG_SHELL_P1_REDUNDANT_NUMBER="${PMG_SHELL_P1_REDUNDANT_NUMBER:-1}"
+    PMG_SHELL_P1_REDUNDANT_KSP_TYPE="${PMG_SHELL_P1_REDUNDANT_KSP_TYPE:-fgmres}"
+    PMG_SHELL_P1_REDUNDANT_KSP_RTOL="${PMG_SHELL_P1_REDUNDANT_KSP_RTOL:-1e-3}"
+    PMG_SHELL_P1_REDUNDANT_PC_TYPE="${PMG_SHELL_P1_REDUNDANT_PC_TYPE:-gamg}"
   )
   if [[ -n "${EXTRA_PETSC_OPTIONS:-}" ]]; then
     exports+=(EXTRA_PETSC_OPTIONS="$EXTRA_PETSC_OPTIONS")
@@ -129,12 +150,12 @@ submit_one() {
     printf 'DRY_RUN '
     printf '%q ' "${cmd[@]}"
     printf '\n'
-    echo "DRY_RUN,$engine,$profile,$nodes,$tasks_per_node,$ranks,${REFINE_LEVELS:-1},${OMEGA_MAX:-7e6},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},${PMG_COARSE_MAX_IT:-5},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
+    echo "DRY_RUN,$engine,$profile,$mechanics_backend,$nodes,$tasks_per_node,$ranks,${REFINE_LEVELS:-1},${OMEGA_MAX:-7e6},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},${PMG_COARSE_MAX_IT:-5},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
     return 0
   fi
 
   job_id="$("${cmd[@]}")"
-  echo "$job_id,$engine,$profile,$nodes,$tasks_per_node,$ranks,${REFINE_LEVELS:-1},${OMEGA_MAX:-7e6},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},${PMG_COARSE_MAX_IT:-5},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
+  echo "$job_id,$engine,$profile,$mechanics_backend,$nodes,$tasks_per_node,$ranks,${REFINE_LEVELS:-1},${OMEGA_MAX:-7e6},${LINEAR_RTOL:-1e-1},${KSP_MAX_IT:-200},${PMG_COARSE_MAX_IT:-5},$PARTITION,$QOS,$TIME_LIMIT,$run_label" >>"$manifest"
   echo "submitted job_id=$job_id engine=$engine profile=$profile nodes=$nodes tasks_per_node=$tasks_per_node ranks=$ranks"
 }
 

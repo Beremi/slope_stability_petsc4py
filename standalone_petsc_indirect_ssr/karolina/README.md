@@ -50,6 +50,22 @@ LAYOUTS="1:64 1:128 2:128" ENGINES="c py" PROFILES="baseline petsc4py" REFINE_LE
 BUILD_BEFORE_RUN=1 ENGINES=c PROFILES=baseline ./submit_omega7_grid.sh
 ```
 
+Submit the petsc4py C-hotpath comparison against the already collected C
+baseline artifacts. This runs full-node `1x128` and `2x128` jobs for both the
+base L1 mesh and the uniformly refined L1 mesh:
+
+```bash
+./build_hotpath_extension.sh
+./submit_petsc4py_hotpath_scaling.sh
+```
+
+The hotpath profile writes `mechanics_backend = "dmplex_c_hotpath"` into the
+petsc4py config, then uses the same maintained C split-smoother path through
+the Cython bridge: P2/P1 active ranks `64/32`, interlaced subcommunicators,
+fine smoother max-it `5`, P2 smoother max-it `10`, and redundant P1/GAMG
+coarse solve max-it `5`. Override `REFINE_LEVELS_LIST`, `LAYOUTS`, or the
+`PMG_SHELL_*` variables only when intentionally testing a different profile.
+
 Submit only the split-smoother C scalability check requested after local
 validation:
 

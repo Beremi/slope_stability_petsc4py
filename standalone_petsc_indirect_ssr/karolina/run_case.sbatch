@@ -20,6 +20,14 @@ JOB_NAME="${SLURM_JOB_NAME:-ssr_${TOTAL_RANKS}r}"
 RUN_LABEL="${RUN_LABEL:-manual}"
 ENGINE="${ENGINE:-c}"
 PROFILE="${PROFILE:-baseline}"
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
+MECHANICS_BACKEND_EFFECTIVE="${MECHANICS_BACKEND:-}"
+if [[ "$ENGINE" == "py" && -z "$MECHANICS_BACKEND_EFFECTIVE" ]]; then
+  case "$PROFILE" in
+    hotpath) MECHANICS_BACKEND_EFFECTIVE="dmplex_c_hotpath" ;;
+    *) MECHANICS_BACKEND_EFFECTIVE="legacy_array" ;;
+  esac
+fi
 
 export PETSC_ARCH="${PETSC_ARCH:-linux-c-opt}"
 if [[ -z "${PETSC_DIR:-}" ]]; then
@@ -64,7 +72,8 @@ metadata="$RESULT_DIR/job.env"
   echo "LAUNCHER=${LAUNCHER:-mpiexec}"
   echo "PETSC_DIR=$PETSC_DIR"
   echo "PETSC_ARCH=$PETSC_ARCH"
-  echo "PYTHON_BIN=${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
+  echo "PYTHON_BIN=$PYTHON_BIN"
+  echo "MECHANICS_BACKEND=${MECHANICS_BACKEND_EFFECTIVE:-}"
   echo "PY_PETSC_OPTIONS=${PY_PETSC_OPTIONS:--log_view}"
   echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
   echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
@@ -77,6 +86,16 @@ metadata="$RESULT_DIR/job.env"
   echo "LINEAR_RTOL=${LINEAR_RTOL:-1e-1}"
   echo "KSP_MAX_IT=${KSP_MAX_IT:-200}"
   echo "PMG_COARSE_MAX_IT=${PMG_COARSE_MAX_IT:-}"
+  echo "PMG_SHELL_P2_ACTIVE_RANKS=${PMG_SHELL_P2_ACTIVE_RANKS:-64}"
+  echo "PMG_SHELL_P1_ACTIVE_RANKS=${PMG_SHELL_P1_ACTIVE_RANKS:-32}"
+  echo "PMG_SHELL_SUBCOMM_TYPE=${PMG_SHELL_SUBCOMM_TYPE:-interlaced}"
+  echo "PMG_SHELL_FINE_KSP_MAX_IT=${PMG_SHELL_FINE_KSP_MAX_IT:-5}"
+  echo "PMG_SHELL_P2_KSP_MAX_IT=${PMG_SHELL_P2_KSP_MAX_IT:-10}"
+  echo "PMG_SHELL_P1_PC_TYPE=${PMG_SHELL_P1_PC_TYPE:-redundant}"
+  echo "PMG_SHELL_P1_REDUNDANT_NUMBER=${PMG_SHELL_P1_REDUNDANT_NUMBER:-1}"
+  echo "PMG_SHELL_P1_REDUNDANT_KSP_TYPE=${PMG_SHELL_P1_REDUNDANT_KSP_TYPE:-fgmres}"
+  echo "PMG_SHELL_P1_REDUNDANT_KSP_RTOL=${PMG_SHELL_P1_REDUNDANT_KSP_RTOL:-1e-3}"
+  echo "PMG_SHELL_P1_REDUNDANT_PC_TYPE=${PMG_SHELL_P1_REDUNDANT_PC_TYPE:-gamg}"
   echo "PARTITIONER=${PARTITIONER:-parmetis}"
   echo "OPTIONS_FILE=${OPTIONS_FILE:-}"
   echo "START_TIME=$(date --iso-8601=seconds)"
@@ -86,8 +105,12 @@ if command -v module >/dev/null 2>&1; then
   module list >"$RESULT_DIR/module_list.txt" 2>&1 || true
 fi
 
-if [[ "${BUILD_BEFORE_RUN:-0}" == "1" && "$ENGINE" == "c" ]]; then
-  make -C "$SSR_DIR" >"$RESULT_DIR/build.log" 2>&1
+if [[ "${BUILD_BEFORE_RUN:-0}" == "1" ]]; then
+  if [[ "$ENGINE" == "c" ]]; then
+    make -C "$SSR_DIR" >"$RESULT_DIR/build.log" 2>&1
+  elif [[ "$ENGINE" == "py" ]]; then
+    "$PYTHON_BIN" -m pip install -e "$REPO_ROOT" >"$RESULT_DIR/build.log" 2>&1
+  fi
 fi
 
 profile_options_file() {
@@ -95,7 +118,8 @@ profile_options_file() {
     baseline) printf '%s\n' "${OPTIONS_FILE:-options/pmg_shell_vcycle.opts}" ;;
     split) printf '%s\n' "${OPTIONS_FILE:-options/pmg_shell_split_smoother.opts}" ;;
     petsc4py) printf '%s\n' "${OPTIONS_FILE:-options/pmg_shell_petsc4py.opts}" ;;
-    *) echo "ERROR: unknown PROFILE=$PROFILE, expected baseline, split, or petsc4py." >&2; return 2 ;;
+    hotpath) printf '%s\n' "${OPTIONS_FILE:-options/pmg_shell_split_smoother.opts}" ;;
+    *) echo "ERROR: unknown PROFILE=$PROFILE, expected baseline, split, petsc4py, or hotpath." >&2; return 2 ;;
   esac
 }
 
@@ -103,19 +127,24 @@ write_py_config() {
   local cfg="$1"
   local petsc_opt
 
+  local refine_opt='"-refine_levels='"${REFINE_LEVELS:-0}"'"'
+
   case "$PROFILE" in
     baseline)
-      petsc_opt='"mg_levels_ksp_type=chebyshev", "mg_levels_ksp_max_it=2", "mg_levels_pc_type=jacobi", "mg_coarse_ksp_type=fgmres", "mg_coarse_rtol=1e-3", "mg_coarse_max_it=100", "mg_coarse_pc_type=gamg", "pc_gamg_aggressive_square_graph=false"'
+      petsc_opt="${refine_opt}, \"mg_levels_ksp_type=chebyshev\", \"mg_levels_ksp_max_it=2\", \"mg_levels_pc_type=jacobi\", \"mg_coarse_ksp_type=fgmres\", \"mg_coarse_rtol=1e-3\", \"mg_coarse_max_it=100\", \"mg_coarse_pc_type=gamg\", \"pc_gamg_aggressive_square_graph=false\""
       ;;
     petsc4py)
-      petsc_opt='"pc_hypre_boomeramg_max_iter=4", "pc_hypre_boomeramg_tol=0.0"'
+      petsc_opt="${refine_opt}, \"pc_hypre_boomeramg_max_iter=4\", \"pc_hypre_boomeramg_tol=0.0\""
+      ;;
+    hotpath)
+      petsc_opt="${refine_opt}"
       ;;
     split)
       echo "ERROR: PROFILE=split is only implemented for ENGINE=c." >&2
       return 2
-      ;;
+    ;;
     *)
-      echo "ERROR: unknown PROFILE=$PROFILE, expected baseline, split, or petsc4py." >&2
+      echo "ERROR: unknown PROFILE=$PROFILE, expected baseline, split, petsc4py, or hotpath." >&2
       return 2
       ;;
   esac
@@ -137,6 +166,7 @@ elem_type = "P4"
 davis_type = "B"
 
 [execution]
+mechanics_backend = "${MECHANICS_BACKEND_EFFECTIVE:-legacy_array}"
 node_ordering = "block_metis"
 mpi_distribute_by_nodes = true
 constitutive_mode = "overlap"
@@ -173,6 +203,17 @@ recycle_preconditioner = true
 pc_backend = "pmg_shell"
 pc_hypre_coarsen_type = "HMIS"
 pc_hypre_interp_type = "ext+i"
+pmg_shell_p2_active_ranks = ${PMG_SHELL_P2_ACTIVE_RANKS:-64}
+pmg_shell_p1_active_ranks = ${PMG_SHELL_P1_ACTIVE_RANKS:-32}
+pmg_shell_subcomm_type = "${PMG_SHELL_SUBCOMM_TYPE:-interlaced}"
+pmg_shell_fine_ksp_max_it = ${PMG_SHELL_FINE_KSP_MAX_IT:-5}
+pmg_shell_p2_ksp_max_it = ${PMG_SHELL_P2_KSP_MAX_IT:-10}
+pmg_shell_p1_pc_type = "${PMG_SHELL_P1_PC_TYPE:-redundant}"
+pmg_shell_p1_redundant_number = ${PMG_SHELL_P1_REDUNDANT_NUMBER:-1}
+pmg_shell_p1_redundant_ksp_type = "${PMG_SHELL_P1_REDUNDANT_KSP_TYPE:-fgmres}"
+pmg_shell_p1_redundant_ksp_rtol = ${PMG_SHELL_P1_REDUNDANT_KSP_RTOL:-1e-3}
+pmg_shell_p1_redundant_ksp_max_it = ${PMG_COARSE_MAX_IT:-5}
+pmg_shell_p1_redundant_pc_type = "${PMG_SHELL_P1_REDUNDANT_PC_TYPE:-gamg}"
 petsc_opt = [${petsc_opt}]
 
 [export]
@@ -255,7 +296,6 @@ if [[ "$ENGINE" == "c" ]]; then
   exit_code=$?
   set -e
 elif [[ "$ENGINE" == "py" ]]; then
-  PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
   cfg="$RESULT_DIR/case.toml"
   write_py_config "$cfg"
   export PETSC_OPTIONS="${PY_PETSC_OPTIONS:--log_view}"
