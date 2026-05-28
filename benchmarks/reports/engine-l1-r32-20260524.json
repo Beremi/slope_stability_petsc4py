@@ -1,0 +1,22 @@
+{
+  "date": "2026-05-24",
+  "case": "L1 unrefined omega_max=7e6",
+  "engine": "standalone_petsc_ssr",
+  "ranks": 32,
+  "global_dofs": 616322,
+  "accepted_steps": 10,
+  "total_newton_its": 80,
+  "total_linear_its": 742,
+  "total_line_search_its": 197,
+  "elastic_assembly_time": 0.363962765,
+  "continuation_wall_time": 148.717527025,
+  "wall_time": 150.125919072,
+  "omega_last": 7000000.0,
+  "lambda_last": 1.5698929963035313,
+  "final_rel": 0.018381411293594507,
+  "final_rel_correction": 0.00040035633508866,
+  "deflation_orthogonalization_time": 20.335083512,
+  "deflation_pc_apply_time": 58.235365172,
+  "deflation_projector_time": 8.559082425,
+  "deflation_basis_cols": 9
+}

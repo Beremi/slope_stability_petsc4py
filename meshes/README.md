@@ -39,9 +39,8 @@ Each subdirectory in `meshes/` is a canonical problem asset.
 
 - add or update `meshes/<asset>/definition.py`
 - add the canonical mesh variant at `meshes/<asset>/<variant>.msh`
-- add `benchmarks/<benchmark>/case.toml` with `asset`, `mesh_variant`, optional `profile`, analysis, element type, solver, export, and notebook metadata
+- add `benchmarks/cases/<slug>/case.toml` with `asset`, `mesh_variant`, optional `profile`, analysis, element type, solver, export, and notebook metadata
 - update `tests/test_executable_asset_definitions.py` if the asset becomes part of the canonical required set
-- do not edit `src/` for new benchmark data; only add to `src/slope_stability/assets/evaluators.py` when the mesh needs a genuinely new generic BC or value model
+- do not edit `src/` for new benchmark data; only add to `src/petsc_ssr/assets/evaluators.py` when the mesh needs a genuinely new generic BC or value model
 
-For the complete field-by-field guide, see
-[docs/new-benchmark-new-geometry-guide.md](../docs/new-benchmark-new-geometry-guide.md).
+For the current repository layout, see [../docs/layout.md](../docs/layout.md).

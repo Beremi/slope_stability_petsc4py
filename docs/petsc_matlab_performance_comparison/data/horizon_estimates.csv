@@ -1,3 +1,0 @@
-case_id,case_label,level_id,level_label,smoke_final_omega,chosen_omega_max_stop,runtime_seconds,accepted_steps,output_dir
-hetero_3d,Heterogeneous 3D SSR,L1,L1,12000000.0,12000000.0,227.24034217100416,14,artifacts/petsc_matlab_performance_comparison/runs/hetero_3d/L1/smoke_petsc_smoke
-homo_3d,Homogeneous 3D SSR,L1,L1,3565.0194431436125,3565.0194431436125,192.0418787210001,12,artifacts/petsc_matlab_performance_comparison/runs/homo_3d/L1/smoke_petsc_smoke

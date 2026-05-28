@@ -1,0 +1,3 @@
+engine,profile,ranks,p4_dofs,wall_s,continuation_s,total_newton,total_linear,wall_per_linear_s,continuation_per_linear_s,final_lambda,deflation_pc_apply_s,deflation_orthogonalize_s,deflation_projector_s,pmg_fine_smooth_s,pmg_p2_smooth_s,pmg_coarse_solve_s,pmg_residual_s,max_rss_kib_per_rank,avg_rss_kib_per_rank,total_rss_kib_max
+c,split_smoother_redundant_p1,32,616322,146.56,145.134,77,719,0.20384,0.20186,1.570195,62.0097,17.6717,8.18073,44.2263,4.11198,8.26598,4.19221,557940,486115.375,15411012
+c,split_smoother_redundant_p1,64,616322,196.66,195.04,87,803,0.24491,0.24289,1.569401,88.3578,27.0588,8.99736,58.2181,4.88696,18.2085,5.35452,383116,337441.75,21479660

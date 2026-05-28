@@ -1,135 +1,121 @@
-# Slope Stability
+# PETSc SSR Engine
 
-PETSc-based Python reimplementation of the slope-stability workflows, organized around config-driven runs and benchmark parity against the local MATLAB reference tree.
+`petsc-ssr` is a self-contained PETSc/DMPlex slope-stability
+engine. Python owns compact case TOMLs, benchmark metadata, launch commands, and
+notebook/reporting helpers. C/PETSc owns distributed meshes, matrices, vectors,
+assembly, PMG, deflation, Krylov solves, Newton iterations, continuation, and
+profiling.
 
-## Repository layout
+The maintained benchmark path is the full-C PETSc implementation reached through
+`petsc-ssr run`.
 
-- `src/`: Python/PETSc implementation, including runtime CLI entrypoints under `src/slope_stability/cli/`
-- `build_scripts/`: tracked environment/bootstrap/build helpers
-- `scripts_local/`: ignored ad hoc developer scripts and one-off investigations
-- `benchmarks/`: unified asset-first case registry; canonical benchmarks and extra runnable cases both live here
-- `meshes/`: canonical mesh assets; each asset owns mesh variants, materials, hydraulics, BCs, and profiles
-- `docs/`: notes worth keeping for future work
-- `artifacts/`: ignored generated outputs
-- `archives/`: ignored archived experiments and legacy outputs
-- `.build/`: ignored build workspace
-- `.venv/`: ignored local Python environment
-- `slope_stability_matlab/`: local-only MATLAB reference tree, intentionally not tracked here
+## Layout
 
-## Main entry points
+- `src/petsc_ssr/`: importable Python package, CLI, case schema, and helpers.
+- `src/petsc_ssr/native/`: Cython extension and subsystem-organized C runtime.
+- `meshes/`: canonical mesh assets and mesh definition modules.
+- `benchmarks/cases/`: runnable case TOML folders and generated notebooks.
+- `benchmarks/suites/`: local/HPC sweep definitions.
+- `benchmarks/targets/`: committed performance targets.
+- `benchmarks/reports/`: curated historical validation reports.
+- `benchmarks/tools/`: notebook and benchmark maintenance helpers.
+- `configs/petsc/`: PETSc option profiles.
+- `configs/solver_profiles/`: named solver profiles used by case TOMLs.
+- `cluster/karolina/`: Slurm submission and collection scripts.
+- `tools/`: local validation and memory-sampling helpers.
+- `docs/`: architecture, layout, benchmark, mesh, and validation notes.
 
-Bootstrap the local environment:
+See [docs/layout.md](docs/layout.md) and
+[docs/architecture.md](docs/architecture.md) for more detail.
 
-```bash
-./bootstrap.sh
-```
-
-By default this performs the full local build needed by the benchmark stack:
-
-- creates `./.venv`
-- builds PETSc with `HYPRE` under `./.build`
-- installs `petsc4py`
-- installs `slope_stability` in editable mode with the benchmark partitioning extras
-
-The first run is intentionally heavier because it produces the real benchmark-capable environment. For a lighter wheel-based setup that may lack `HYPRE`, use:
+## Build
 
 ```bash
-BOOTSTRAP_MODE=wheel ./bootstrap.sh
+PETSC_DIR=$PWD/.build/src/petsc-3.24.5 \
+PETSC_ARCH=linux-c-opt \
+make
 ```
 
-Run one case:
+The build creates `petsc_ssr.native._core` in-place under `src/`.
+
+## Run
+
+Tiny smoke solve:
 
 ```bash
-./.venv/bin/python -m slope_stability.cli.run_case_from_config \
-  benchmarks/run_3D_hetero_SSR_capture/case.toml \
-  --out_dir artifacts/examples/ssr-run
+PETSC_DIR=$PWD/.build/src/petsc-3.24.5 \
+PETSC_ARCH=linux-c-opt \
+make smoke
 ```
 
-Run one canonical benchmark:
+Local L1 benchmark:
 
 ```bash
-./benchmarks/run_3D_hetero_SSR_capture/run.sh
+RANKS=32 ./tools/run_local_l1_benchmark.sh
 ```
 
-Run the whole benchmark suite:
+Case TOML runner:
 
 ```bash
-./.venv/bin/python -m slope_stability.cli.run_benchmark_suite
+PYTHONPATH=$PWD/src .venv/bin/python -m petsc_ssr.cli.main run \
+  benchmarks/cases/3d-heterogeneous-ssr-p4/case.toml \
+  --output .local/tmp/3d-heterogeneous-ssr-p4 \
+  --continuation-step-max 3
 ```
 
-## Codespaces And Devcontainer
-
-The repository ships a prebuild-friendly devcontainer under [`.devcontainer`](.devcontainer/).
-
-- slow setup runs in `onCreateCommand` and `updateContentCommand`, so Codespaces prebuilds can absorb:
-  - local PETSc compilation under `./.build`
-  - `petsc4py` installation against that PETSc
-  - editable project install with `test`, `viz`, `cython`, and `partition` extras
-  - Jupyter kernel registration for `Slope Stability (.venv)`
-- the attached editor then opens against the ready `.venv` interpreter with the PETSc runtime environment already exported
-- validation entrypoint:
+Inspect a case before solving:
 
 ```bash
-bash .devcontainer/validate.sh --imports-only
+PYTHONPATH=$PWD/src .venv/bin/python -m petsc_ssr.cli.main case validate \
+  benchmarks/cases/3d-heterogeneous-ssr-p4/case.toml
+PYTHONPATH=$PWD/src .venv/bin/python -m petsc_ssr.cli.main mesh-only \
+  benchmarks/cases/3d-heterogeneous-ssr-p4/case.toml
 ```
 
-## Benchmark contract
+## Benchmarks And Notebooks
 
-Each case folder under `benchmarks/` contains:
+Cases live in `benchmarks/cases/<slug>/`. Each case owns:
 
 - `case.toml`
-- `run.sh`
 - `README.md`
+- `simulation.ipynb`
+- `visualisation.ipynb`
 
-Generated benchmark reports and archived comparison material live under `archive/`.
+Active `case.toml` files use compact sections: `[case]`, `[mesh]`,
+`[physics]`, `[continuation]`, `[newton]`, `[linear]`, `[output]`, and optional
+`[notebook]`/`[seepage]`. MPI ranks and node counts belong to launcher flags or
+`benchmarks/suites/*.toml`, not case TOMLs.
 
-Reusable full-run plotting artifacts live under:
+Regenerate notebook shells and per-case READMEs with:
 
-- `artifacts/simulation/generated_case.toml`
-- `artifacts/simulation/data/run_info.json`
-- `artifacts/simulation/data/petsc_run.npz`
-- `artifacts/simulation/exports/final_solution.vtu`
+```bash
+PYTHONPATH=$PWD/src .venv/bin/python benchmarks/tools/generate_benchmark_readmes.py
+PYTHONPATH=$PWD/src .venv/bin/python benchmarks/tools/generate_benchmark_notebooks.py
+```
 
-Generated outputs go under `artifacts/...` and stay out of git.
+Old benchmark names are mapped to canonical slugs in
+[docs/benchmark-migration.md](docs/benchmark-migration.md).
 
-Benchmark configs are intentionally thin. `case.toml` selects an asset, mesh variant,
-optional profile, analysis type, element order, solver settings, and export settings.
-Problem physics belongs in `meshes/<asset>/definition.py`, not in benchmark TOML files or
-`src/` runtime modules.
+## Karolina
 
-## Exports
+```bash
+cd cluster/karolina
+NODE_COUNTS="1 2" TIME_LIMIT=00:30:00 ./submit_scaling.sh
+```
 
-Config-driven runs export:
+Use Karolina for these jobs. The scripts default to the maintained full-C
+baseline profile.
 
-- `exports/run_debug.h5`
-- `exports/continuation_history.json`
-- `exports/final_solution.vtu`
-- `exports/resolved_config.toml`
+## Validation
 
-The intent is straightforward postprocessing with PyVista, meshio, or ParaView.
+The normal cleanup gate is:
 
-## Mesh organization
+```bash
+python -m compileall -q src tools benchmarks/tools
+bash -n tools/*.sh benchmarks/tools/*.sh cluster/karolina/*.sh cluster/karolina/*.sbatch
+PETSC_DIR=$PWD/.build/src/petsc-3.24.5 PETSC_ARCH=linux-c-opt make
+PETSC_DIR=$PWD/.build/src/petsc-3.24.5 PETSC_ARCH=linux-c-opt make smoke
+```
 
-`meshes/` is the source of truth for problem assets:
-
-- `meshes/<asset>/definition.py` exports `ASSET`
-- `meshes/<asset>/*.msh` are canonical linear Gmsh `MSH 4.1` variants
-- `definition.py` declares materials, hydraulic conductivity, water unit weight, mechanics
-  BCs, seepage head BCs, hydraulic state, profiles, and region assignments
-- runtime code in `src/` stays problem-agnostic
-
-## Notes
-
-- Benchmarks are currently live MATLAB-vs-PETSc comparisons, not frozen regression snapshots yet.
-- Once benchmark parity is stable, freeze compact reference snapshots for regression-style testing.
-- `tests_local/` is intentionally ignored and reserved for local smoke/regression scripts during development.
-- `scripts_local/` is intentionally ignored and holds exploratory utilities that are not part of the benchmark-replication surface.
-- The MATLAB tree is expected at `./slope_stability_matlab` locally for benchmark runs.
-
-## Supporting docs
-
-- `benchmarks/README.md`
-- `docs/new-benchmark-new-geometry-guide.md`
-- `docs/config-case-matrix.md`
-- `docs/config-scheme-3d.md`
-- `docs/computational-path.md`
+Performance targets for the maintained L1 baseline are stored in
+`benchmarks/targets/`.

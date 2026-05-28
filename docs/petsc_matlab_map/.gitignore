@@ -1,8 +1,0 @@
-*.aux
-*.fdb_latexmk
-*.fls
-*.log
-*.out
-*.pdf
-*.toc
-!petsc_to_matlab_solution_map.pdf

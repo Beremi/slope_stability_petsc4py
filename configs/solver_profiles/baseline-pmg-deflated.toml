@@ -1,0 +1,17 @@
+description = "Maintained scalable full-C PMG baseline with cached deflation."
+petsc_options = []
+
+[linear_solver]
+solver_type = "PETSC_DMPLEX_C_FGMRES"
+tolerance = 1e-1
+max_iterations = 200
+deflation_basis_tolerance = 1e-3
+pc_backend = "pmg_shell"
+recycle_preconditioner = true
+
+[pmg]
+pmg_shell_p2_active_ranks = 64
+pmg_shell_p1_active_ranks = 32
+pmg_shell_subcomm_type = "interlaced"
+pmg_shell_fine_ksp_max_it = 5
+pmg_shell_p2_ksp_max_it = 10

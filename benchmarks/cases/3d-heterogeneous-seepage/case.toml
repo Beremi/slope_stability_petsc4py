@@ -1,0 +1,36 @@
+[case]
+name = "3d-heterogeneous-seepage"
+title = "3D heterogeneous seepage"
+tags = ["3d", "p2", "seepage"]
+
+[mesh]
+asset = "3d_hetero_seepage"
+variant = "concave_family_b"
+element = "P2"
+refine_levels = 0
+partitioner = "parmetis"
+
+[physics.seepage]
+model = "darcy"
+
+[continuation]
+profile = "indirect-classic"
+
+[newton]
+profile = "indirect-regularized"
+
+[linear]
+profile = "baseline-pmg-deflated"
+tolerance = 1e-10
+max_iterations = 500
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 500
+
+[output]
+solution = ["vtu", "petscbin"]
+history = ["summary_json", "curve_csv"]
+
+[notebook]
+family = "3d_seepage"

@@ -1,0 +1,45 @@
+[case]
+name = "3d-heterogeneous-ll"
+title = "3D heterogeneous LL"
+tags = ["3d", "p2", "mechanics", "limit-load"]
+
+[mesh]
+asset = "3d_hetero_slope"
+variant = "adaptive_family_b_l1"
+element = "P2"
+refine_levels = 0
+partitioner = "parmetis"
+
+[physics.mechanics]
+model = "mohr_coulomb_limit_load"
+davis = "B"
+
+[continuation]
+profile = "indirect-classic"
+omega_max = 80000000.0
+lambda_ell = 1.0
+d_t_min = 0.001
+d_omega_ini_scale = 0.5
+step_max = 100
+
+[newton]
+profile = "indirect-regularized"
+it_max = 200
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+
+[linear]
+profile = "baseline-pmg-deflated"
+tolerance = 0.1
+max_iterations = 100
+
+[output]
+solution = ["vtu", "petscbin"]
+history = ["summary_json", "curve_csv"]
+
+[notebook]
+family = "3d_continuation"
+slice_planes_y = [35.0]
+slice_planes_z = [43.30127019, 64.95190529]
+strain_clim_scale_max = 0.25

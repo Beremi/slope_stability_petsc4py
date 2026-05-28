@@ -3,22 +3,25 @@ requires = ["setuptools", "wheel", "Cython>=3.0", "numpy"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "slope_stability"
+name = "petsc-ssr"
 version = "0.1.0"
-description = "PETSc/Cython reimplementation of slope stability workflow."
+description = "Self-contained PETSc-owned Python/C slope-stability SSR engine."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "scipy>=1.10", "h5py>=3.9", "matplotlib>=3.8", "meshio>=5.3", "mpi4py>=4.0", "petsc4py>=3.20"]
+dependencies = ["numpy>=1.24", "scipy>=1.10", "mpi4py>=4.0", "petsc4py>=3.20", "h5py>=3.8", "meshio>=5.3", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
-test = ["pytest", "nbformat>=5", "nbclient>=0.10"]
-cython = ["Cython>=3.0"]
-viz = ["pyvista>=0.47", "trame>=3.12", "trame-vtk>=2.11", "trame-vuetify>=3.2", "jupyter-server-proxy>=4", "jupyterlab>=4", "nest_asyncio2>=1.7", "ipython>=8", "ipykernel>=6", "ipywidgets>=8", "nbformat>=5", "nbclient>=0.10"]
-partition = ["pymetis>=2025.2"]
+notebooks = ["nbformat>=5.9", "nbclient>=0.8", "pyvista>=0.43", "ipywidgets>=8.0"]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[project.scripts]
+petsc-ssr = "petsc_ssr.cli.main:main"
+petsc-ssr-run-case = "petsc_ssr.runners.run_case_from_config:main"
+petsc-ssr-local = "petsc_ssr.runners.local_case:main"
+petsc-ssr-seepage = "petsc_ssr.runners.comsol_seepage:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["slope_stability*"]
+include = ["petsc_ssr*"]
+
+[tool.setuptools.package-data]
+petsc_ssr = ["py.typed", "native/cython/*.pyx", "native/include/*", "native/*/*"]

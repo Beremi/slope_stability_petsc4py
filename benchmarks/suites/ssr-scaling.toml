@@ -1,0 +1,20 @@
+[suite]
+name = "ssr-scaling"
+description = "Maintained SSR scaling sweep for local and Karolina runs."
+
+cases = [
+  "3d-heterogeneous-ssr-p4",
+]
+
+[resources.local]
+ranks = [32, 64]
+time_limit = "00:30:00"
+
+[resources.karolina]
+nodes = [1, 2]
+ranks_per_node = 128
+partition = "qcpu"
+time_limit = "00:30:00"
+
+[solver]
+profile = "baseline-pmg-deflated"

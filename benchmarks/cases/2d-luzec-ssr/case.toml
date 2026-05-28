@@ -1,0 +1,51 @@
+[case]
+name = "2d-luzec-ssr"
+title = "2D Luzec SSR"
+tags = ["2d", "p2", "mechanics", "ssr", "seepage-coupled"]
+
+[mesh]
+asset = "2d_luzec"
+variant = "default"
+element = "P2"
+refine_levels = 0
+partitioner = "parmetis"
+
+[physics.mechanics]
+model = "mohr_coulomb_ssr"
+davis = "B"
+
+[physics.seepage]
+model = "darcy"
+
+[continuation]
+profile = "indirect-classic"
+omega_max = 70000000.0
+lambda_init = 0.7
+d_lambda_init = 0.1
+d_lambda_min = 1e-05
+d_lambda_diff_scaled_min = 0.001
+step_max = 100
+
+[newton]
+profile = "indirect-regularized"
+it_max = 50
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+
+[linear]
+profile = "baseline-pmg-deflated"
+tolerance = 0.1
+max_iterations = 100
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 500
+
+[output]
+solution = ["vtu", "petscbin"]
+history = ["summary_json", "curve_csv"]
+
+[notebook]
+family = "2d_seepage_continuation"
+material_palette = "luzec"

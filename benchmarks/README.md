@@ -1,90 +1,21 @@
-# Benchmark Cases
+# Benchmarks
 
-This directory is the runnable case registry. Each case is driven by a `case.toml` file
-that selects an asset, mesh variant, optional profile, analysis type, element order, solver
-settings, and exports.
+Benchmark cases are stored under `benchmarks/cases/<slug>/`.
 
-Each case folder contains at least:
+Each case contains a `case.toml`, generated `README.md`, `simulation.ipynb`, and
+`visualisation.ipynb`.  Curated historical records live in `benchmarks/reports`;
+machine-readable performance targets live in `benchmarks/targets`.
 
-- `case.toml`
-- `run.sh`
-- `README.md`
-
-Benchmark configs are asset-first. `case.toml` selects `problem.asset`,
-`problem.mesh_variant`, optional `problem.profile`, analysis, element order, and numerical
-settings. Mesh geometry, materials, hydraulic conductivity, water unit weight, mechanics
-BCs, seepage BCs, hydraulic state, and profiles are defined in
-`meshes/<asset>/definition.py`.
-
-For a complete guide to adding a benchmark on a new geometry, see
-[docs/new-benchmark-new-geometry-guide.md](../docs/new-benchmark-new-geometry-guide.md).
-
-Per-case `README.md` files are descriptive only. MATLAB-vs-PETSc comparison output for
-parity cases is kept in `archive/report.md`.
-
-The canonical MATLAB-parity benchmark suite is the subset with `[benchmark].suite = true` in `case.toml`.
-
-Run the full parity suite:
+Run a case manually:
 
 ```bash
-./.venv/bin/python -m slope_stability.cli.run_benchmark_suite
+MPI_RANKS=4 benchmarks/tools/run_standalone_case.sh benchmarks/cases/2d-homogeneous-ssr \
+  --continuation-step-max 3
 ```
 
-Run any single case from its folder with `./run.sh`.
+Regenerate case documentation and notebooks:
 
-## MATLAB-Parity Benchmarks
-
-The timing and parity values below come from committed benchmark reports and artifacts. They
-are reproducibility records, not new validation claims from this documentation cleanup.
-
-| Case | Title | Kind | Status | MATLAB [s] | PETSc [s] | Parity summary | README | Report | Run |
-| --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- |
-| `run_2D_homo_SSR_capture` | 2D homogeneous SSR | continuation | done | 9.270 | 8.286 | `steps 14/14`, `lambda 6.74e-06`, `omega 3.05e-05` | [README](run_2D_homo_SSR_capture/README.md) | [report](run_2D_homo_SSR_capture/archive/report.md) | [run.sh](run_2D_homo_SSR_capture/run.sh) |
-| `run_2D_sloan2013_seepage_capture` | 2D Sloan2013 seepage | seepage | done | 0.407 | 1.213 | `pw 3.33e-15`, `grad 1.82e-14`, `sat 0` | [README](run_2D_sloan2013_seepage_capture/README.md) | [report](run_2D_sloan2013_seepage_capture/archive/report.md) | [run.sh](run_2D_sloan2013_seepage_capture/run.sh) |
-| `run_3D_hetero_SSR_capture` | 3D heterogeneous SSR | continuation | done | 264.817 | 135.706 | `steps 14/14`, `lambda 1.29e-05`, `omega 5.79e-06` | [README](run_3D_hetero_SSR_capture/README.md) | [report](run_3D_hetero_SSR_capture/archive/report.md) | [run.sh](run_3D_hetero_SSR_capture/run.sh) |
-| `run_3D_hetero_seepage_SSR_comsol_capture` | 3D heterogeneous seepage SSR COMSOL | continuation | done | 2300.903 | 1217.168 | `steps 34/35`, `lambda 2.14e-05`, `omega 2.89e-04` | [README](run_3D_hetero_seepage_SSR_comsol_capture/README.md) | [report](run_3D_hetero_seepage_SSR_comsol_capture/archive/report.md) | [run.sh](run_3D_hetero_seepage_SSR_comsol_capture/run.sh) |
-| `run_3D_hetero_seepage_capture` | 3D heterogeneous seepage | seepage | done | 15.100 | 16.017 | `pw 1.69e-16`, `grad 4.20e-15`, `sat 0` | [README](run_3D_hetero_seepage_capture/README.md) | [report](run_3D_hetero_seepage_capture/archive/report.md) | [run.sh](run_3D_hetero_seepage_capture/run.sh) |
-
-## Additional Runnable Cases
-
-These folders are part of the unified case registry, but they are not included in the canonical MATLAB-parity suite.
-
-| Folder | Asset | Analysis | Dimension | Element | README | Run | Config |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `SIOPT_LL` | 3d_siopt | ll | 3D | P2 | [README](SIOPT_LL/README.md) | [run.sh](SIOPT_LL/run.sh) | [case.toml](SIOPT_LL/case.toml) |
-| `SIOPT_SSR` | 3d_siopt | ssr | 3D | P2 | [README](SIOPT_SSR/README.md) | [run.sh](SIOPT_SSR/run.sh) | [case.toml](SIOPT_SSR/case.toml) |
-| `slope_stability_2D_Franz_dam_SSR` | 2d_franz_dam | ssr | 2D | P2 | [README](slope_stability_2D_Franz_dam_SSR/README.md) | [run.sh](slope_stability_2D_Franz_dam_SSR/run.sh) | [case.toml](slope_stability_2D_Franz_dam_SSR/case.toml) |
-| `slope_stability_2D_Kozinec_LL` | 2d_kozinec | ll | 2D | P2 | [README](slope_stability_2D_Kozinec_LL/README.md) | [run.sh](slope_stability_2D_Kozinec_LL/run.sh) | [case.toml](slope_stability_2D_Kozinec_LL/case.toml) |
-| `slope_stability_2D_Kozinec_SSR` | 2d_kozinec | ssr | 2D | P2 | [README](slope_stability_2D_Kozinec_SSR/README.md) | [run.sh](slope_stability_2D_Kozinec_SSR/run.sh) | [case.toml](slope_stability_2D_Kozinec_SSR/case.toml) |
-| `slope_stability_2D_Luzec_SSR` | 2d_luzec | ssr | 2D | P2 | [README](slope_stability_2D_Luzec_SSR/README.md) | [run.sh](slope_stability_2D_Luzec_SSR/run.sh) | [case.toml](slope_stability_2D_Luzec_SSR/case.toml) |
-| `slope_stability_2D_homo_LL` | 2d_homo_slope | ll | 2D | P2 | [README](slope_stability_2D_homo_LL/README.md) | [run.sh](slope_stability_2D_homo_LL/run.sh) | [case.toml](slope_stability_2D_homo_LL/case.toml) |
-| `slope_stability_3D_hetero_LL` | 3d_hetero_slope | ll | 3D | P2 | [README](slope_stability_3D_hetero_LL/README.md) | [run.sh](slope_stability_3D_hetero_LL/run.sh) | [case.toml](slope_stability_3D_hetero_LL/case.toml) |
-| `slope_stability_3D_hetero_SSR_default` | 3d_hetero_slope | ssr | 3D | P4 | [README](slope_stability_3D_hetero_SSR_default/README.md) | [run.sh](slope_stability_3D_hetero_SSR_default/run.sh) | [case.toml](slope_stability_3D_hetero_SSR_default/case.toml) |
-| `slope_stability_3D_homo_LL` | 3d_homo_slope | ll | 3D | P2 | [README](slope_stability_3D_homo_LL/README.md) | [run.sh](slope_stability_3D_homo_LL/run.sh) | [case.toml](slope_stability_3D_homo_LL/case.toml) |
-| `slope_stability_3D_homo_SSR` | 3d_homo_slope | ssr | 3D | P2 | [README](slope_stability_3D_homo_SSR/README.md) | [run.sh](slope_stability_3D_homo_SSR/run.sh) | [case.toml](slope_stability_3D_homo_SSR/case.toml) |
-| `slope_stability_3D_homo_SSR_default` | 3d_homo_slope | ssr | 3D | P2 | [README](slope_stability_3D_homo_SSR_default/README.md) | [run.sh](slope_stability_3D_homo_SSR_default/run.sh) | [case.toml](slope_stability_3D_homo_SSR_default/case.toml) |
-| `slope_stability_3D_homo_seepage_SSR_concave` | 3d_hetero_seepage_transition | ssr | 3D | P2 | [README](slope_stability_3D_homo_seepage_SSR_concave/README.md) | [run.sh](slope_stability_3D_homo_seepage_SSR_concave/run.sh) | [case.toml](slope_stability_3D_homo_seepage_SSR_concave/case.toml) |
-
-## Notes
-
-### `run_2D_homo_SSR_capture`
-
-- Linear iterations total: MATLAB `0`, PETSc `4240`
-
-### `run_2D_sloan2013_seepage_capture`
-
-- Mesh: `4160` nodes, `7996` elements
-- PETSc MPI mode: `root_only`
-
-### `run_3D_hetero_SSR_capture`
-
-- Linear iterations total: MATLAB `2884`, PETSc `2657`
-
-### `run_3D_hetero_seepage_SSR_comsol_capture`
-
-- Linear iterations total: MATLAB `2781`, PETSc `5658`
-
-### `run_3D_hetero_seepage_capture`
-
-- Mesh: `69733` nodes, `48205` elements
-- PETSc MPI mode: `root_only`
+```bash
+PYTHONPATH=$PWD/src .venv/bin/python benchmarks/tools/generate_benchmark_readmes.py
+PYTHONPATH=$PWD/src .venv/bin/python benchmarks/tools/generate_benchmark_notebooks.py
+```

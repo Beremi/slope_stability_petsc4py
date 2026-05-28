@@ -1,0 +1,33 @@
+{
+  "date": "2026-05-24",
+  "case": "L1 unrefined omega_max=7e6",
+  "engine": "standalone_petsc_ssr",
+  "runs": [
+    {
+      "ranks": 32,
+      "wall_time": 146.688,
+      "continuation_wall_time": 145.275,
+      "total_newton_its": 77,
+      "total_linear_its": 719,
+      "lambda_last": 1.56974906,
+      "max_rank_rss_mib": 548.34375,
+      "avg_peak_rank_rss_mib": 508.59033203125,
+      "sum_peak_rank_rss_mib": 16274.890625,
+      "max_total_instant_rss_mib": 16240.5234375,
+      "avg_total_instant_rss_mib": 13809.347565406977
+    },
+    {
+      "ranks": 64,
+      "wall_time": 193.9,
+      "continuation_wall_time": 192.157,
+      "total_newton_its": 87,
+      "total_linear_its": 803,
+      "lambda_last": 1.56924295,
+      "max_rank_rss_mib": 408.39453125,
+      "avg_peak_rank_rss_mib": 366.38165283203125,
+      "sum_peak_rank_rss_mib": 23448.42578125,
+      "max_total_instant_rss_mib": 23271.02734375,
+      "avg_total_instant_rss_mib": 20667.920026041666
+    }
+  ]
+}

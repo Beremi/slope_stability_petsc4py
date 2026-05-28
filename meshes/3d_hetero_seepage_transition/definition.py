@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from slope_stability.assets.factories import build_problem_asset_3d, build_seepage_spec
+from petsc_ssr.assets.factories import build_problem_asset_3d, build_seepage_spec
 
 
 ASSET_DIR = Path(__file__).resolve().parent
