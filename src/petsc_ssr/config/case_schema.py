@@ -5,16 +5,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import os
 import tomllib
 
 from ..core.elements import validate_supported_elem_type
 from ..problem_assets import load_material_rows_for_asset
 from ..assets import load_problem_asset
+from .profiles import load_continuation_profile, load_newton_profile, load_seepage_profile, load_solver_profile
+from .validators import (
+    normalize_output_preset,
+    reject_profile_default_repeats,
+    reject_unknown_fields,
+    validate_case_metadata,
+)
 
 
 TomlValue = str | int | float | bool | list[Any] | dict[str, Any]
 ENGINE_ROOT = Path(__file__).resolve().parents[3]
-SOLVER_PROFILE_DIR = ENGINE_ROOT / "configs" / "solver_profiles"
+MODERN_MECHANICS_BACKEND = "petsc_ssr_full_c"
+MODERN_NODE_ORDERING = "native_dmplex"
+LEGACY_MECHANICS_BACKEND = "legacy_array"
+LEGACY_NODE_ORDERING = "block_metis"
 
 
 @dataclass(frozen=True)
@@ -35,8 +46,8 @@ class ProblemConfig:
 
 @dataclass(frozen=True)
 class ExecutionConfig:
-    mechanics_backend: str = "legacy_array"
-    node_ordering: str = "block_metis"
+    mechanics_backend: str = MODERN_MECHANICS_BACKEND
+    node_ordering: str = MODERN_NODE_ORDERING
     mpi_distribute_by_nodes: bool = True
     constitutive_mode: str = "overlap"
     tangent_kernel: str = "rows"
@@ -45,6 +56,9 @@ class ExecutionConfig:
 
 @dataclass(frozen=True)
 class NewtonConfig:
+    profile: str = ""
+    profile_description: str = ""
+    algorithm: str = ""
     it_max: int = 200
     it_damp_max: int = 10
     tol: float = 1e-4
@@ -62,9 +76,12 @@ class NewtonConfig:
 
 @dataclass(frozen=True)
 class ContinuationConfig:
+    profile: str = ""
+    profile_description: str = ""
+    algorithm: str = ""
     method: str = "indirect"
     predictor: str = "secant"
-    omega_step_controller: str = "legacy"
+    omega_step_controller: str = "classic"
     secant_correction_mode: str = "none"
     first_newton_warm_start_mode: str = "none"
     lambda_init: float = 1.0
@@ -99,7 +116,15 @@ class ContinuationConfig:
 
 @dataclass(frozen=True)
 class LinearSolverConfig:
+    profile: str = ""
+    profile_description: str = ""
+    resolved_world_size: int = 1
+    algorithm: str = ""
     solver_type: str = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
+    ksp_type: str = "fgmres"
+    norm_type: str = "unpreconditioned"
+    deflation: bool = True
+    deflation_solver: str | None = None
     tolerance: float = 1e-1
     max_iterations: int = 100
     deflation_basis_tolerance: float = 1e-3
@@ -114,6 +139,29 @@ class LinearSolverConfig:
     pmg_fine_hierarchy_mode: str = "default"
     pmg_shell_p2_active_ranks: int | None = None
     pmg_shell_p1_active_ranks: int | None = None
+    pmg_shell_p2_rank_policy: str | None = None
+    pmg_shell_p1_rank_policy: str | None = None
+    pmg_rank_policy: str | None = None
+    pmg_apply_backend: str | None = None
+    pmg_coarse_pc_type: str | None = None
+    pmg_coarse_lu_max_dofs: int | None = None
+    pmg_coarse_redundant_group_size: int | None = None
+    pmg_coarse_gamg_aggressive_square_graph: bool | None = None
+    pmg_coarse_telescope_active_ranks: int | None = None
+    pmg_coarse_telescope_subcomm_type: str | None = None
+    pmg_coarse_telescope_ksp_type: str | None = None
+    pmg_coarse_telescope_ksp_rtol: float | None = None
+    pmg_coarse_telescope_ksp_max_it: int | None = None
+    pmg_coarse_telescope_pc_type: str | None = None
+    pmg_p2_telescope_active_ranks: int | None = None
+    pmg_p2_telescope_subcomm_type: str | None = None
+    pmg_p2_telescope_ksp_type: str | None = None
+    pmg_p2_telescope_ksp_rtol: float | None = None
+    pmg_p2_telescope_ksp_max_it: int | None = None
+    pmg_p2_telescope_pc_type: str | None = None
+    pmg_smoother_ksp_type: str | None = None
+    pmg_smoother_pc_type: str | None = None
+    pmg_smoother_max_it: int | None = None
     pmg_shell_subcomm_type: str | None = None
     pmg_shell_fine_ksp_max_it: int | None = None
     pmg_shell_p2_ksp_max_it: int | None = None
@@ -161,11 +209,14 @@ class LinearSolverConfig:
     pc_bddc_check_level: int | None = None
     compiled_outer: bool = False
     recycle_preconditioner: bool = True
+    pmg_options_file: Path | None = None
     petsc_opt: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class SeepageConfig:
+    profile: str = ""
+    profile_description: str = ""
     linear_tolerance: float = 1e-10
     linear_max_iter: int = 500
     nonlinear_max_iter: int = 50
@@ -174,6 +225,7 @@ class SeepageConfig:
 
 @dataclass(frozen=True)
 class ExportConfig:
+    preset: str = "standard"
     write_custom_debug_bundle: bool = True
     write_history_json: bool = True
     write_solution_vtu: bool = True
@@ -220,6 +272,25 @@ class RunCaseConfig:
             )
         if str(self.newton.line_search).strip().lower() not in valid_line_search_modes:
             raise ValueError("The newton line_search must be alg5 or armijo_residual.")
+        analysis = self.problem.analysis.lower()
+        continuation_method = str(self.continuation.method).strip().lower().replace("_", "-")
+        continuation_algorithm = str(self.continuation.algorithm or continuation_method).strip().lower().replace("_", "-")
+        newton_algorithm = str(self.newton.algorithm).strip().lower().replace("_", "-")
+        if analysis != "seepage":
+            if continuation_method not in {"indirect", "direct"}:
+                raise ValueError("The continuation method must be indirect or direct.")
+            if continuation_algorithm not in {"indirect", "direct"}:
+                raise ValueError("The continuation algorithm must be indirect or direct.")
+            if continuation_algorithm != continuation_method:
+                raise ValueError("The continuation algorithm must match the continuation method for native runs.")
+            expected_newton = "indirect-ssr" if continuation_method == "indirect" else "fixed-load"
+            newton_algorithm = newton_algorithm or expected_newton
+            if newton_algorithm != expected_newton:
+                raise ValueError(
+                    f"The newton algorithm must be {expected_newton} for continuation method {continuation_method}."
+                )
+            if analysis == "ll" and continuation_method != "direct":
+                raise ValueError("Limit-load cases must use a direct continuation profile.")
         for field_name in ("init_newton_stopping_criterion", "fine_newton_stopping_criterion"):
             value = getattr(self.continuation, field_name)
             if value is not None and str(value).strip().lower() not in valid_stopping_criteria:
@@ -257,33 +328,6 @@ def _resolve_section_paths(config_path: Path, data: dict[str, Any]) -> dict[str,
     return resolved
 
 
-def _reject_unknown_fields(section_name: str, data: dict[str, Any], allowed: set[str], message: str) -> None:
-    unknown = sorted(set(data) - allowed)
-    if unknown:
-        raise ValueError(f"{section_name} fields {unknown} are not supported; {message}")
-
-
-def _load_solver_profile(name: str | None) -> dict[str, Any]:
-    if not name:
-        return {}
-    profile_path = SOLVER_PROFILE_DIR / f"{name}.toml"
-    if not profile_path.exists():
-        raise ValueError(f"Unknown solver profile {name!r}; expected {profile_path}.")
-    payload = tomllib.loads(profile_path.read_text(encoding="utf-8"))
-    allowed = {"linear_solver", "pmg", "petsc_options", "description"}
-    _reject_unknown_fields(
-        f"solver profile {name!r}",
-        payload,
-        allowed,
-        "solver profiles may only describe linear solver, PMG, and PETSc option defaults.",
-    )
-    data = dict(payload.get("linear_solver", {}))
-    data.update(dict(payload.get("pmg", {})))
-    if "petsc_options" in payload:
-        data["petsc_opt"] = [str(value) for value in payload["petsc_options"]]
-    return data
-
-
 def _normalize_modern_case_schema(data: dict[str, Any]) -> dict[str, Any]:
     """Convert the standalone engine case schema to the internal config model.
 
@@ -305,14 +349,13 @@ def _normalize_modern_case_schema(data: dict[str, Any]) -> dict[str, Any]:
         "linear",
         "seepage",
         "output",
-        "notebook",
         "geometry",
     }
-    _reject_unknown_fields(
+    reject_unknown_fields(
         "Top-level",
         data,
         allowed_top_level,
-        "active case files use case, mesh, physics, continuation, newton, linear, output, notebook, seepage, and geometry.",
+        "active case files use case, mesh, physics, continuation, newton, linear, output, seepage, and geometry. Notebook metadata belongs in benchmark sidecars.",
     )
 
     case = dict(data.get("case", {}))
@@ -323,21 +366,19 @@ def _normalize_modern_case_schema(data: dict[str, Any]) -> dict[str, Any]:
     continuation_raw = dict(data.get("continuation", {}))
     newton_raw = dict(data.get("newton", {}))
     linear_raw = dict(data.get("linear", {}))
+    seepage_raw = dict(data.get("seepage", {}))
     output_raw = dict(data.get("output", {}))
 
-    _reject_unknown_fields("[case]", case, {"name", "title", "tags"}, "case metadata must be compact and user-facing.")
-    _reject_unknown_fields("[mesh]", mesh, {"asset", "variant", "element", "refine_levels", "partitioner", "profile"}, "mesh setup belongs here.")
-    _reject_unknown_fields("[physics]", physics, {"mechanics", "seepage"}, "physics blocks must be named by physics family.")
-    _reject_unknown_fields("[physics.mechanics]", mechanics, {"model", "davis", "profile"}, "mechanics physics uses model, davis, and optional profile.")
-    _reject_unknown_fields("[physics.seepage]", seepage_physics, {"model"}, "seepage physics uses a model name only; asset files own coefficients and BCs.")
-    _reject_unknown_fields(
+    reject_unknown_fields("[case]", case, {"id", "name", "title", "tags"}, "case metadata must be compact and user-facing.")
+    reject_unknown_fields("[mesh]", mesh, {"asset", "variant", "element", "profile"}, "mesh setup selects an asset variant and element order; refinement and partitioning belong to suites or launch overrides.")
+    reject_unknown_fields("[physics]", physics, {"mechanics", "seepage"}, "physics blocks must be named by physics family.")
+    reject_unknown_fields("[physics.mechanics]", mechanics, {"model", "davis", "profile"}, "mechanics physics uses model, davis, and optional profile.")
+    reject_unknown_fields("[physics.seepage]", seepage_physics, {"model"}, "seepage physics uses a model name only; asset files own coefficients and BCs.")
+    reject_unknown_fields(
         "[continuation]",
         continuation_raw,
         {
             "profile",
-            "method",
-            "predictor",
-            "omega_step_controller",
             "omega_max",
             "lambda_init",
             "d_lambda_init",
@@ -347,35 +388,29 @@ def _normalize_modern_case_schema(data: dict[str, Any]) -> dict[str, Any]:
             "d_t_min",
             "d_omega_ini_scale",
             "step_max",
-            "init_newton_stopping_criterion",
-            "init_newton_stopping_tol",
         },
-        "continuation blocks should only override mathematical continuation controls.",
+        "continuation algorithm selectors and controller policy belong in continuation profiles; cases may only set mathematical load/cap controls.",
     )
-    _reject_unknown_fields(
+    reject_unknown_fields(
         "[newton]",
         newton_raw,
-        {"profile", "it_max", "it_damp_max", "tol", "r_min", "stopping_criterion", "stopping_tol", "line_search"},
-        "Newton blocks should only override nonlinear algorithm controls.",
+        {"profile"},
+        "Newton iteration, tolerance, algorithm, damping, and line-search policy belong in Newton profiles.",
     )
-    _reject_unknown_fields(
+    reject_unknown_fields(
         "[linear]",
         linear_raw,
-        {
-            "profile",
-            "tolerance",
-            "max_iterations",
-            "deflation_solver",
-            "pmg_shell_p2_active_ranks",
-            "pmg_shell_p1_active_ranks",
-            "pmg_shell_subcomm_type",
-            "pmg_shell_fine_ksp_max_it",
-            "pmg_shell_p2_ksp_max_it",
-            "petsc_opt",
-        },
-        "linear solver details should come from solver profiles with only narrow case overrides.",
+        {"profile"},
+        "linear solver details belong in solver profiles; use CLI/debug overrides for one-off experiments.",
     )
-    _reject_unknown_fields("[output]", output_raw, {"solution", "history"}, "output only declares requested artifact families.")
+    reject_unknown_fields(
+        "[seepage]",
+        seepage_raw,
+        {"profile"},
+        "seepage runtime policy belongs in named seepage profiles; seepage physics belongs in meshes/<asset>/definition.py.",
+    )
+    reject_unknown_fields("[output]", output_raw, {"preset"}, "output uses named presets; generated artifact paths and raw artifact arrays are not case inputs.")
+    validate_case_metadata(case, mesh=mesh, physics=physics)
 
     tags = {str(tag).strip().lower() for tag in case.get("tags", [])}
     mechanics_model = str(mechanics.get("model", "")).strip().lower()
@@ -386,26 +421,47 @@ def _normalize_modern_case_schema(data: dict[str, Any]) -> dict[str, Any]:
     else:
         analysis = "ssr"
 
-    continuation_profile = str(continuation_raw.pop("profile", "")).strip().lower()
-    if "method" not in continuation_raw and continuation_profile:
-        continuation_raw["method"] = "direct" if continuation_profile.startswith("direct") else "indirect"
-    newton_raw.pop("profile", None)
+    default_continuation_profile = (
+        "direct-limit-load" if analysis == "ll" else ("indirect-classic" if analysis == "ssr" else "")
+    )
+    continuation_profile = str(continuation_raw.pop("profile", default_continuation_profile)).strip()
+    if continuation_profile:
+        continuation_data = load_continuation_profile(continuation_profile).data
+        reject_profile_default_repeats("[continuation]", continuation_raw, continuation_data)
+        continuation_data.update(continuation_raw)
+    else:
+        if continuation_raw:
+            raise ValueError("[continuation] controls require an explicit profile.")
+        continuation_data = {}
 
-    linear_profile = str(linear_raw.pop("profile", "baseline-pmg-deflated")).strip()
-    linear_data = _load_solver_profile(linear_profile)
+    default_newton_profile = (
+        "limit-load-regularized" if analysis == "ll" else ("indirect-regularized" if analysis == "ssr" else "")
+    )
+    newton_profile = str(newton_raw.pop("profile", default_newton_profile)).strip()
+    if newton_profile:
+        newton_data = load_newton_profile(newton_profile).data
+        reject_profile_default_repeats("[newton]", newton_raw, newton_data)
+        newton_data.update(newton_raw)
+    else:
+        if newton_raw:
+            raise ValueError("[newton] controls require an explicit profile.")
+        newton_data = {}
+
+    linear_profile = str(linear_raw.pop("profile", "pmg-deflated-baseline")).strip()
+    linear_data = load_solver_profile(linear_profile).data
     linear_data.update(linear_raw)
 
-    solution_outputs = {str(item).strip().lower() for item in output_raw.get("solution", [])}
-    history_outputs = {str(item).strip().lower() for item in output_raw.get("history", [])}
+    output_preset = normalize_output_preset(output_raw.get("preset", "standard"))
+    write_outputs = output_preset != "none"
 
     normalized: dict[str, Any] = {
         "benchmark": {
-            "title": str(case.get("title", case.get("name", "case"))),
+            "title": str(case.get("title", case.get("id", case.get("name", "case")))),
             "comparison_kind": "continuation" if analysis in {"ssr", "ll"} else "seepage",
             "suite": False,
         },
         "problem": {
-            "name": str(case.get("name", "case")),
+            "name": str(case.get("id", case.get("name", "case"))),
             "analysis": analysis,
             "asset": str(mesh.get("asset", "")),
             "mesh_variant": None if mesh.get("variant") is None else str(mesh.get("variant")),
@@ -414,31 +470,51 @@ def _normalize_modern_case_schema(data: dict[str, Any]) -> dict[str, Any]:
             "davis_type": str(mechanics.get("davis", "B")),
             "seepage_coupled": bool(mechanics and seepage_physics),
         },
-        "continuation": continuation_raw,
-        "newton": newton_raw,
+        "continuation": continuation_data,
+        "newton": newton_data,
         "linear_solver": linear_data,
         "export": {
-            "write_solution_vtu": not solution_outputs or "vtu" in solution_outputs,
-            "write_history_json": not history_outputs or "summary_json" in history_outputs or "history_json" in history_outputs,
+            "preset": output_preset,
+            "write_solution_vtu": write_outputs,
+            "write_history_json": write_outputs,
             "write_custom_debug_bundle": False,
         },
     }
-    if "refine_levels" in mesh:
-        normalized["problem"]["refine_levels"] = int(mesh["refine_levels"])
-    if "partitioner" in mesh:
-        normalized["problem"]["partitioner"] = str(mesh["partitioner"])
-    if data.get("notebook") is not None:
-        normalized["notebook"] = data["notebook"]
     if data.get("seepage") is not None:
-        normalized["seepage"] = data["seepage"]
+        normalized["seepage"] = seepage_raw
     if data.get("geometry") is not None:
         normalized["geometry"] = data["geometry"]
     return normalized
 
 
+def _uses_modern_case_schema(data: dict[str, Any]) -> bool:
+    return bool({"case", "mesh", "physics", "linear", "output"} & set(data))
+
+
+def _legacy_case_schema_enabled() -> bool:
+    return os.environ.get("PETSC_SSR_ALLOW_LEGACY_CASE_SCHEMA", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _execution_defaults(*, modern_schema: bool) -> ExecutionConfig:
+    if modern_schema:
+        return ExecutionConfig()
+    return ExecutionConfig(
+        mechanics_backend=LEGACY_MECHANICS_BACKEND,
+        node_ordering=LEGACY_NODE_ORDERING,
+    )
+
+
 def load_run_case_config(path: str | Path) -> RunCaseConfig:
     config_path = Path(path).resolve()
-    data = _normalize_modern_case_schema(tomllib.loads(config_path.read_text(encoding="utf-8")))
+    raw_data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    modern_schema = _uses_modern_case_schema(raw_data)
+    if not modern_schema and not _legacy_case_schema_enabled():
+        raise ValueError(
+            "Legacy/internal case schema is not part of the public benchmark model; "
+            "use [case], [mesh], [physics], [continuation], [newton], [linear], [seepage], and [output]. "
+            "Set PETSC_SSR_ALLOW_LEGACY_CASE_SCHEMA=1 only for explicit migration/debug compatibility."
+        )
+    data = _normalize_modern_case_schema(raw_data)
 
     allowed_top_level = {
         "benchmark",
@@ -454,7 +530,7 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         "materials",
         "case_data",
     }
-    _reject_unknown_fields(
+    reject_unknown_fields(
         "Top-level",
         data,
         allowed_top_level,
@@ -469,7 +545,8 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
     seepage_data = dict(data.get("seepage", {}))
     export_data = dict(data.get("export", {}))
     geometry_raw = dict(data.get("geometry", {}))
-    _reject_unknown_fields(
+    execution_defaults = _execution_defaults(modern_schema=modern_schema)
+    reject_unknown_fields(
         "[geometry]",
         geometry_raw,
         {"quadrature_rule"},
@@ -488,21 +565,23 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
     forbidden_seepage = sorted(forbidden_seepage_fields & set(seepage_data))
     if forbidden_seepage:
         raise ValueError(f"[seepage] fields {forbidden_seepage} are asset-owned; use meshes/<asset>/definition.py.")
-    _reject_unknown_fields(
+    reject_unknown_fields(
         "[seepage]",
         seepage_data,
-        {"linear_tolerance", "linear_max_iter", "nonlinear_max_iter"},
-        "only numerical seepage controls are allowed here; seepage physics belongs in meshes/<asset>/definition.py.",
+        {"profile"},
+        "seepage runtime policy belongs in named seepage profiles; seepage physics belongs in meshes/<asset>/definition.py.",
     )
 
     asset_name = str(problem_data.get("asset", "")).strip()
     if not asset_name:
         raise ValueError("[problem].asset must be set.")
     asset = load_problem_asset(asset_name)
+    analysis = str(problem_data.get("analysis", "ssr")).strip().lower()
+    seepage_enabled = analysis == "seepage" or bool(problem_data.get("seepage_coupled", False)) or bool(seepage_data)
     problem = ProblemConfig(
         name=str(problem_data.get("name", "case")),
         case=str(problem_data.get("case", "")),
-        analysis=str(problem_data.get("analysis", "ssr")),
+        analysis=analysis,
         dimension=int(asset.dimension),
         elem_type=str(problem_data.get("elem_type", "P2")),
         davis_type=str(problem_data.get("davis_type", "B")),
@@ -514,17 +593,20 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         seepage_coupled=bool(problem_data.get("seepage_coupled", False)),
     )
     execution = ExecutionConfig(
-        mechanics_backend=str(execution_data.get("mechanics_backend", "legacy_array")),
-        node_ordering=str(execution_data.get("node_ordering", "block_metis")),
-        mpi_distribute_by_nodes=bool(execution_data.get("mpi_distribute_by_nodes", True)),
-        constitutive_mode=str(execution_data.get("constitutive_mode", "overlap")),
-        tangent_kernel=str(execution_data.get("tangent_kernel", "rows")),
-        store_step_u=bool(execution_data.get("store_step_u", True)),
+        mechanics_backend=str(execution_data.get("mechanics_backend", execution_defaults.mechanics_backend)),
+        node_ordering=str(execution_data.get("node_ordering", execution_defaults.node_ordering)),
+        mpi_distribute_by_nodes=bool(execution_data.get("mpi_distribute_by_nodes", execution_defaults.mpi_distribute_by_nodes)),
+        constitutive_mode=str(execution_data.get("constitutive_mode", execution_defaults.constitutive_mode)),
+        tangent_kernel=str(execution_data.get("tangent_kernel", execution_defaults.tangent_kernel)),
+        store_step_u=bool(execution_data.get("store_step_u", execution_defaults.store_step_u)),
     )
     continuation = ContinuationConfig(
+        profile=str(continuation_data.get("profile", "")),
+        profile_description=str(continuation_data.get("profile_description", "")),
+        algorithm=str(continuation_data.get("algorithm", continuation_data.get("method", ""))),
         method=str(continuation_data.get("method", "indirect")),
         predictor=str(continuation_data.get("predictor", "secant")),
-        omega_step_controller=str(continuation_data.get("omega_step_controller", "legacy")),
+        omega_step_controller=str(continuation_data.get("omega_step_controller", "classic")),
         secant_correction_mode=str(continuation_data.get("secant_correction_mode", "none")),
         first_newton_warm_start_mode=str(continuation_data.get("first_newton_warm_start_mode", "none")),
         lambda_init=float(continuation_data.get("lambda_init", 1.0)),
@@ -607,6 +689,9 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         fine_switch_distance_factor=float(continuation_data.get("fine_switch_distance_factor", 2.0)),
     )
     newton = NewtonConfig(
+        profile=str(newton_data.get("profile", "")),
+        profile_description=str(newton_data.get("profile_description", "")),
+        algorithm=str(newton_data.get("algorithm", "")),
         it_max=int(newton_data.get("it_max", 200)),
         it_damp_max=int(newton_data.get("it_damp_max", 10)),
         tol=float(newton_data.get("tol", 1e-4)),
@@ -626,7 +711,17 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         armijo_fallback_to_alg5=bool(newton_data.get("armijo_fallback_to_alg5", True)),
     )
     linear_solver = LinearSolverConfig(
+        profile=str(linear_data.get("profile", "")),
+        profile_description=str(linear_data.get("profile_description", "")),
+        resolved_world_size=int(linear_data.get("resolved_world_size", 1)),
+        algorithm=str(linear_data.get("algorithm", "")),
         solver_type=str(linear_data.get("solver_type", "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE")),
+        ksp_type=str(linear_data.get("ksp_type", "fgmres")),
+        norm_type=str(linear_data.get("norm_type", "unpreconditioned")),
+        deflation=bool(linear_data.get("deflation", True)),
+        deflation_solver=(
+            None if linear_data.get("deflation_solver") is None else str(linear_data.get("deflation_solver"))
+        ),
         tolerance=float(linear_data.get("tolerance", 1e-1)),
         max_iterations=int(linear_data.get("max_iterations", 100)),
         deflation_basis_tolerance=float(linear_data.get("deflation_basis_tolerance", 1e-3)),
@@ -650,6 +745,103 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         ),
         pmg_shell_p1_active_ranks=(
             None if linear_data.get("pmg_shell_p1_active_ranks") is None else int(linear_data.get("pmg_shell_p1_active_ranks"))
+        ),
+        pmg_shell_p2_rank_policy=(
+            None if linear_data.get("pmg_shell_p2_rank_policy") is None else str(linear_data.get("pmg_shell_p2_rank_policy"))
+        ),
+        pmg_shell_p1_rank_policy=(
+            None if linear_data.get("pmg_shell_p1_rank_policy") is None else str(linear_data.get("pmg_shell_p1_rank_policy"))
+        ),
+        pmg_rank_policy=(
+            None if linear_data.get("pmg_rank_policy") is None else str(linear_data.get("pmg_rank_policy"))
+        ),
+        pmg_apply_backend=(
+            None if linear_data.get("pmg_apply_backend") is None else str(linear_data.get("pmg_apply_backend"))
+        ),
+        pmg_coarse_pc_type=(
+            None if linear_data.get("pmg_coarse_pc_type") is None else str(linear_data.get("pmg_coarse_pc_type"))
+        ),
+        pmg_coarse_lu_max_dofs=(
+            None if linear_data.get("pmg_coarse_lu_max_dofs") is None else int(linear_data.get("pmg_coarse_lu_max_dofs"))
+        ),
+        pmg_coarse_redundant_group_size=(
+            None
+            if linear_data.get("pmg_coarse_redundant_group_size") is None
+            else int(linear_data.get("pmg_coarse_redundant_group_size"))
+        ),
+        pmg_coarse_gamg_aggressive_square_graph=(
+            None
+            if linear_data.get("pmg_coarse_gamg_aggressive_square_graph") is None
+            else bool(linear_data.get("pmg_coarse_gamg_aggressive_square_graph"))
+        ),
+        pmg_coarse_telescope_active_ranks=(
+            None
+            if linear_data.get("pmg_coarse_telescope_active_ranks") is None
+            else int(linear_data.get("pmg_coarse_telescope_active_ranks"))
+        ),
+        pmg_coarse_telescope_subcomm_type=(
+            None
+            if linear_data.get("pmg_coarse_telescope_subcomm_type") is None
+            else str(linear_data.get("pmg_coarse_telescope_subcomm_type"))
+        ),
+        pmg_coarse_telescope_ksp_type=(
+            None
+            if linear_data.get("pmg_coarse_telescope_ksp_type") is None
+            else str(linear_data.get("pmg_coarse_telescope_ksp_type"))
+        ),
+        pmg_coarse_telescope_ksp_rtol=(
+            None
+            if linear_data.get("pmg_coarse_telescope_ksp_rtol") is None
+            else float(linear_data.get("pmg_coarse_telescope_ksp_rtol"))
+        ),
+        pmg_coarse_telescope_ksp_max_it=(
+            None
+            if linear_data.get("pmg_coarse_telescope_ksp_max_it") is None
+            else int(linear_data.get("pmg_coarse_telescope_ksp_max_it"))
+        ),
+        pmg_coarse_telescope_pc_type=(
+            None
+            if linear_data.get("pmg_coarse_telescope_pc_type") is None
+            else str(linear_data.get("pmg_coarse_telescope_pc_type"))
+        ),
+        pmg_p2_telescope_active_ranks=(
+            None
+            if linear_data.get("pmg_p2_telescope_active_ranks") is None
+            else int(linear_data.get("pmg_p2_telescope_active_ranks"))
+        ),
+        pmg_p2_telescope_subcomm_type=(
+            None
+            if linear_data.get("pmg_p2_telescope_subcomm_type") is None
+            else str(linear_data.get("pmg_p2_telescope_subcomm_type"))
+        ),
+        pmg_p2_telescope_ksp_type=(
+            None
+            if linear_data.get("pmg_p2_telescope_ksp_type") is None
+            else str(linear_data.get("pmg_p2_telescope_ksp_type"))
+        ),
+        pmg_p2_telescope_ksp_rtol=(
+            None
+            if linear_data.get("pmg_p2_telescope_ksp_rtol") is None
+            else float(linear_data.get("pmg_p2_telescope_ksp_rtol"))
+        ),
+        pmg_p2_telescope_ksp_max_it=(
+            None
+            if linear_data.get("pmg_p2_telescope_ksp_max_it") is None
+            else int(linear_data.get("pmg_p2_telescope_ksp_max_it"))
+        ),
+        pmg_p2_telescope_pc_type=(
+            None
+            if linear_data.get("pmg_p2_telescope_pc_type") is None
+            else str(linear_data.get("pmg_p2_telescope_pc_type"))
+        ),
+        pmg_smoother_ksp_type=(
+            None if linear_data.get("pmg_smoother_ksp_type") is None else str(linear_data.get("pmg_smoother_ksp_type"))
+        ),
+        pmg_smoother_pc_type=(
+            None if linear_data.get("pmg_smoother_pc_type") is None else str(linear_data.get("pmg_smoother_pc_type"))
+        ),
+        pmg_smoother_max_it=(
+            None if linear_data.get("pmg_smoother_max_it") is None else int(linear_data.get("pmg_smoother_max_it"))
         ),
         pmg_shell_subcomm_type=(
             None if linear_data.get("pmg_shell_subcomm_type") is None else str(linear_data.get("pmg_shell_subcomm_type"))
@@ -822,22 +1014,35 @@ def load_run_case_config(path: str | Path) -> RunCaseConfig:
         ),
         compiled_outer=bool(linear_data.get("compiled_outer", False)),
         recycle_preconditioner=bool(linear_data.get("recycle_preconditioner", True)),
+        pmg_options_file=(
+            None if linear_data.get("pmg_options_file") is None else Path(linear_data.get("pmg_options_file"))
+        ),
         petsc_opt=[str(value) for value in list(linear_data.get("petsc_opt", []))],
     )
+    seepage_profile = str(seepage_data.pop("profile", "darcy-tight" if seepage_enabled else "")).strip()
+    if seepage_profile:
+        seepage_profile_data = load_seepage_profile(seepage_profile).data
+        reject_profile_default_repeats("[seepage]", seepage_data, seepage_profile_data)
+        seepage_profile_data.update(seepage_data)
+    else:
+        seepage_profile_data = dict(seepage_data)
     seepage = SeepageConfig(
-        linear_tolerance=float(seepage_data.get("linear_tolerance", 1e-10)),
-        linear_max_iter=int(seepage_data.get("linear_max_iter", 500)),
-        nonlinear_max_iter=int(seepage_data.get("nonlinear_max_iter", 50)),
+        profile=str(seepage_profile_data.get("profile", seepage_profile)),
+        profile_description=str(seepage_profile_data.get("profile_description", "")),
+        linear_tolerance=float(seepage_profile_data.get("linear_tolerance", 1e-10)),
+        linear_max_iter=int(seepage_profile_data.get("linear_max_iter", 500)),
+        nonlinear_max_iter=int(seepage_profile_data.get("nonlinear_max_iter", 50)),
         extra=_resolve_section_paths(
             config_path,
             {
                 k: v
-                for k, v in seepage_data.items()
-                if k not in {"linear_tolerance", "linear_max_iter", "nonlinear_max_iter"}
+                for k, v in seepage_profile_data.items()
+                if k not in {"profile", "profile_description", "linear_tolerance", "linear_max_iter", "nonlinear_max_iter"}
             },
         ),
     )
     export = ExportConfig(
+        preset=normalize_output_preset(export_data.get("preset", "standard")),
         write_custom_debug_bundle=bool(export_data.get("write_custom_debug_bundle", True)),
         write_history_json=bool(export_data.get("write_history_json", True)),
         write_solution_vtu=bool(export_data.get("write_solution_vtu", True)),

@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-box-mesh", action="store_true")
     parser.add_argument("--omega-max", type=float, default=7.0e6)
     parser.add_argument("--analysis", choices=["ssr", "ll"], default="ssr")
-    parser.add_argument("--continuation-method", choices=["indirect", "direct"], default="indirect")
+    parser.add_argument("--continuation-method", choices=["indirect", "direct"], default=None)
     parser.add_argument("--lambda-ell", type=float, default=1.0)
     parser.add_argument("--d-t-min", type=float, default=1.0e-3)
     parser.add_argument("--d-omega-ini-scale", type=float, default=0.2)
@@ -68,7 +68,10 @@ def problem_from_args(args: argparse.Namespace) -> ProblemSpec:
 def options_from_args(args: argparse.Namespace) -> SsrOptions:
     opts = SsrOptions.current_baseline(omega_max=args.omega_max)
     opts.analysis = args.analysis
-    opts.continuation_method = args.continuation_method
+    continuation_method = args.continuation_method or ("direct" if args.analysis == "ll" else "indirect")
+    opts.continuation_method = continuation_method
+    opts.continuation_algorithm = continuation_method
+    opts.newton_algorithm = "fixed-load" if continuation_method == "direct" else "indirect-ssr"
     opts.lambda_ell = args.lambda_ell
     opts.d_t_min = args.d_t_min
     opts.d_omega_ini_scale = args.d_omega_ini_scale

@@ -13,7 +13,7 @@ This 2D case runs a config-driven seepage analysis using asset `2d_sloan2013` an
 - Case config: [`case.toml`](case.toml)
 - Asset: `2d_sloan2013`
 - Mesh variant: `default`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `seepage`
 - Element order: `P1`
 

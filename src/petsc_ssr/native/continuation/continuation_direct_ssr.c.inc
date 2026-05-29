@@ -2,9 +2,10 @@
    Direct SSR continuation.
 
    This path advances lambda directly and solves one fixed-lambda nonlinear
-   problem per accepted point. It deliberately reuses FixedLambdaNewtonSolve so
-   DMPlex assembly, regularized operators, PMG, deflation, and damping stay on
-   the same maintained C path as the indirect initialization solves.
+   problem per accepted point. It deliberately resolves the fixed-load Newton
+   operation through the native registry so DMPlex assembly, regularized
+   operators, PMG, deflation, and damping stay on the same maintained C path as
+   the indirect initialization solves.
 */
 static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver, Mat Areg, Mat Kelastic, Mat Ktangent, Vec f_ext, PetscReal rhs_norm, Vec u_out, SSRStats *stats)
 {
@@ -15,20 +16,23 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
   PetscReal      lambda_prev = 0.0, lambda_cur = 0.0, lambda_trial = 0.0, omega_prev = 0.0, omega_cur = 0.0, omega_trial = 0.0;
   PetscReal      d_lambda = app->d_lambda_init, d_omega_ref = 0.0;
   PetscInt       init_basis_base, attempts = 0, step = 0, lambda_reductions = 0;
-  PetscLogDouble t_start, t_end;
+  SsrProfileTimer run_timer;
+  PetscLogDouble wall_time = 0.0;
   NewtonStats    nstats;
   SSRCurveRow    row;
+  const SsrNativeNewtonOps *newton_ops = NULL;
 
   PetscFunctionBeginUser;
   PetscCall(PetscMemzero(stats, sizeof(*stats)));
   PetscCall(PetscStrncpy(stats->stop_reason, "running", sizeof(stats->stop_reason)));
+  PetscCall(SsrNativeNewtonRegistryFind(app->newton_algorithm, &newton_ops));
   PetscCallMPI(MPI_Comm_rank(comm, &rank));
   if (rank == 0) {
     csv = fopen(app->curve_csv, "w");
     PetscCheck(csv, PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN, "Failed to open continuation CSV %s", app->curve_csv);
   }
   PetscCall(CurveWriteHeader(csv));
-  PetscCall(PetscTime(&t_start));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_CONTINUATION_RUN, dm, f_ext, &run_timer);
   init_basis_base = solver->n_raw_basis;
   PetscCall(VecDuplicate(f_ext, &u_prev));
   PetscCall(VecDuplicate(f_ext, &u_cur));
@@ -37,7 +41,14 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
   lambda_cur = app->lambda_init;
   PetscCall(VecZeroEntries(u_prev));
   PetscCall(PetscPrintf(comm, "SSR_DIRECT_INIT phase=seed lambda=%.8e d_lambda=%.8e basis_snapshot=%" PetscInt_FMT "\n", (double)lambda_cur, (double)d_lambda, init_basis_base));
-  PetscCall(FixedLambdaNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_prev, lambda_cur, rhs_norm, app->newton_stopping_criterion, app->newton_stopping_tol, &nstats));
+  {
+    SsrNativeNewtonInput ninput = {0};
+
+    ninput.dm = dm; ninput.actx = actx; ninput.app = app; ninput.solver = solver; ninput.Areg = Areg; ninput.Kelastic = Kelastic; ninput.Ktangent = Ktangent;
+    ninput.f_ext = f_ext; ninput.u = u_prev; ninput.lambda = lambda_cur; ninput.rhs_norm = rhs_norm;
+    ninput.criterion = app->newton_stopping_criterion; ninput.stop_tol = app->newton_stopping_tol;
+    PetscCall(newton_ops->solve(&ninput, &nstats));
+  }
   attempts++;
   PetscCheck(nstats.converged, comm, PETSC_ERR_NOT_CONVERGED, "Direct SSR seed solve failed at lambda %.8e", (double)lambda_cur);
   PetscCall(DotOmega(f_ext, u_prev, &omega_cur));
@@ -48,12 +59,7 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
   PetscCall(PetscPrintf(comm,
                         "SSR_STEP step=%" PetscInt_FMT " phase=direct_init omega=%.8e lambda=%.8e accepted=true newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT "\n",
                         step, (double)omega_cur, (double)lambda_cur, nstats.newton_its, nstats.total_linear_its));
-  stats->accepted_steps++;
-  stats->total_newton_its += nstats.newton_its;
-  stats->total_linear_its += nstats.total_linear_its;
-  stats->total_line_search_its += nstats.line_search_its;
-  stats->final_rel            = nstats.final_rel;
-  stats->final_rel_correction = nstats.final_rel_correction;
+  PetscCall(SsrStatsAcceptContinuationStep(stats, &nstats));
   step++;
 
   while (PETSC_TRUE) {
@@ -62,7 +68,14 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
     lambda_trial = lambda_cur + d_lambda;
     PetscCall(VecCopy(u_prev, u_cur));
     PetscCall(PetscPrintf(comm, "SSR_DIRECT_INIT phase=advance lambda=%.8e d_lambda=%.8e basis_snapshot=%" PetscInt_FMT "\n", (double)lambda_trial, (double)d_lambda, basis_snapshot));
-    PetscCall(FixedLambdaNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_cur, lambda_trial, rhs_norm, app->newton_stopping_criterion, app->newton_stopping_tol, &nstats));
+    {
+      SsrNativeNewtonInput ninput = {0};
+
+      ninput.dm = dm; ninput.actx = actx; ninput.app = app; ninput.solver = solver; ninput.Areg = Areg; ninput.Kelastic = Kelastic; ninput.Ktangent = Ktangent;
+      ninput.f_ext = f_ext; ninput.u = u_cur; ninput.lambda = lambda_trial; ninput.rhs_norm = rhs_norm;
+      ninput.criterion = app->newton_stopping_criterion; ninput.stop_tol = app->newton_stopping_tol;
+      PetscCall(newton_ops->solve(&ninput, &nstats));
+    }
     attempts++;
     if (!nstats.converged) {
       PetscCall(LinearSolverTruncateRawBasis(solver, basis_snapshot));
@@ -94,12 +107,7 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
   PetscCall(PetscPrintf(comm,
                         "SSR_STEP step=%" PetscInt_FMT " phase=direct_init omega=%.8e lambda=%.8e d_omega=%.8e d_lambda=%.8e accepted=true newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT "\n",
                         step, (double)omega_cur, (double)lambda_cur, (double)(omega_cur - omega_prev), (double)(lambda_cur - lambda_prev), nstats.newton_its, nstats.total_linear_its));
-  stats->accepted_steps++;
-  stats->total_newton_its += nstats.newton_its;
-  stats->total_linear_its += nstats.total_linear_its;
-  stats->total_line_search_its += nstats.line_search_its;
-  stats->final_rel            = nstats.final_rel;
-  stats->final_rel_correction = nstats.final_rel_correction;
+  PetscCall(SsrStatsAcceptContinuationStep(stats, &nstats));
   step++;
   d_omega_ref = omega_cur - omega_prev;
   PetscCall(VecCopy(u_cur, u_trial));
@@ -120,7 +128,14 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
     PetscCall(PetscPrintf(comm,
                           "SSR_ATTEMPT step=%" PetscInt_FMT " method=direct lambda_trial=%.8e d_lambda=%.8e basis_snapshot=%" PetscInt_FMT "\n",
                           step, (double)lambda_trial, (double)d_lambda, basis_snapshot));
-    PetscCall(FixedLambdaNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_trial, lambda_trial, rhs_norm, app->newton_stopping_criterion, app->newton_stopping_tol, &nstats));
+    {
+      SsrNativeNewtonInput ninput = {0};
+
+      ninput.dm = dm; ninput.actx = actx; ninput.app = app; ninput.solver = solver; ninput.Areg = Areg; ninput.Kelastic = Kelastic; ninput.Ktangent = Ktangent;
+      ninput.f_ext = f_ext; ninput.u = u_trial; ninput.lambda = lambda_trial; ninput.rhs_norm = rhs_norm;
+      ninput.criterion = app->newton_stopping_criterion; ninput.stop_tol = app->newton_stopping_tol;
+      PetscCall(newton_ops->solve(&ninput, &nstats));
+    }
     attempts++;
     PetscCall(LinearSolverTruncateRawBasis(solver, basis_snapshot));
     if (!nstats.converged) {
@@ -158,12 +173,7 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
                           "SSR_STEP step=%" PetscInt_FMT " phase=direct omega=%.8e lambda=%.8e d_omega=%.8e d_lambda=%.8e accepted=true newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT " rel_res=%.6e\n",
                           step, (double)omega_cur, (double)lambda_cur, (double)(omega_cur - omega_prev), (double)(lambda_cur - lambda_prev),
                           nstats.newton_its, nstats.total_linear_its, (double)nstats.final_rel));
-    stats->accepted_steps++;
-    stats->total_newton_its += nstats.newton_its;
-    stats->total_linear_its += nstats.total_linear_its;
-    stats->total_line_search_its += nstats.line_search_its;
-    stats->final_rel            = nstats.final_rel;
-    stats->final_rel_correction = nstats.final_rel_correction;
+    PetscCall(SsrStatsAcceptContinuationStep(stats, &nstats));
     step++;
 
     if (d_omega_trial > 1.5 * d_omega_ref) d_lambda *= 0.5;
@@ -184,8 +194,8 @@ static PetscErrorCode SSRDirectContinuationSolve(DM dm, AssemblyCtx *actx, AppCt
   stats->omega_last  = omega_cur;
   stats->lambda_last = lambda_cur;
   if (u_out) PetscCall(VecCopy(u_cur, u_out));
-  PetscCall(PetscTime(&t_end));
-  stats->wall_time = t_end - t_start;
+  SSR_PROFILE_TIMER_END(NULL, &run_timer, &wall_time);
+  stats->wall_time = wall_time;
   PetscCall(PetscPrintf(comm,
                         "SSR_RESULT method=direct omega_last=%.8e lambda_last=%.8e accepted_steps=%" PetscInt_FMT " total_newton_iterations=%" PetscInt_FMT " total_linear_iterations=%" PetscInt_FMT " total_line_search_iterations=%" PetscInt_FMT " wall_time=%.6g stop_reason=%s curve_csv=%s\n",
                         (double)stats->omega_last, (double)stats->lambda_last, stats->accepted_steps, stats->total_newton_its,

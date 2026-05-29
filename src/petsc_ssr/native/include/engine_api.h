@@ -3,6 +3,16 @@
 
 #include <petscsys.h>
 
+/*
+   Cython debug-loop compatibility bridge.
+
+   The maintained benchmark path enters the native engine through
+   P4IndirectSSRRunOptionsString(), while the target public native contracts live
+   in petsc_ssr_algorithms.h, petsc_ssr_profile.h, and petsc_ssr_stats.h.  Keep
+   the fine-grained P4SsrEngine* calls available for replay/debug compatibility,
+   but do not treat them as the public case or solver API.
+*/
+
 typedef struct P4SsrEngine P4SsrEngine;
 
 typedef struct {

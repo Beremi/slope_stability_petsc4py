@@ -13,7 +13,7 @@ This 3D case runs a config-driven shear strength reduction (SSR) analysis using 
 - Case config: [`case.toml`](case.toml)
 - Asset: `3d_hetero_seepage_transition`
 - Mesh variant: `transition_default`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `ssr`
 - Element order: `P2`
 

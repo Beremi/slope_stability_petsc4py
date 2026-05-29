@@ -162,11 +162,10 @@ def _prune_artifact_dir(out_dir: Path) -> None:
 
 def _prepare_case(case_toml: Path, *, run_label: str, execution_profile: str, mpi_ranks: int | None) -> SnapshotSummary:
     sections = nb.load_case_sections(case_toml)
-    materials = nb.load_case_materials(case_toml)
     execution = nb.ensure_notebook_artifacts(
         case_toml=case_toml,
         sections=sections,
-        materials=materials,
+        materials=None,
         run_label=run_label,
         run_mode="run",
         execution_profile=execution_profile,

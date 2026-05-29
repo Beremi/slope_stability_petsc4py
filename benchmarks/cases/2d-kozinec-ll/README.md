@@ -13,7 +13,7 @@ This 2D case runs a config-driven limit-load (LL) analysis using asset `2d_kozin
 - Case config: [`case.toml`](case.toml)
 - Asset: `2d_kozinec`
 - Mesh variant: `default`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `ll`
 - Element order: `P2`
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 from pathlib import Path
 
 from petsc_ssr.hydro import (
@@ -12,10 +11,7 @@ from petsc_ssr.hydro import (
     print_hydro_result,
     solve_comsol_seepage,
 )
-
-
-def _quote_tokens(tokens: list[str]) -> str:
-    return " ".join(shlex.quote(str(token)) for token in tokens)
+from petsc_ssr.runtime.options import quote_option_tokens
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,7 +79,7 @@ def run_petsc_backend(args: argparse.Namespace) -> int:
     if args.log_view:
         tokens.append("-hydro_log_view")
     tokens.extend(args.petsc_opt)
-    _core.run_hydro_options(_quote_tokens(tokens))
+    _core.run_hydro_options(quote_option_tokens(tokens))
     comm.Barrier()
     return 0
 

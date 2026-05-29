@@ -132,18 +132,22 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
 {
   Vec            residual = NULL, residual_eps = NULL, G = NULL, rhsW = NULL, rhsV = NULL, dW = NULL, dV = NULL, dU = NULL, u_trial = NULL, r_trial = NULL;
   PetscReal      rel = PETSC_MAX_REAL, rel_corr = PETSC_MAX_REAL, r = PetscMax(initial_r, app->r_min), abs_dlambda = PETSC_MAX_REAL;
-  PetscInt       total_linear_its = 0, newton_its = 0, line_search_its = 0;
   PetscInt       prev_itsW = -1, prev_itsV = -1;
-  PetscLogDouble t_start, t0, t1, assembly_time = 0.0, solve_time = 0.0;
+  PetscLogDouble wall_time = 0.0, elapsed;
   PetscBool      stop = PETSC_FALSE, compute_diffs = PETSC_TRUE;
   PetscBool      have_pair_matrix = PETSC_FALSE;
   PetscInt       pair_matrix_start_it = -1;
   PetscReal      pair_matrix_r = r;
   const PetscInt krylov_persistent_start_added = solver->deflation_krylov_persistent_added;
   StepReplayExpected expected;
+  SsrProfileTimer run_timer, profile_timer;
+  const SsrNativeLinearOps *linear_ops = NULL;
+  struct _p_SsrLinearCtx    linear_ctx;
 
   PetscFunctionBeginUser;
   PetscCall(PetscMemzero(stats, sizeof(*stats)));
+  PetscCall(SsrNativeLinearRegistryFind(app->linear_algorithm, &linear_ops));
+  PetscCall(SsrNativeLinearCtxBind(solver, &app->resolved_profile.linear, &linear_ctx));
   if (!(*lambda > 0.0) || PetscIsInfOrNanReal(*lambda)) {
     stats->final_rel            = PETSC_MAX_REAL;
     stats->final_rel_correction = PETSC_MAX_REAL;
@@ -153,7 +157,7 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
     PetscFunctionReturn(PETSC_SUCCESS);
   }
   PetscCall(StepReplayExpectedLoad(PetscObjectComm((PetscObject)dm), app->step_replay_dir, &expected));
-  PetscCall(PetscTime(&t_start));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_NEWTON_SOLVE, dm, f_ext, &run_timer);
   PetscCall(VecDuplicate(f_ext, &residual));
   PetscCall(VecDuplicate(f_ext, &residual_eps));
   PetscCall(VecDuplicate(f_ext, &G));
@@ -177,10 +181,11 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
     const PetscReal r_start = r;
     const PetscInt  basis_start = solver->n_raw_basis;
 
-    PetscCall(PetscTime(&t0));
     const PetscBool freeze_pair_matrix =
       (PetscBool)(app->indirect_newton_pair_freeze_matrix && have_pair_matrix && (it % 2 == 1));
+    const SsrEvent assembly_event = freeze_pair_matrix ? SSR_EVENT_ASSEMBLE_RESIDUAL : SSR_EVENT_ASSEMBLE_TANGENT;
 
+    SSR_PROFILE_TIMER_BEGIN(NULL, assembly_event, dm, residual, &profile_timer);
     if (freeze_pair_matrix) {
       PetscCall(AssemblePlasticResidualJacobian(actx, *lambda, u, f_ext, NULL, residual, PETSC_FALSE));
     } else {
@@ -194,8 +199,8 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
       pair_matrix_start_it = it;
       pair_matrix_r        = r;
     }
-    PetscCall(PetscTime(&t1));
-    assembly_time += t1 - t0;
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAddNewtonStepAssembly(stats, elapsed));
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
                           "SSR_PAIR_MATRIX omega=%.8e it=%" PetscInt_FMT " enabled=%s mode=%s pair_start_it=%" PetscInt_FMT " current_r=%.6e matrix_r=%.6e force_pc_reuse=%s\n",
                           (double)omega_target, it, app->indirect_newton_pair_freeze_matrix ? "true" : "false",
@@ -220,7 +225,7 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
     solver->A = Areg;
     PetscCall(VecZeroEntries(dW));
     PetscCall(VecZeroEntries(dV));
-    PetscCall(PetscTime(&t0));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KSP_SOLVE, Areg, rhsW, &profile_timer);
     {
       const PetscBool saved_force_reuse = solver->force_reuse_preconditioner;
 
@@ -236,19 +241,19 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
       if (cheap_is_v) {
         solver->force_reuse_preconditioner = freeze_pair_matrix;
         PetscCall(LinearSolverBeginRecycleCapture(solver));
-        PetscCall(SolveLinearSystem(solver, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
+        PetscCall(SsrNativeLinearSolve(linear_ops, &linear_ctx, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
         PetscCall(LinearSolverEndRecycleCapture(solver));
         PetscCall(LinearSolverAppendTemporaryRecycleBasis(solver, "SSR intra-newton dV-to-dW", &temp_added));
         solver->force_reuse_preconditioner = PETSC_TRUE;
-        PetscCall(SolveLinearSystem(solver, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
+        PetscCall(SsrNativeLinearSolve(linear_ops, &linear_ctx, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
       } else {
         solver->force_reuse_preconditioner = freeze_pair_matrix;
         PetscCall(LinearSolverBeginRecycleCapture(solver));
-        PetscCall(SolveLinearSystem(solver, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
+        PetscCall(SsrNativeLinearSolve(linear_ops, &linear_ctx, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
         PetscCall(LinearSolverEndRecycleCapture(solver));
         PetscCall(LinearSolverAppendTemporaryRecycleBasis(solver, "SSR intra-newton dW-to-dV", &temp_added));
         solver->force_reuse_preconditioner = PETSC_TRUE;
-        PetscCall(SolveLinearSystem(solver, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
+        PetscCall(SsrNativeLinearSolve(linear_ops, &linear_ctx, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
       }
       PetscCall(LinearSolverTruncateRawBasis(solver, raw_snapshot));
       PetscCall(LinearSolverClearRecycleBasis(solver));
@@ -260,18 +265,17 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
                             "DEFLATION_INTRANEWTON_SELECT omega=%.8e it=%" PetscInt_FMT " enabled=false previous_w=%" PetscInt_FMT " previous_v=%" PetscInt_FMT " raw_cols=%" PetscInt_FMT "\n",
                             (double)omega_target, it, prev_itsW, prev_itsV, solver->n_raw_basis));
       solver->force_reuse_preconditioner = freeze_pair_matrix;
-      PetscCall(SolveLinearSystem(solver, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
+      PetscCall(SsrNativeLinearSolve(linear_ops, &linear_ctx, rhsW, dW, "SSR indirect dW", u, PETSC_TRUE, &itsW));
       solver->force_reuse_preconditioner = PETSC_TRUE;
-      PetscCall(SolveLinearSystem(solver, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
+      PetscCall(SsrNativeLinearSolve(linear_ops, &linear_ctx, rhsV, dV, "SSR indirect dV", u, PETSC_TRUE, &itsV));
     }
       solver->force_reuse_preconditioner = saved_force_reuse;
     }
-    PetscCall(PetscTime(&t1));
-    solve_time += t1 - t0;
-    total_linear_its += itsW + itsV;
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAddNewtonStepLinearSolve(stats, itsW + itsV, elapsed));
     prev_itsW = itsW;
     prev_itsV = itsV;
-    ++newton_its;
+    PetscCall(SsrStatsAddNewtonStepIteration(stats));
 
     PetscCall(VecDot(f_ext, dW, &dot));
     denom = PetscRealPart(dot);
@@ -282,8 +286,10 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
     abs_dlambda = PetscAbsReal(-numer / denom);
     PetscCall(VecCopy(dV, dU));
     PetscCall(VecAXPY(dU, -numer / denom, dW));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_LINE_SEARCH, u, dU, &profile_timer);
     PetscCall(IndirectNewtonLineSearch(actx, app, f_ext, u, *lambda, dU, -numer / denom, omega_target, rel, rhs_norm, u_trial, r_trial, &alpha, &trial_rel, &ls_its));
-    line_search_its += ls_its;
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAddNewtonStepLineSearch(stats, ls_its));
     PetscCall(VecNorm(dU, NORM_2, &dU_norm));
     PetscCall(VecNorm(u, NORM_2, &u_norm));
     rel_corr = (alpha * dU_norm) / PetscMax(u_norm, 1.0);
@@ -354,15 +360,10 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
   }
 
   PetscCall(AssembleResidualRel(actx, *lambda, u, f_ext, residual, rhs_norm, &rel));
-  PetscCall(PetscTime(&t1));
+  SSR_PROFILE_TIMER_END(NULL, &run_timer, &wall_time);
   stats->final_rel             = rel;
   stats->final_rel_correction  = rel_corr;
-  stats->newton_its            = newton_its;
-  stats->total_linear_its      = total_linear_its;
-  stats->line_search_its       = line_search_its;
-  stats->assembly_time         = assembly_time;
-  stats->solve_time            = solve_time;
-  stats->wall_time             = t1 - t_start;
+  stats->wall_time             = wall_time;
   if (!stats->converged && rel <= 10.0 * app->newton_rtol) stats->converged = PETSC_TRUE;
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
                         "SSR_NEWTON_SUMMARY omega=%.8e converged=%s lambda=%.8e final_rel=%.6e final_rel_correction=%.6e newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT " line_search_its=%" PetscInt_FMT " assembly_time=%.6g solve_time=%.6g wall_time=%.6g\n",

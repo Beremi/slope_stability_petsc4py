@@ -20,6 +20,10 @@ NATIVE_INCLUDE_DIRS = [
 ]
 
 
+def _rel(path: Path) -> str:
+    return str(path.relative_to(ROOT))
+
+
 def _petsc_flags() -> tuple[list[str], list[str], list[str]]:
     petsc_dir = os.environ.get("PETSC_DIR")
     petsc_arch = os.environ.get("PETSC_ARCH")
@@ -71,23 +75,24 @@ rpath_flags = ["-Wl,-rpath," + flag[2:] for flag in link_flags if flag.startswit
 extension = Extension(
     name="petsc_ssr.native._core",
     sources=[
-        str(NATIVE_DIR / "cython" / "_core.pyx"),
-        str(NATIVE_DIR / "core" / "engine_main.c"),
-        str(NATIVE_DIR / "mesh" / "hydro_seepage.c"),
-        str(NATIVE_DIR / "assembly" / "assembly.c"),
-        str(NATIVE_DIR / "materials" / "material_mc.c"),
-        str(NATIVE_DIR / "assembly" / "p4_basis.c"),
+        _rel(NATIVE_DIR / "cython" / "_core.pyx"),
+        _rel(NATIVE_DIR / "core" / "engine_main.c"),
+        _rel(NATIVE_DIR / "mesh" / "hydro_seepage.c"),
+        _rel(NATIVE_DIR / "assembly" / "assembly.c"),
+        _rel(NATIVE_DIR / "assembly" / "neumann.c"),
+        _rel(NATIVE_DIR / "materials" / "material_mc.c"),
+        _rel(NATIVE_DIR / "assembly" / "p4_basis.c"),
     ],
     depends=[
-        str(path)
+        _rel(path)
         for path in sorted(NATIVE_DIR.glob("*/*.c.inc"))
     ]
     + [
-        str(NATIVE_DIR / "include" / "engine_api.h"),
-        str(NATIVE_DIR / "mesh" / "hydro_seepage.h"),
-        str(NATIVE_DIR / "assembly" / "assembly.h"),
-        str(NATIVE_DIR / "assembly" / "p4_basis.h"),
-        str(NATIVE_DIR / "materials" / "material_mc.h"),
+        *(_rel(path) for path in sorted((NATIVE_DIR / "include").glob("*.h"))),
+        _rel(NATIVE_DIR / "mesh" / "hydro_seepage.h"),
+        _rel(NATIVE_DIR / "assembly" / "assembly.h"),
+        _rel(NATIVE_DIR / "assembly" / "p4_basis.h"),
+        _rel(NATIVE_DIR / "materials" / "material_mc.h"),
     ],
     include_dirs=[np.get_include(), *(str(path) for path in NATIVE_INCLUDE_DIRS), *petsc_includes],
     extra_compile_args=[

@@ -119,7 +119,7 @@ static PetscErrorCode BuildInterpolationMatrix(DM fine_dm, P4Basis *fine_basis, 
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ChoosePMGCoarsePC(AppCtx *app, DM coarse_dm, char coarse_pc[], size_t coarse_pc_len)
+static PetscErrorCode ChoosePMGCoarsePC(const SsrPmgOptions *pmg, DM coarse_dm, char coarse_pc[], size_t coarse_pc_len)
 {
   MPI_Comm  comm = PetscObjectComm((PetscObject)coarse_dm);
   Vec       v = NULL;
@@ -129,6 +129,7 @@ static PetscErrorCode ChoosePMGCoarsePC(AppCtx *app, DM coarse_dm, char coarse_p
   char      direct_pc[32] = "";
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, comm, PETSC_ERR_ARG_NULL, "PMG coarse PC selection requires resolved PMG options");
   PetscCall(DMCreateGlobalVector(coarse_dm, &v));
   PetscCall(VecGetSize(v, &coarse_dofs));
   PetscCall(VecDestroy(&v));
@@ -137,37 +138,37 @@ static PetscErrorCode ChoosePMGCoarsePC(AppCtx *app, DM coarse_dm, char coarse_p
   PetscCall(PetscOptionsGetString(NULL, NULL, "-mg_coarse_pc_type", direct_pc, sizeof(direct_pc), &direct_set));
   if (direct_set) {
     PetscCall(PetscStrcasecmp(direct_pc, "lu", &flg));
-    PetscCheck(!flg || coarse_dofs <= app->pmg_coarse_lu_max_dofs, comm, PETSC_ERR_ARG_WRONG,
-               "Refusing PMG coarse LU for %" PetscInt_FMT " coarse DOFs above -pmg_coarse_lu_max_dofs %" PetscInt_FMT, coarse_dofs, app->pmg_coarse_lu_max_dofs);
+    PetscCheck(!flg || coarse_dofs <= pmg->coarse_lu_max_dofs, comm, PETSC_ERR_ARG_WRONG,
+               "Refusing PMG coarse LU for %" PetscInt_FMT " coarse DOFs above -pmg_coarse_lu_max_dofs %" PetscInt_FMT, coarse_dofs, pmg->coarse_lu_max_dofs);
 #if !defined(PETSC_HAVE_HYPRE)
     PetscCall(PetscStrcasecmp(direct_pc, "hypre", &flg));
     PetscCheck(!flg, comm, PETSC_ERR_SUP, "This PETSc build has no HYPRE support");
 #endif
     PetscCall(PetscStrncpy(coarse_pc, direct_pc, coarse_pc_len));
     PetscCall(PetscPrintf(comm, "PMG coarse space: dofs=%" PetscInt_FMT " selected_pc=%s source=mg_coarse_pc_type lu_limit=%" PetscInt_FMT "\n", coarse_dofs, coarse_pc,
-                          app->pmg_coarse_lu_max_dofs));
+                          pmg->coarse_lu_max_dofs));
     PetscFunctionReturn(PETSC_SUCCESS);
   }
 
-  PetscCall(PetscStrcasecmp(app->pmg_coarse_pc_type, "auto", &flg));
+  PetscCall(PetscStrcasecmp(pmg->coarse_pc_type, "auto", &flg));
   if (flg) {
-    if (size == 1 && coarse_dofs <= app->pmg_coarse_lu_max_dofs) PetscCall(PetscStrncpy(coarse_pc, "lu", coarse_pc_len));
+    if (size == 1 && coarse_dofs <= pmg->coarse_lu_max_dofs) PetscCall(PetscStrncpy(coarse_pc, "lu", coarse_pc_len));
     else PetscCall(PetscStrncpy(coarse_pc, "gamg", coarse_pc_len));
   } else {
     PetscBool is_lu, is_hypre, is_gamg;
 
-    PetscCall(PetscStrcasecmp(app->pmg_coarse_pc_type, "lu", &is_lu));
-    PetscCall(PetscStrcasecmp(app->pmg_coarse_pc_type, "hypre", &is_hypre));
-    PetscCall(PetscStrcasecmp(app->pmg_coarse_pc_type, "gamg", &is_gamg));
+    PetscCall(PetscStrcasecmp(pmg->coarse_pc_type, "lu", &is_lu));
+    PetscCall(PetscStrcasecmp(pmg->coarse_pc_type, "hypre", &is_hypre));
+    PetscCall(PetscStrcasecmp(pmg->coarse_pc_type, "gamg", &is_gamg));
     PetscCheck(is_lu || is_hypre || is_gamg, comm, PETSC_ERR_ARG_WRONG, "-pmg_coarse_pc_type must be auto, hypre, gamg, or lu");
-    PetscCheck(!is_lu || coarse_dofs <= app->pmg_coarse_lu_max_dofs, comm, PETSC_ERR_ARG_WRONG,
-               "Refusing PMG coarse LU for %" PetscInt_FMT " coarse DOFs above -pmg_coarse_lu_max_dofs %" PetscInt_FMT, coarse_dofs, app->pmg_coarse_lu_max_dofs);
+    PetscCheck(!is_lu || coarse_dofs <= pmg->coarse_lu_max_dofs, comm, PETSC_ERR_ARG_WRONG,
+               "Refusing PMG coarse LU for %" PetscInt_FMT " coarse DOFs above -pmg_coarse_lu_max_dofs %" PetscInt_FMT, coarse_dofs, pmg->coarse_lu_max_dofs);
 #if !defined(PETSC_HAVE_HYPRE)
     PetscCheck(!is_hypre, comm, PETSC_ERR_SUP, "This PETSc build has no HYPRE support");
 #endif
-    PetscCall(PetscStrncpy(coarse_pc, app->pmg_coarse_pc_type, coarse_pc_len));
+    PetscCall(PetscStrncpy(coarse_pc, pmg->coarse_pc_type, coarse_pc_len));
   }
-  PetscCall(PetscPrintf(comm, "PMG coarse space: dofs=%" PetscInt_FMT " selected_pc=%s lu_limit=%" PetscInt_FMT "\n", coarse_dofs, coarse_pc, app->pmg_coarse_lu_max_dofs));
+  PetscCall(PetscPrintf(comm, "PMG coarse space: dofs=%" PetscInt_FMT " selected_pc=%s lu_limit=%" PetscInt_FMT "\n", coarse_dofs, coarse_pc, pmg->coarse_lu_max_dofs));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -252,89 +253,91 @@ static PetscErrorCode ReportPMGSolverChoices(KSP ksp, const AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode SetPMGTelescopeDefaults(AppCtx *app, MPI_Comm comm)
+static PetscErrorCode SetPMGTelescopeDefaults(const SsrPmgOptions *pmg, MPI_Comm comm)
 {
   PetscMPIInt ranks;
   PetscBool   pc_set;
   char        value[64];
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, comm, PETSC_ERR_ARG_NULL, "PMG telescope defaults require resolved PMG options");
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &pc_set));
-  if (app->pmg_coarse_telescope_active_ranks <= 0 || ranks <= app->pmg_coarse_telescope_active_ranks || pc_set) {
+  if (pmg->coarse_telescope_active_ranks <= 0 || ranks <= pmg->coarse_telescope_active_ranks || pc_set) {
     PetscCall(PetscPrintf(comm,
                           "PMG_TELESCOPE_CONFIG level=p1 enabled=false option_override=%s active_ranks=%" PetscInt_FMT " reduction_factor=1 subcomm=%s inner_ksp=%s inner_pc=%s\n",
-                          pc_set ? "true" : "false", app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type,
-                          app->pmg_coarse_telescope_ksp_type, app->pmg_coarse_telescope_pc_type));
+                          pc_set ? "true" : "false", pmg->coarse_telescope_active_ranks, pmg->coarse_telescope_subcomm_type,
+                          pmg->coarse_ksp_type, pmg->coarse_inner_pc_type));
     PetscFunctionReturn(PETSC_SUCCESS);
   }
-  PetscCheck(ranks % app->pmg_coarse_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
-             "-pmg_coarse_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", app->pmg_coarse_telescope_active_ranks, ranks);
+  PetscCheck(ranks % pmg->coarse_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
+             "-pmg_coarse_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", pmg->coarse_telescope_active_ranks, ranks);
 
   PetscCall(SetDefaultOption("-mg_coarse_pc_type", "telescope"));
-  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, (PetscInt)ranks / pmg->coarse_telescope_active_ranks));
   PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_reduction_factor", value));
-  PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_subcomm_type", app->pmg_coarse_telescope_subcomm_type));
-  PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_type", app->pmg_coarse_telescope_ksp_type));
-  PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)app->pmg_coarse_telescope_ksp_rtol));
+  PetscCall(SetDefaultOption("-mg_coarse_pc_telescope_subcomm_type", pmg->coarse_telescope_subcomm_type));
+  PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_type", pmg->coarse_ksp_type));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)pmg->coarse_ksp_rtol));
   PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_rtol", value));
-  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, app->pmg_coarse_telescope_ksp_max_it));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, pmg->coarse_ksp_max_it));
   PetscCall(SetDefaultOption("-mg_coarse_telescope_ksp_max_it", value));
-  PetscCall(SetDefaultOption("-mg_coarse_telescope_pc_type", app->pmg_coarse_telescope_pc_type));
+  PetscCall(SetDefaultOption("-mg_coarse_telescope_pc_type", pmg->coarse_inner_pc_type));
   PetscCall(PetscPrintf(comm,
                         "PMG_TELESCOPE_CONFIG level=p1 enabled=true option_override=false active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
-                        app->pmg_coarse_telescope_active_ranks, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type,
-                        app->pmg_coarse_telescope_ksp_type, app->pmg_coarse_telescope_pc_type));
+                        pmg->coarse_telescope_active_ranks, (PetscInt)ranks / pmg->coarse_telescope_active_ranks, pmg->coarse_telescope_subcomm_type,
+                        pmg->coarse_ksp_type, pmg->coarse_inner_pc_type));
   PetscCall(PetscPrintf(comm,
                         "PMG_TELESCOPE active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
-                        app->pmg_coarse_telescope_active_ranks, (PetscInt)ranks / app->pmg_coarse_telescope_active_ranks, app->pmg_coarse_telescope_subcomm_type,
-                        app->pmg_coarse_telescope_ksp_type, app->pmg_coarse_telescope_pc_type));
+                        pmg->coarse_telescope_active_ranks, (PetscInt)ranks / pmg->coarse_telescope_active_ranks, pmg->coarse_telescope_subcomm_type,
+                        pmg->coarse_ksp_type, pmg->coarse_inner_pc_type));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode SetPMGP2TelescopeDefaults(AppCtx *app, MPI_Comm comm)
+static PetscErrorCode SetPMGP2TelescopeDefaults(const SsrPmgOptions *pmg, MPI_Comm comm)
 {
   PetscMPIInt ranks;
   PetscBool   pc_set;
   char        value[64];
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, comm, PETSC_ERR_ARG_NULL, "PMG P2 telescope defaults require resolved PMG options");
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_levels_1_pc_type", &pc_set));
-  if (app->pmg_p2_telescope_active_ranks <= 0 || ranks <= app->pmg_p2_telescope_active_ranks || pc_set) {
+  if (pmg->p2_telescope_active_ranks <= 0 || ranks <= pmg->p2_telescope_active_ranks || pc_set) {
     PetscCall(PetscPrintf(comm,
                           "PMG_TELESCOPE_CONFIG level=p2 enabled=false option_override=%s active_ranks=%" PetscInt_FMT " reduction_factor=1 subcomm=%s inner_ksp=%s inner_pc=%s\n",
-                          pc_set ? "true" : "false", app->pmg_p2_telescope_active_ranks, app->pmg_p2_telescope_subcomm_type,
-                          app->pmg_p2_telescope_ksp_type, app->pmg_p2_telescope_pc_type));
+                          pc_set ? "true" : "false", pmg->p2_telescope_active_ranks, pmg->p2_telescope_subcomm_type,
+                          pmg->p2_telescope_ksp_type, pmg->p2_telescope_pc_type));
     PetscFunctionReturn(PETSC_SUCCESS);
   }
-  PetscCheck(ranks % app->pmg_p2_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
-             "-pmg_p2_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", app->pmg_p2_telescope_active_ranks, ranks);
+  PetscCheck(ranks % pmg->p2_telescope_active_ranks == 0, comm, PETSC_ERR_ARG_WRONG,
+             "-pmg_p2_telescope_active_ranks %" PetscInt_FMT " must divide MPI ranks %d", pmg->p2_telescope_active_ranks, ranks);
 
   PetscCall(SetDefaultOption("-mg_levels_1_pc_type", "telescope"));
-  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, (PetscInt)ranks / app->pmg_p2_telescope_active_ranks));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, (PetscInt)ranks / pmg->p2_telescope_active_ranks));
   PetscCall(SetDefaultOption("-mg_levels_1_pc_telescope_reduction_factor", value));
-  PetscCall(SetDefaultOption("-mg_levels_1_pc_telescope_subcomm_type", app->pmg_p2_telescope_subcomm_type));
-  PetscCall(SetDefaultOption("-mg_levels_1_telescope_ksp_type", app->pmg_p2_telescope_ksp_type));
-  PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)app->pmg_p2_telescope_ksp_rtol));
+  PetscCall(SetDefaultOption("-mg_levels_1_pc_telescope_subcomm_type", pmg->p2_telescope_subcomm_type));
+  PetscCall(SetDefaultOption("-mg_levels_1_telescope_ksp_type", pmg->p2_telescope_ksp_type));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%.16g", (double)pmg->p2_telescope_ksp_rtol));
   PetscCall(SetDefaultOption("-mg_levels_1_telescope_ksp_rtol", value));
-  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, app->pmg_p2_telescope_ksp_max_it));
+  PetscCall(PetscSNPrintf(value, sizeof(value), "%" PetscInt_FMT, pmg->p2_telescope_ksp_max_it));
   PetscCall(SetDefaultOption("-mg_levels_1_telescope_ksp_max_it", value));
-  PetscCall(SetDefaultOption("-mg_levels_1_telescope_pc_type", app->pmg_p2_telescope_pc_type));
+  PetscCall(SetDefaultOption("-mg_levels_1_telescope_pc_type", pmg->p2_telescope_pc_type));
   {
     PetscBool is_gamg = PETSC_FALSE;
 
-    PetscCall(PetscStrcasecmp(app->pmg_p2_telescope_pc_type, "gamg", &is_gamg));
-    if (is_gamg) PetscCall(SetDefaultOption("-mg_levels_1_telescope_pc_gamg_aggressive_square_graph", app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
+    PetscCall(PetscStrcasecmp(pmg->p2_telescope_pc_type, "gamg", &is_gamg));
+    if (is_gamg) PetscCall(SetDefaultOption("-mg_levels_1_telescope_pc_gamg_aggressive_square_graph", pmg->coarse_gamg_aggressive_square_graph ? "true" : "false"));
   }
   PetscCall(PetscPrintf(comm,
                         "PMG_TELESCOPE_CONFIG level=p2 enabled=true option_override=false active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
-                        app->pmg_p2_telescope_active_ranks, (PetscInt)ranks / app->pmg_p2_telescope_active_ranks, app->pmg_p2_telescope_subcomm_type,
-                        app->pmg_p2_telescope_ksp_type, app->pmg_p2_telescope_pc_type));
+                        pmg->p2_telescope_active_ranks, (PetscInt)ranks / pmg->p2_telescope_active_ranks, pmg->p2_telescope_subcomm_type,
+                        pmg->p2_telescope_ksp_type, pmg->p2_telescope_pc_type));
   PetscCall(PetscPrintf(comm,
                         "PMG_P2_TELESCOPE active_ranks=%" PetscInt_FMT " reduction_factor=%" PetscInt_FMT " subcomm=%s inner_ksp=%s inner_pc=%s\n",
-                        app->pmg_p2_telescope_active_ranks, (PetscInt)ranks / app->pmg_p2_telescope_active_ranks, app->pmg_p2_telescope_subcomm_type,
-                        app->pmg_p2_telescope_ksp_type, app->pmg_p2_telescope_pc_type));
+                        pmg->p2_telescope_active_ranks, (PetscInt)ranks / pmg->p2_telescope_active_ranks, pmg->p2_telescope_subcomm_type,
+                        pmg->p2_telescope_ksp_type, pmg->p2_telescope_pc_type));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -544,7 +547,7 @@ static PetscErrorCode PMGShellRedistributeActiveMatrix(MPI_Comm comm, PMGActiveL
   Mat            Blocal = NULL;
   IS             iscol = NULL;
   PetscInt       nc, nr, bs;
-  PetscLogDouble t0, t1, t2;
+  SsrProfileTimer profile_timer;
 
   PetscFunctionBeginUser;
   *submatrix_time   = 0.0;
@@ -555,20 +558,19 @@ static PetscErrorCode PMGShellRedistributeActiveMatrix(MPI_Comm comm, PMGActiveL
   PetscCall(ISSetIdentity(iscol));
   PetscCall(ISSetBlockSize(iscol, bs));
   PetscCall(MatSetOption(B, MAT_SUBMAT_SINGLEIS, PETSC_TRUE));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_SUBMATRIX, B, iscol, &profile_timer);
   PetscCall(MatCreateSubMatrices(B, 1, &layout->isrow, &iscol, MAT_INITIAL_MATRIX, &submats));
-  PetscCall(PetscTime(&t1));
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, submatrix_time);
   Blocal = submats[0];
   PetscCall(PetscFree(submats));
   if (layout->active) {
     PetscInt mm;
 
     PetscCall(MatGetSize(Blocal, &mm, NULL));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_CONCATENATE, Blocal, NULL, &profile_timer);
     PetscCall(MatCreateMPIMatConcatenateSeqMat(layout->subcomm, Blocal, mm, reuse, Bred));
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, concatenate_time);
   }
-  PetscCall(PetscTime(&t2));
-  *submatrix_time   = t1 - t0;
-  *concatenate_time = t2 - t1;
   PetscCall(MatDestroy(&Blocal));
   PetscCall(ISDestroy(&iscol));
   (void)comm;
@@ -612,6 +614,7 @@ static PetscErrorCode PMGShellAttachSubcommNearNullspace(DM dm, PMGActiveLayout 
 
 typedef struct {
   AppCtx        *app;
+  const SsrPmgOptions *pmg;
   DM             dm;
   AssemblyCtx   *actx;
   Mat            A4;
@@ -670,38 +673,40 @@ typedef struct {
 
 static PetscErrorCode LinearSolverDestroyPMGHierarchy(LinearSolverCtx *solver);
 static PetscErrorCode CheckPMGCoarseTransfers(LinearSolverCtx *solver);
-static PetscErrorCode LinearSolverSetupPMGTransferChecks(LinearSolverCtx *solver, DM dm, const AppCtx *app);
+static PetscErrorCode LinearSolverSetupPMGTransferChecks(LinearSolverCtx *solver, DM dm, const AppCtx *app, const SsrPmgOptions *pmg);
 
-static PetscErrorCode PMGShellConfigureSmootherKSP(KSP ksp, AppCtx *app, const char prefix[], Mat A)
+static PetscErrorCode PMGShellConfigureSmootherKSP(KSP ksp, const SsrPmgOptions *pmg, const char prefix[], Mat A)
 {
   PC pc = NULL;
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, PetscObjectComm((PetscObject)ksp), PETSC_ERR_ARG_NULL, "PMG shell smoother configuration requires resolved PMG options");
   PetscCall(KSPSetOptionsPrefix(ksp, prefix));
   PetscCall(KSPSetOperators(ksp, A, A));
-  PetscCall(KSPSetType(ksp, app->pmg_smoother_ksp_type));
+  PetscCall(KSPSetType(ksp, pmg->smoother_ksp_type));
   PetscCall(KSPSetNormType(ksp, KSP_NORM_NONE));
   PetscCall(KSPSetInitialGuessNonzero(ksp, PETSC_TRUE));
-  PetscCall(KSPSetTolerances(ksp, 0.0, 0.0, PETSC_CURRENT, app->pmg_smoother_max_it));
+  PetscCall(KSPSetTolerances(ksp, 0.0, 0.0, PETSC_CURRENT, pmg->smoother_max_it));
   PetscCall(KSPGetPC(ksp, &pc));
-  PetscCall(PCSetType(pc, app->pmg_smoother_pc_type));
+  PetscCall(PCSetType(pc, pmg->smoother_pc_type));
   PetscCall(KSPSetFromOptions(ksp));
   PetscCall(KSPSetUp(ksp));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode PMGShellConfigureCoarseKSP(KSP ksp, AppCtx *app, const char prefix[], Mat A)
+static PetscErrorCode PMGShellConfigureCoarseKSP(KSP ksp, const SsrPmgOptions *pmg, const char prefix[], Mat A)
 {
   PC pc = NULL;
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, PetscObjectComm((PetscObject)ksp), PETSC_ERR_ARG_NULL, "PMG shell coarse configuration requires resolved PMG options");
   PetscCall(KSPSetOptionsPrefix(ksp, prefix));
   PetscCall(KSPSetOperators(ksp, A, A));
-  PetscCall(KSPSetType(ksp, app->pmg_coarse_telescope_ksp_type));
+  PetscCall(KSPSetType(ksp, pmg->coarse_ksp_type));
   PetscCall(KSPSetInitialGuessNonzero(ksp, PETSC_TRUE));
-  PetscCall(KSPSetTolerances(ksp, app->pmg_coarse_telescope_ksp_rtol, PETSC_DEFAULT, PETSC_DEFAULT, app->pmg_coarse_telescope_ksp_max_it));
+  PetscCall(KSPSetTolerances(ksp, pmg->coarse_ksp_rtol, PETSC_DEFAULT, PETSC_DEFAULT, pmg->coarse_ksp_max_it));
   PetscCall(KSPGetPC(ksp, &pc));
-  PetscCall(ConfigurePMGBasePC(pc, app->pmg_coarse_telescope_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
+  PetscCall(ConfigurePMGBasePC(pc, pmg->coarse_inner_pc_type, pmg->coarse_gamg_aggressive_square_graph));
   PetscCall(KSPSetFromOptions(ksp));
   PetscCall(KSPSetUp(ksp));
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -740,11 +745,13 @@ static PetscErrorCode PMGShellReportActiveLevel(MPI_Comm comm, PetscInt level, P
 static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat A4)
 {
   MPI_Comm  comm = PetscObjectComm((PetscObject)pc);
+  const SsrPmgOptions *pmg = ctx->pmg;
   Vec       fine_vec = NULL, p2_vec = NULL, p1_vec = NULL;
   PetscInt  fine_local, fine_global;
   char      prefix4[128];
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, comm, PETSC_ERR_ARG_NULL, "PMG shell hierarchy requires resolved PMG options");
   PetscCall(P4BasisCreateDegreeDim(PETSC_COMM_SELF, 1, ctx->actx->basis->dim, ctx->actx->basis->components, &ctx->p1_basis));
   ctx->p1_basis_created = PETSC_TRUE;
   PetscCall(P4BasisCreateDegreeDim(PETSC_COMM_SELF, 2, ctx->actx->basis->dim, ctx->actx->basis->components, &ctx->p2_basis));
@@ -759,8 +766,8 @@ static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat
   PetscCall(DMCreateGlobalVector(ctx->dm, &fine_vec));
   PetscCall(DMCreateGlobalVector(ctx->dm_p2, &p2_vec));
   PetscCall(DMCreateGlobalVector(ctx->dm_p1, &p1_vec));
-  PetscCall(PMGActiveLayoutCreate(comm, p2_vec, ctx->app->pmg_shell_p2_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p2_layout));
-  PetscCall(PMGActiveLayoutCreate(comm, p1_vec, ctx->app->pmg_shell_p1_active_ranks, ctx->app->pmg_shell_subcomm_type, &ctx->p1_layout));
+  PetscCall(PMGActiveLayoutCreate(comm, p2_vec, pmg->p2_active_ranks, pmg->shell_subcomm_type, &ctx->p2_layout));
+  PetscCall(PMGActiveLayoutCreate(comm, p1_vec, pmg->p1_active_ranks, pmg->shell_subcomm_type, &ctx->p1_layout));
   PetscCall(PMGShellReportFineLevel(ctx->dm, ctx->actx->basis->degree));
   PetscCall(PMGShellReportActiveLevel(comm, 1, 2, &ctx->p2_layout));
   PetscCall(PMGShellReportActiveLevel(comm, 0, 1, &ctx->p1_layout));
@@ -774,14 +781,14 @@ static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat
   PetscCall(PetscPrintf(comm,
                         "PMG_COARSE_OPERATOR_CONFIG type=galerkin_shell_vcycle p1_quadrature_points=%" PetscInt_FMT " p2_quadrature_points=%" PetscInt_FMT "\n",
                         ctx->p1_basis.n_qp, ctx->p2_basis.n_qp));
-  if (ctx->app->pmg_check_coarse_transfers) {
+  if (pmg->check_coarse_transfers) {
     LinearSolverCtx transfer_solver;
 
     PetscCall(PetscMemzero(&transfer_solver, sizeof(transfer_solver)));
     transfer_solver.dm   = ctx->dm;
     transfer_solver.actx = ctx->actx;
     transfer_solver.app  = ctx->app;
-    PetscCall(LinearSolverSetupPMGTransferChecks(&transfer_solver, ctx->dm, ctx->app));
+    PetscCall(LinearSolverSetupPMGTransferChecks(&transfer_solver, ctx->dm, ctx->app, pmg));
     PetscCall(LinearSolverDestroyPMGHierarchy(&transfer_solver));
   }
 
@@ -803,7 +810,7 @@ static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat
 
   PetscCall(KSPCreate(comm, &ctx->smooth4));
   PetscCall(PetscSNPrintf(prefix4, sizeof(prefix4), "pmg_shell_fine_"));
-  PetscCall(PMGShellConfigureSmootherKSP(ctx->smooth4, ctx->app, prefix4, A4));
+  PetscCall(PMGShellConfigureSmootherKSP(ctx->smooth4, pmg, prefix4, A4));
   PetscCall(ReportPMGLevelSolver(comm, 2, ctx->smooth4));
   if (ctx->p2_layout.active) {
     PetscCall(KSPCreate(ctx->p2_layout.subcomm, &ctx->smooth2));
@@ -821,67 +828,70 @@ static PetscErrorCode PMGShellCreateHierarchy(PC pc, PMGShellVCycleCtx *ctx, Mat
 static PetscErrorCode PMGShellUpdateOperators(PC pc, PMGShellVCycleCtx *ctx, Mat A4)
 {
   MPI_Comm       comm = PetscObjectComm((PetscObject)pc);
+  const SsrPmgOptions *pmg = ctx->pmg;
   MatReuse       reuse = ctx->operator_updates ? MAT_REUSE_MATRIX : MAT_INITIAL_MATRIX;
   const char    *reuse_label = ctx->operator_updates ? "reuse" : "initial";
-  PetscLogDouble t0, t1, t2, t3, t4, t5, sub_time, cat_time, p2_ptap, p1_ptap, p2_redist, p1_redist;
+  SsrProfileTimer update_timer, phase_timer;
+  PetscLogDouble  sub_time, cat_time, p2_ptap, p1_ptap, p2_redist, p1_redist, update_elapsed;
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, comm, PETSC_ERR_ARG_NULL, "PMG shell operator update requires resolved PMG options");
   ctx->A4 = A4;
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_OPERATOR_UPDATE, pc, A4, &update_timer);
   PetscCall(KSPSetOperators(ctx->smooth4, A4, A4));
 
-  PetscCall(PetscTime(&t1));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_GALERKIN_PRODUCT, A4, ctx->P42, &phase_timer);
   PetscCall(MatPtAP(A4, ctx->P42, reuse, PETSC_DETERMINE, &ctx->A2_active));
-  PetscCall(PetscTime(&t2));
-  p2_ptap = t2 - t1;
+  SSR_PROFILE_TIMER_END(NULL, &phase_timer, &p2_ptap);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_REDISTRIBUTE, ctx->A2_active, NULL, &phase_timer);
   PetscCall(PMGShellRedistributeActiveMatrix(comm, &ctx->p2_layout, ctx->A2_active, reuse, &ctx->A2_sub, &sub_time, &cat_time));
-  PetscCall(PetscTime(&t3));
-  p2_redist = t3 - t2;
+  SSR_PROFILE_TIMER_END(NULL, &phase_timer, &p2_redist);
   if (reuse == MAT_INITIAL_MATRIX) PetscCall(PMGShellAttachSubcommNearNullspace(ctx->dm_p2, &ctx->p2_layout, ctx->A2_sub));
   if (ctx->p2_layout.active) {
     if (!ctx->smooth2) PetscCall(KSPCreate(ctx->p2_layout.subcomm, &ctx->smooth2));
     if (reuse == MAT_INITIAL_MATRIX) {
-      PetscCall(PMGShellConfigureSmootherKSP(ctx->smooth2, ctx->app, "pmg_shell_p2_", ctx->A2_sub));
+      PetscCall(PMGShellConfigureSmootherKSP(ctx->smooth2, pmg, "pmg_shell_p2_", ctx->A2_sub));
       PetscCall(ReportPMGLevelSolver(ctx->p2_layout.subcomm, 1, ctx->smooth2));
     } else PetscCall(KSPSetOperators(ctx->smooth2, ctx->A2_sub, ctx->A2_sub));
   }
   PetscCall(PetscPrintf(comm, "PMG_SHELL_OPERATOR_UPDATE level=1 reuse=%s ptap_time=%.6g redistribute_time=%.6g submatrix_time=%.6g concatenate_time=%.6g\n",
                         reuse_label, (double)p2_ptap, (double)p2_redist, (double)sub_time, (double)cat_time));
 
-  PetscCall(PetscTime(&t3));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_GALERKIN_PRODUCT, ctx->A2_active, ctx->P21, &phase_timer);
   PetscCall(MatPtAP(ctx->A2_active, ctx->P21, reuse, PETSC_DETERMINE, &ctx->A1_active));
-  PetscCall(PetscTime(&t4));
-  p1_ptap = t4 - t3;
+  SSR_PROFILE_TIMER_END(NULL, &phase_timer, &p1_ptap);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_REDISTRIBUTE, ctx->A1_active, NULL, &phase_timer);
   PetscCall(PMGShellRedistributeActiveMatrix(comm, &ctx->p1_layout, ctx->A1_active, reuse, &ctx->A1_sub, &sub_time, &cat_time));
-  PetscCall(PetscTime(&t5));
-  p1_redist = t5 - t4;
+  SSR_PROFILE_TIMER_END(NULL, &phase_timer, &p1_redist);
   if (reuse == MAT_INITIAL_MATRIX) PetscCall(PMGShellAttachSubcommNearNullspace(ctx->dm_p1, &ctx->p1_layout, ctx->A1_sub));
   if (ctx->p1_layout.active) {
     if (!ctx->coarse1) PetscCall(KSPCreate(ctx->p1_layout.subcomm, &ctx->coarse1));
     if (reuse == MAT_INITIAL_MATRIX) {
-      PetscCall(PMGShellConfigureCoarseKSP(ctx->coarse1, ctx->app, "pmg_shell_p1_", ctx->A1_sub));
+      PetscCall(PMGShellConfigureCoarseKSP(ctx->coarse1, pmg, "pmg_shell_p1_", ctx->A1_sub));
       PetscCall(ReportPMGLevelSolver(ctx->p1_layout.subcomm, 0, ctx->coarse1));
     } else PetscCall(KSPSetOperators(ctx->coarse1, ctx->A1_sub, ctx->A1_sub));
   }
   PetscCall(PetscPrintf(comm, "PMG_SHELL_OPERATOR_UPDATE level=0 reuse=%s ptap_time=%.6g redistribute_time=%.6g submatrix_time=%.6g concatenate_time=%.6g\n",
                         reuse_label, (double)p1_ptap, (double)p1_redist, (double)sub_time, (double)cat_time));
   ctx->operator_updates++;
-  ctx->operator_update_time += t5 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &update_timer, &update_elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&ctx->operator_update_time, update_elapsed));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 static PetscErrorCode PMGShellResidual(Mat A, Vec rhs, Vec x, Vec r, Vec tmp, PetscLogDouble *accum_time)
 {
-  PetscLogDouble t0, t1;
+  SsrProfileTimer profile_timer;
+  PetscLogDouble  elapsed;
 
   PetscFunctionBeginUser;
-  PetscCall(PetscLogStagePush(log_stage_pmg_shell_residual));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_RESIDUAL);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_RESIDUAL, A, x, &profile_timer);
   PetscCall(MatMult(A, x, tmp));
   PetscCall(VecWAXPY(r, -1.0, tmp, rhs));
-  PetscCall(PetscTime(&t1));
-  *accum_time += t1 - t0;
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(accum_time, elapsed));
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_RESIDUAL);
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -903,108 +913,113 @@ static PetscErrorCode PMGShellVCycleSetUp(PC pc)
   PetscCall(PCShellGetContext(pc, (void **)&ctx));
   PetscCall(PCGetOperators(pc, NULL, &A));
   PetscCheck(A, PetscObjectComm((PetscObject)pc), PETSC_ERR_ARG_WRONGSTATE, "PMG shell V-cycle requires a fine operator");
+  SSR_PROFILE_BEGIN(NULL, SSR_EVENT_PMG_SETUP, pc, A);
   if (!ctx->setup_done) {
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)pc), "PMG_BACKEND backend=shell_vcycle\n"));
     PetscCall(PMGShellCreateHierarchy(pc, ctx, A));
     ctx->setup_done = PETSC_TRUE;
   }
   PetscCall(PMGShellUpdateOperators(pc, ctx, A));
+  SSR_PROFILE_END(NULL, SSR_EVENT_PMG_SETUP, pc, A);
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
 {
   PMGShellVCycleCtx *ctx = NULL;
-  PetscLogDouble     t0, t1;
+  SsrProfileTimer    profile_timer;
+  PetscLogDouble     elapsed;
 
   PetscFunctionBeginUser;
   PetscCall(PCShellGetContext(pc, (void **)&ctx));
   PetscCall(VecZeroEntries(y));
+  SSR_PROFILE_BEGIN(NULL, SSR_EVENT_PMG_APPLY, pc, x);
 
-  PetscCall(PetscLogStagePush(log_stage_pmg_shell_fine_smooth));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_FINE_SMOOTH);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_FINE_SMOOTH, ctx->smooth4, x, &profile_timer);
   PetscCall(KSPSolve(ctx->smooth4, x, y));
-  PetscCall(PetscTime(&t1));
-  ctx->fine_smooth_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&ctx->fine_smooth_time, elapsed));
   PetscCall(PMGShellDebugCapture(ctx, y, &ctx->debug_fine_pre));
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_FINE_SMOOTH);
 
   PetscCall(PMGShellResidual(ctx->A4, x, y, ctx->r4, ctx->tmp4, &ctx->residual_time));
   PetscCall(PMGShellDebugCapture(ctx, ctx->r4, &ctx->debug_fine_residual));
-  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_TRANSFER);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_TRANSFER, ctx->P42, ctx->r4, &profile_timer);
   PetscCall(MatMultTranspose(ctx->P42, ctx->r4, ctx->p2_rhs_full));
-  PetscCall(PetscTime(&t1));
-  ctx->restrict_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&ctx->restrict_time, elapsed));
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p2_layout, ctx->p2_rhs_full, ctx->p2_rhs));
   PetscCall(PMGShellDebugCapture(ctx, ctx->p2_rhs, &ctx->debug_p2_rhs));
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
 
   if (ctx->p2_layout.active) {
     PetscCall(VecZeroEntries(ctx->p2_x));
-    PetscCall(PetscLogStagePush(log_stage_pmg_shell_p2));
-    PetscCall(PetscTime(&t0));
+    SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_P2);
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_P2_SMOOTH, ctx->smooth2, ctx->p2_rhs, &profile_timer);
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_rhs, ctx->p2_x));
-    PetscCall(PetscTime(&t1));
-    ctx->p2_smooth_time += t1 - t0;
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&ctx->p2_smooth_time, elapsed));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p2_x, &ctx->debug_p2_pre));
-    PetscCall(PetscLogStagePop());
+    SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_P2);
     PetscCall(PMGShellResidual(ctx->A2_sub, ctx->p2_rhs, ctx->p2_x, ctx->p2_r, ctx->p2_delta, &ctx->residual_time));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p2_r, &ctx->debug_p2_residual));
   }
-  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_TRANSFER);
   PetscCall(PMGActiveLayoutCopySubToFull(&ctx->p2_layout, ctx->p2_r, ctx->p2_r_full));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_TRANSFER, ctx->P21, ctx->p2_r_full, &profile_timer);
   PetscCall(MatMultTranspose(ctx->P21, ctx->p2_r_full, ctx->p1_rhs_full));
-  PetscCall(PetscTime(&t1));
-  ctx->restrict_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&ctx->restrict_time, elapsed));
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p1_layout, ctx->p1_rhs_full, ctx->p1_rhs));
   PetscCall(PMGShellDebugCapture(ctx, ctx->p1_rhs, &ctx->debug_p1_rhs));
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
 
   if (ctx->p1_layout.active) {
     PetscCall(VecZeroEntries(ctx->p1_x));
-    PetscCall(PetscLogStagePush(log_stage_pmg_shell_p1));
-    PetscCall(PetscTime(&t0));
+    SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_P1);
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_COARSE_SOLVE, ctx->coarse1, ctx->p1_rhs, &profile_timer);
     PetscCall(KSPSolve(ctx->coarse1, ctx->p1_rhs, ctx->p1_x));
-    PetscCall(PetscTime(&t1));
-    ctx->coarse_solve_time += t1 - t0;
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&ctx->coarse_solve_time, elapsed));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p1_x, &ctx->debug_p1_x));
-    PetscCall(PetscLogStagePop());
+    SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_P1);
   }
-  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_TRANSFER);
   PetscCall(PMGActiveLayoutCopySubToFull(&ctx->p1_layout, ctx->p1_x, ctx->p1_x_full));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_TRANSFER, ctx->P21, ctx->p1_x_full, &profile_timer);
   PetscCall(MatMult(ctx->P21, ctx->p1_x_full, ctx->p2_corr_full));
-  PetscCall(PetscTime(&t1));
-  ctx->prolong_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&ctx->prolong_time, elapsed));
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p2_layout, ctx->p2_corr_full, ctx->p2_delta));
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
   if (ctx->p2_layout.active) {
     PetscCall(VecAXPY(ctx->p2_x, 1.0, ctx->p2_delta));
-    PetscCall(PetscLogStagePush(log_stage_pmg_shell_p2));
-    PetscCall(PetscTime(&t0));
+    SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_P2);
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_P2_SMOOTH, ctx->smooth2, ctx->p2_rhs, &profile_timer);
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_rhs, ctx->p2_x));
-    PetscCall(PetscTime(&t1));
-    ctx->p2_smooth_time += t1 - t0;
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&ctx->p2_smooth_time, elapsed));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p2_x, &ctx->debug_p2_post));
-    PetscCall(PetscLogStagePop());
+    SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_P2);
   }
-  PetscCall(PetscLogStagePush(log_stage_pmg_shell_transfer));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_TRANSFER);
   PetscCall(PMGActiveLayoutCopySubToFull(&ctx->p2_layout, ctx->p2_x, ctx->p2_corr_full));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_TRANSFER, ctx->P42, ctx->p2_corr_full, &profile_timer);
   PetscCall(MatMult(ctx->P42, ctx->p2_corr_full, ctx->z4));
   PetscCall(VecAXPY(y, 1.0, ctx->z4));
-  PetscCall(PetscTime(&t1));
-  ctx->prolong_time += t1 - t0;
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&ctx->prolong_time, elapsed));
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
 
-  PetscCall(PetscLogStagePush(log_stage_pmg_shell_fine_smooth));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_FINE_SMOOTH);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_FINE_SMOOTH, ctx->smooth4, x, &profile_timer);
   PetscCall(KSPSolve(ctx->smooth4, x, y));
-  PetscCall(PetscTime(&t1));
-  ctx->fine_smooth_time += t1 - t0;
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&ctx->fine_smooth_time, elapsed));
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_FINE_SMOOTH);
+  SSR_PROFILE_END(NULL, SSR_EVENT_PMG_APPLY, pc, x);
   ctx->apply_calls++;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -1072,6 +1087,7 @@ static PetscErrorCode ConfigurePMGShellVCycle(PC pc, DM dm, AssemblyCtx *actx, A
   PetscFunctionBeginUser;
   PetscCall(PetscNew(&ctx));
   ctx->app  = app;
+  ctx->pmg  = &app->resolved_profile.linear.pmg;
   ctx->dm   = dm;
   ctx->actx = actx;
   ctx->p2_layout.subcomm = MPI_COMM_NULL;
@@ -1247,13 +1263,14 @@ static PetscErrorCode CheckPMGCoarseTransfers(LinearSolverCtx *solver)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode LinearSolverSetupPMGTransferChecks(LinearSolverCtx *solver, DM dm, const AppCtx *app)
+static PetscErrorCode LinearSolverSetupPMGTransferChecks(LinearSolverCtx *solver, DM dm, const AppCtx *app, const SsrPmgOptions *pmg)
 {
   MPI_Comm comm = PetscObjectComm((PetscObject)dm);
   Vec      v4 = NULL, v2 = NULL, v1 = NULL;
   PetscInt n4, n2, n1;
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, comm, PETSC_ERR_ARG_NULL, "PMG transfer checks require resolved PMG options");
   PetscCall(LinearSolverDestroyPMGHierarchy(solver));
   PetscCall(P4BasisCreateDegreeDim(PETSC_COMM_SELF, 1, solver->actx->basis->dim, solver->actx->basis->components, &solver->pmg_p1_basis));
   solver->pmg_p1_basis_created = PETSC_TRUE;
@@ -1279,7 +1296,7 @@ static PetscErrorCode LinearSolverSetupPMGTransferChecks(LinearSolverCtx *solver
   PetscCall(VecDestroy(&v1));
 
   solver->pmg_hierarchy_initialized = PETSC_TRUE;
-  if (app->pmg_check_coarse_transfers) PetscCall(CheckPMGCoarseTransfers(solver));
+  if (pmg->check_coarse_transfers) PetscCall(CheckPMGCoarseTransfers(solver));
   PetscCall(PetscPrintf(comm,
                         "PMG_COARSE_TRANSFER_CONFIG p1_quadrature_points=%" PetscInt_FMT " p2_quadrature_points=%" PetscInt_FMT " p1_global_dofs=%" PetscInt_FMT " p2_global_dofs=%" PetscInt_FMT "\n",
                         solver->pmg_p1_basis.n_qp, solver->pmg_p2_basis.n_qp, n1, n2));
@@ -1288,17 +1305,19 @@ static PetscErrorCode LinearSolverSetupPMGTransferChecks(LinearSolverCtx *solver
 
 static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver)
 {
-  P4Basis p1_basis, p2_basis;
-  DM      dm_p1 = NULL, dm_p2 = NULL;
-  Mat     P21 = NULL, P42 = NULL;
-  KSP     coarse = NULL, smoother = NULL;
-  PC      coarse_pc = NULL, smoother_pc = NULL;
-  char    coarse_pc_type[32];
-  MPI_Comm comm = PetscObjectComm((PetscObject)dm);
+  const SsrPmgOptions *pmg = &app->resolved_profile.linear.pmg;
+  P4Basis             p1_basis, p2_basis;
+  DM                  dm_p1 = NULL, dm_p2 = NULL;
+  Mat                 P21 = NULL, P42 = NULL;
+  KSP                 coarse = NULL, smoother = NULL;
+  PC                  coarse_pc = NULL, smoother_pc = NULL;
+  char                coarse_pc_type[32];
+  MPI_Comm            comm = PetscObjectComm((PetscObject)dm);
   PetscMPIInt ranks;
   PetscBool coarse_pc_from_options = PETSC_FALSE, coarse_is_lu = PETSC_FALSE, coarse_is_telescope = PETSC_FALSE, coarse_is_shell = PETSC_FALSE;
 
   PetscFunctionBeginUser;
+  PetscCheck(pmg, comm, PETSC_ERR_ARG_NULL, "PMG setup requires resolved PMG options");
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
   PetscCall(PetscPrintf(comm, "PMG_BACKEND backend=pcmg\n"));
   PetscCall(P4BasisCreateDegreeDim(PETSC_COMM_SELF, 1, actx->basis->dim, actx->basis->components, &p1_basis));
@@ -1310,9 +1329,9 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app,
   PetscCall(ReportPMGLevelDofs(dm, 2, actx->basis->degree));
   PetscCall(BuildInterpolationMatrix(dm_p2, &p2_basis, dm_p1, &p1_basis, &P21));
   PetscCall(BuildInterpolationMatrix(dm, actx->basis, dm_p2, &p2_basis, &P42));
-  PetscCall(SetPMGTelescopeDefaults(app, comm));
-  PetscCall(SetPMGP2TelescopeDefaults(app, comm));
-  PetscCall(ChoosePMGCoarsePC(app, dm_p1, coarse_pc_type, sizeof(coarse_pc_type)));
+  PetscCall(SetPMGTelescopeDefaults(pmg, comm));
+  PetscCall(SetPMGP2TelescopeDefaults(pmg, comm));
+  PetscCall(ChoosePMGCoarsePC(pmg, dm_p1, coarse_pc_type, sizeof(coarse_pc_type)));
   PetscCall(PetscOptionsHasName(NULL, NULL, "-mg_coarse_pc_type", &coarse_pc_from_options));
   PetscCall(PetscStrcasecmp(coarse_pc_type, "lu", &coarse_is_lu));
   PetscCall(PetscStrcasecmp(coarse_pc_type, "telescope", &coarse_is_telescope));
@@ -1329,48 +1348,52 @@ static PetscErrorCode ConfigurePMG(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app,
   PetscCall(PCMGSetGalerkin(pc, PC_MG_GALERKIN_BOTH));
   PetscCall(PetscPrintf(comm, "PMG_COARSE_OPERATOR_CONFIG type=galerkin p1_quadrature_points=%" PetscInt_FMT " p2_quadrature_points=%" PetscInt_FMT "\n",
                         p1_basis.n_qp, p2_basis.n_qp));
-  if (app->pmg_check_coarse_transfers) PetscCall(LinearSolverSetupPMGTransferChecks(solver, dm, app));
+  if (pmg->check_coarse_transfers) PetscCall(LinearSolverSetupPMGTransferChecks(solver, dm, app, pmg));
 
   PetscCall(PCMGGetCoarseSolve(pc, &coarse));
   PetscCall(KSPGetPC(coarse, &coarse_pc));
-  if (!coarse_pc_from_options && !coarse_is_lu && app->pmg_coarse_redundant_group_size > 0 && ranks > app->pmg_coarse_redundant_group_size) {
+  if (!coarse_pc_from_options && !coarse_is_lu && pmg->coarse_redundant_group_size > 0 && ranks > pmg->coarse_redundant_group_size) {
     KSP      inner_ksp;
     PC       inner_pc;
-    PetscInt copies = ((PetscInt)ranks + app->pmg_coarse_redundant_group_size - 1) / app->pmg_coarse_redundant_group_size;
+    PetscInt copies = ((PetscInt)ranks + pmg->coarse_redundant_group_size - 1) / pmg->coarse_redundant_group_size;
 
     PetscCall(KSPSetType(coarse, KSPPREONLY));
     PetscCall(PCSetType(coarse_pc, PCREDUNDANT));
     PetscCall(PCRedundantSetNumber(coarse_pc, copies));
     PetscCall(PCRedundantGetKSP(coarse_pc, &inner_ksp));
-    PetscCall(KSPSetType(inner_ksp, KSPFGMRES));
-    PetscCall(KSPSetTolerances(inner_ksp, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 100));
+    PetscCall(KSPSetType(inner_ksp, pmg->coarse_ksp_type));
+    PetscCall(KSPSetTolerances(inner_ksp, pmg->coarse_ksp_rtol, PETSC_DEFAULT, PETSC_DEFAULT, pmg->coarse_ksp_max_it));
     PetscCall(KSPGetPC(inner_ksp, &inner_pc));
-    PetscCall(ConfigurePMGBasePC(inner_pc, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
-    PetscCall(PetscPrintf(comm, "PMG_REDUNDANT_CONFIG enabled=true group_size=%" PetscInt_FMT " copies=%" PetscInt_FMT " inner_ksp=fgmres inner_pc=%s\n",
-                          app->pmg_coarse_redundant_group_size, copies, coarse_pc_type));
+    PetscCall(ConfigurePMGBasePC(inner_pc, coarse_pc_type, pmg->coarse_gamg_aggressive_square_graph));
+    PetscCall(PetscPrintf(comm, "PMG_REDUNDANT_CONFIG enabled=true group_size=%" PetscInt_FMT " copies=%" PetscInt_FMT " inner_ksp=%s inner_pc=%s\n",
+                          pmg->coarse_redundant_group_size, copies, pmg->coarse_ksp_type, coarse_pc_type));
     PetscCall(PetscPrintf(comm,
                           "PMG_COARSE_SOLVE type=redundant group_size=%" PetscInt_FMT " copies=%" PetscInt_FMT " inner_pc=%s aggressive_square_graph=%s\n",
-                          app->pmg_coarse_redundant_group_size, copies, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
+                          pmg->coarse_redundant_group_size, copies, coarse_pc_type, pmg->coarse_gamg_aggressive_square_graph ? "true" : "false"));
   } else {
     PetscCall(PetscPrintf(comm, "PMG_REDUNDANT_CONFIG enabled=false group_size=%" PetscInt_FMT " copies=0 inner_ksp=none inner_pc=none\n",
-                          app->pmg_coarse_redundant_group_size));
+                          pmg->coarse_redundant_group_size));
     if (coarse_is_lu || coarse_is_telescope) {
       PetscCall(KSPSetType(coarse, KSPPREONLY));
     } else {
-      PetscCall(KSPSetType(coarse, KSPFGMRES));
-      PetscCall(KSPSetTolerances(coarse, 1.0e-3, PETSC_DEFAULT, PETSC_DEFAULT, 100));
-      PetscCall(KSPGMRESSetRestart(coarse, 100));
+      PetscBool coarse_is_gmres_type = PETSC_FALSE, coarse_is_fgmres_type = PETSC_FALSE;
+
+      PetscCall(KSPSetType(coarse, pmg->coarse_ksp_type));
+      PetscCall(KSPSetTolerances(coarse, pmg->coarse_ksp_rtol, PETSC_DEFAULT, PETSC_DEFAULT, pmg->coarse_ksp_max_it));
+      PetscCall(PetscStrcasecmp(pmg->coarse_ksp_type, KSPGMRES, &coarse_is_gmres_type));
+      PetscCall(PetscStrcasecmp(pmg->coarse_ksp_type, KSPFGMRES, &coarse_is_fgmres_type));
+      if (coarse_is_gmres_type || coarse_is_fgmres_type) PetscCall(KSPGMRESSetRestart(coarse, pmg->coarse_ksp_max_it));
     }
-    PetscCall(ConfigurePMGBasePC(coarse_pc, coarse_pc_type, app->pmg_coarse_gamg_aggressive_square_graph));
+    PetscCall(ConfigurePMGBasePC(coarse_pc, coarse_pc_type, pmg->coarse_gamg_aggressive_square_graph));
     PetscCall(PetscPrintf(comm, "PMG_COARSE_SOLVE type=%s group_size=%" PetscInt_FMT " aggressive_square_graph=%s\n", coarse_pc_type,
-                          app->pmg_coarse_redundant_group_size, app->pmg_coarse_gamg_aggressive_square_graph ? "true" : "false"));
+                          pmg->coarse_redundant_group_size, pmg->coarse_gamg_aggressive_square_graph ? "true" : "false"));
   }
   for (PetscInt level = 1; level < 3; ++level) {
     PetscCall(PCMGGetSmoother(pc, level, &smoother));
-    PetscCall(KSPSetType(smoother, app->pmg_smoother_ksp_type));
-    PetscCall(KSPSetTolerances(smoother, 0.0, 0.0, PETSC_CURRENT, app->pmg_smoother_max_it));
+    PetscCall(KSPSetType(smoother, pmg->smoother_ksp_type));
+    PetscCall(KSPSetTolerances(smoother, 0.0, 0.0, PETSC_CURRENT, pmg->smoother_max_it));
     PetscCall(KSPGetPC(smoother, &smoother_pc));
-    PetscCall(PCSetType(smoother_pc, app->pmg_smoother_pc_type));
+    PetscCall(PCSetType(smoother_pc, pmg->smoother_pc_type));
   }
 
   PetscCall(MatDestroy(&P21));

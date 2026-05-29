@@ -9,7 +9,7 @@ import numpy as np
 
 from petsc_ssr.core.elements import simplex_vtk_cell_block
 from petsc_ssr.core.run_config import RunCaseConfig
-from petsc_ssr.mesh import reorder_mesh_nodes
+from petsc_ssr.mesh import node_ordering_requires_partitions, reorder_mesh_nodes
 from petsc_ssr.problem_asset_runtime import build_mesh_for_resolved_asset, resolve_problem_asset_from_config
 
 
@@ -28,7 +28,7 @@ class CaseMesh:
 def rebuild_case_mesh(cfg: RunCaseConfig, *, mpi_size: int = 1) -> CaseMesh:
     resolved = resolve_problem_asset_from_config(cfg)
     built = build_mesh_for_resolved_asset(resolved, elem_type=cfg.problem.elem_type)
-    part_count = int(mpi_size) if cfg.execution.node_ordering.lower() == "block_metis" else None
+    part_count = int(mpi_size) if node_ordering_requires_partitions(cfg.execution.node_ordering) else None
 
     coord, elem, surf, q_mask = _maybe_reorder(
         built.coord,

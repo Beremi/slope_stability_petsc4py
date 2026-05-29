@@ -203,7 +203,7 @@ def run_indirect_ssr(ctx: SsrContext, options: object | None = None) -> Continua
     if options is not None:
         ctx.options = options  # type: ignore[assignment]
 
-    ops = EngineOps(ctx.create_engine())
+    ops = ctx.debug_engine_ops()
     reporter = RankReporter(ctx.rank)
     data_dir = ctx.output_dir / "data"
     curve_csv = data_dir / "continuation_curve.csv"

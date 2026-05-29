@@ -108,6 +108,11 @@ SATURATION_PALETTE = {
     1: (0.0, 0.0, 1.0),
 }
 
+SMOKE_COORDINATE_BC_DEBUG_CASES = {
+    "3d-heterogeneous-seepage-ssr-comsol",
+    "3d-homogeneous-seepage-ssr-concave",
+}
+
 
 @dataclass(frozen=True)
 class RunArtifacts:
@@ -153,7 +158,13 @@ def benchmark_case_tomls(root: Path = BENCHMARKS_DIR) -> list[Path]:
 
 
 def load_case_document(case_toml: Path) -> dict[str, Any]:
-    return tomllib.loads(Path(case_toml).read_text(encoding="utf-8"))
+    case_path = Path(case_toml)
+    raw = tomllib.loads(case_path.read_text(encoding="utf-8"))
+    notebook_path = case_path.parent / "notebook.toml"
+    if notebook_path.exists():
+        sidecar = tomllib.loads(notebook_path.read_text(encoding="utf-8"))
+        raw["notebook"] = dict(sidecar.get("notebook", {}))
+    return raw
 
 
 def load_case_metadata(case_toml: Path) -> dict[str, Any]:
@@ -176,12 +187,12 @@ def load_case_metadata(case_toml: Path) -> dict[str, Any]:
             "mpi_ranks": 8,
         }
         problem = {
-            "name": str(case.get("name", case_toml.parent.name)),
+            "name": str(case.get("id", case.get("name", case_toml.parent.name))),
             "analysis": analysis,
             "asset": str(mesh.get("asset", "")),
             "mesh_variant": str(mesh.get("variant", "")),
             "elem_type": str(mesh.get("element", "")),
-            "profile": str(linear.get("profile", "baseline-pmg-deflated") or "baseline-pmg-deflated"),
+            "profile": str(linear.get("profile", "pmg-deflated-baseline") or "pmg-deflated-baseline"),
         }
     elem_type = str(problem.get("elem_type", "")).strip().upper()
     default_surface_subdivision = 2 if elem_type == "P4" else 0
@@ -264,6 +275,12 @@ def load_case_sections(case_toml: Path) -> dict[str, dict[str, Any]]:
 
 
 def load_case_materials(case_toml: Path) -> list[dict[str, Any]]:
+    """Return legacy inline material tables for old scratch configs.
+
+    Public benchmark cases resolve materials from mesh assets instead of
+    `[[materials]]` case tables. Generated notebooks keep this helper only so
+    old local artifacts can still be inspected during migration.
+    """
     raw = load_case_document(case_toml)
     materials = raw.get("materials", [])
     return [dict(item) for item in materials] if isinstance(materials, list) else []
@@ -280,9 +297,16 @@ def default_export_section() -> dict[str, Any]:
     }
 
 
-def render_case_toml(sections: dict[str, dict[str, Any]], materials: list[dict[str, Any]] | None = None) -> str:
+def render_case_toml(
+    sections: dict[str, dict[str, Any]],
+    materials: list[dict[str, Any]] | None = None,
+    *,
+    include_notebook: bool = False,
+) -> str:
     lines: list[str] = []
     for section_name in RUNTIME_SECTION_ORDER:
+        if section_name == "notebook" and not include_notebook:
+            continue
         section = sections.get(section_name, {})
         if not section:
             continue
@@ -330,7 +354,7 @@ def write_generated_case_toml(
         / "generated_case.toml"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_case_toml(sections, materials), encoding="utf-8")
+    out_path.write_text(render_case_toml(sections, materials, include_notebook=False), encoding="utf-8")
     return out_path
 
 
@@ -383,6 +407,7 @@ def ensure_notebook_artifacts(
         config_path=generated_config,
         out_dir=out_dir,
         mpi_ranks=ranks,
+        solver_args=_profile_solver_args(case_toml, execution_profile),
     )
     return NotebookExecution(
         out_dir=out_dir,
@@ -438,6 +463,7 @@ def run_parallel_case(
     clean_out_dir: bool = True,
     poll_seconds: float = 0.25,
     extra_env: dict[str, str] | None = None,
+    solver_args: list[str] | None = None,
 ) -> dict[str, Any]:
     out_dir = Path(out_dir).resolve()
     config_path = Path(config_path).resolve()
@@ -467,6 +493,7 @@ def run_parallel_case(
         str(config_path),
         "--output-dir",
         str(out_dir),
+        *(solver_args or []),
     ]
     env = dict(os.environ)
     paths = [str(ROOT), str(ROOT / "src")]
@@ -2172,7 +2199,7 @@ def _artifacts_mpi_size(artifacts: RunArtifacts | None) -> int:
 
 
 def _seepage_ssr_node_permutation(case_toml: Path, artifacts: RunArtifacts) -> np.ndarray | None:
-    from petsc_ssr.mesh import reorder_mesh_nodes
+    from petsc_ssr.mesh import node_ordering_requires_partitions, reorder_mesh_nodes
     from petsc_ssr.problem_asset_runtime import build_mesh_for_resolved_asset, resolve_problem_asset_from_config
 
     cfg = _load_runtime_config(case_toml)
@@ -2185,7 +2212,7 @@ def _seepage_ssr_node_permutation(case_toml: Path, artifacts: RunArtifacts) -> n
     if "seepage" not in resolved.definition.capabilities:
         return None
 
-    part_count = _artifacts_mpi_size(artifacts) if cfg.execution.node_ordering.lower() == "block_metis" else None
+    part_count = _artifacts_mpi_size(artifacts) if node_ordering_requires_partitions(cfg.execution.node_ordering) else None
     mesh = build_mesh_for_resolved_asset(resolved, elem_type=cfg.problem.elem_type)
     reordered = reorder_mesh_nodes(
         mesh.coord,
@@ -2366,18 +2393,32 @@ def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], exec
         raise ValueError(f"Unsupported execution profile {execution_profile!r}")
 
     if "case" in cloned or "mesh" in cloned or "linear" in cloned:
+        benchmark_name = case_toml.parent.name.lower()
         continuation = dict(cloned.get("continuation", {}))
-        linear = dict(cloned.get("linear", {}))
-        output = dict(cloned.get("output", {}))
         if continuation:
             continuation["step_max"] = min(int(continuation.get("step_max", 100)), 2)
             cloned["continuation"] = continuation
-        if linear:
-            linear["max_iterations"] = min(int(linear.get("max_iterations", 100)), 120)
-            cloned["linear"] = linear
-        output["solution"] = ["vtu", "petscbin"]
-        output["history"] = ["curve_csv"]
+        output = dict(cloned.get("output", {}))
+        output["preset"] = "smoke"
         cloned["output"] = output
+        if benchmark_name in {
+            "2d-franz-dam-ssr",
+            "2d-kozinec-ll",
+            "2d-kozinec-ssr",
+            "2d-luzec-ssr",
+            "3d-heterogeneous-ll",
+            "3d-homogeneous-ll",
+        }:
+            mesh = dict(cloned.get("mesh", {}))
+            mesh["element"] = "P1"
+            cloned["mesh"] = mesh
+            linear = dict(cloned.get("linear", {}))
+            linear["profile"] = "gamg-p1-baseline"
+            cloned["linear"] = linear
+            newton = dict(cloned.get("newton", {}))
+            if benchmark_name in {"2d-kozinec-ll", "3d-heterogeneous-ll", "3d-homogeneous-ll"}:
+                newton["profile"] = "limit-load-regularized-it100"
+            cloned["newton"] = newton
         return cloned
 
     problem = dict(cloned.get("problem", {}))
@@ -2441,6 +2482,13 @@ def _profile_sections(case_toml: Path, sections: dict[str, dict[str, Any]], exec
         linear_solver["solver_type"] = "PETSC_MATLAB_DFGMRES_HYPRE_NULLSPACE"
         cloned["linear_solver"] = linear_solver
     return cloned
+
+
+def _profile_solver_args(case_toml: Path, execution_profile: str) -> list[str]:
+    profile = str(execution_profile).strip().lower()
+    if profile == "smoke" and case_toml.parent.name.lower() in SMOKE_COORDINATE_BC_DEBUG_CASES:
+        return ["--write-coordinate-bc-table"]
+    return []
 
 
 def _profile_mpi_ranks(metadata: dict[str, Any], execution_profile: str) -> int:

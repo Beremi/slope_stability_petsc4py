@@ -1,38 +1,18 @@
 [case]
-name = "2d-sloan2013-seepage"
+id = "2d-sloan2013-seepage"
 title = "2D Sloan2013 seepage"
-tags = ["2d", "p1", "seepage"]
+tags = ["regression"]
 
 [mesh]
 asset = "2d_sloan2013"
 variant = "default"
 element = "P1"
-refine_levels = 0
-partitioner = "parmetis"
 
 [physics.seepage]
 model = "darcy"
 
-[continuation]
-profile = "indirect-classic"
-
-[newton]
-profile = "indirect-regularized"
-
 [linear]
-profile = "baseline-pmg-deflated"
-tolerance = 1e-10
-max_iterations = 300
+profile = "pmg-deflated-baseline"
 
 [seepage]
-linear_tolerance = 1e-10
-linear_max_iter = 300
-nonlinear_max_iter = 100
-
-[output]
-solution = ["vtu", "petscbin"]
-history = ["summary_json", "curve_csv"]
-
-[notebook]
-family = "2d_seepage"
-material_palette = "sloan2013"
+profile = "sloan2013-steady"

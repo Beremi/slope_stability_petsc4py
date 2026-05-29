@@ -6,9 +6,17 @@ import csv
 from pathlib import Path
 import json
 import xml.etree.ElementTree as ET
+from typing import Any
 
-import h5py
 import numpy as np
+
+
+def _load_h5py():
+    try:
+        import h5py
+    except ImportError as exc:  # pragma: no cover - exercised only in minimal installs
+        raise ImportError("Writing HDF5 debug bundles requires the optional 'h5py' package.") from exc
+    return h5py
 
 
 def _attempt_group_key(event: dict[str, object]) -> tuple[object, ...] | None:
@@ -98,6 +106,7 @@ def write_debug_bundle_h5(
     if progress_path is not None and progress_path.exists():
         progress_text = progress_path.read_text(encoding="utf-8")
 
+    h5py = _load_h5py()
     with np.load(npz_path, allow_pickle=True) as npz, h5py.File(out_path, "w") as h5:
         meta = h5.create_group("metadata")
         meta.create_dataset("config_toml", data=np.bytes_(config_text))
@@ -504,7 +513,7 @@ def _append_data_array(node: ET.Element, name: str | None, values: np.ndarray, n
         data.text = _format_ascii(flat.reshape(-1))
 
 
-def _create_h5_dataset(group: h5py.Group, name: str, values: np.ndarray) -> None:
+def _create_h5_dataset(group: Any, name: str, values: np.ndarray) -> None:
     arr = np.asarray(values)
     if arr.dtype.kind in {"U", "S", "O"}:
         text = np.asarray(arr, dtype=str)

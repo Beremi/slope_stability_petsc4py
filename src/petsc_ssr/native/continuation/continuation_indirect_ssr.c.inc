@@ -16,20 +16,24 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
   PetscReal      lambda_init = app->lambda_init;
   PetscInt       init_basis_base;
   PetscInt       attempts = 0, step = 0, omega_reductions = 0;
-  PetscLogDouble t_start, t_end;
+  SsrProfileTimer run_timer;
+  PetscLogDouble wall_time = 0.0;
   NewtonStats    nstats;
   SSRCurveRow    row;
+  const SsrNativeNewtonOps *fixed_newton_ops = NULL, *continuation_newton_ops = NULL;
 
   PetscFunctionBeginUser;
   PetscCall(PetscMemzero(stats, sizeof(*stats)));
   PetscCall(PetscStrncpy(stats->stop_reason, "running", sizeof(stats->stop_reason)));
+  PetscCall(SsrNativeNewtonRegistryFind("fixed-load", &fixed_newton_ops));
+  PetscCall(SsrNativeNewtonRegistryFind(app->newton_algorithm, &continuation_newton_ops));
   PetscCallMPI(MPI_Comm_rank(comm, &rank));
   if (rank == 0) {
     csv = fopen(app->curve_csv, "w");
     PetscCheck(csv, PETSC_COMM_SELF, PETSC_ERR_FILE_OPEN, "Failed to open continuation CSV %s", app->curve_csv);
   }
   PetscCall(CurveWriteHeader(csv));
-  PetscCall(PetscTime(&t_start));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_CONTINUATION_RUN, dm, f_ext, &run_timer);
   init_basis_base = solver->n_raw_basis;
   PetscCall(VecDuplicate(f_ext, &u_prev));
   PetscCall(VecDuplicate(f_ext, &u_cur));
@@ -38,10 +42,14 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
 
   while (PETSC_TRUE) {
     const PetscInt basis_snapshot = solver->n_raw_basis;
+    SsrNativeNewtonInput ninput = {0};
 
     PetscCall(VecZeroEntries(u_prev));
     PetscCall(PetscPrintf(comm, "SSR_INIT phase=seed lambda=%.8e d_lambda=%.8e basis_snapshot=%" PetscInt_FMT "\n", (double)lambda_init, (double)d_lambda, basis_snapshot));
-    PetscCall(FixedLambdaNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_prev, lambda_init, rhs_norm, app->init_newton_stopping_criterion, app->init_newton_stopping_tol, &nstats));
+    ninput.dm = dm; ninput.actx = actx; ninput.app = app; ninput.solver = solver; ninput.Areg = Areg; ninput.Kelastic = Kelastic; ninput.Ktangent = Ktangent;
+    ninput.f_ext = f_ext; ninput.u = u_prev; ninput.lambda = lambda_init; ninput.rhs_norm = rhs_norm;
+    ninput.criterion = app->init_newton_stopping_criterion; ninput.stop_tol = app->init_newton_stopping_tol;
+    PetscCall(fixed_newton_ops->solve(&ninput, &nstats));
     attempts++;
     if (nstats.converged) break;
     PetscCall(LinearSolverTruncateRawBasis(solver, basis_snapshot));
@@ -56,21 +64,20 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
   PetscCall(CurveWriteRow(csv, &row));
   PetscCall(PetscPrintf(comm, "SSR_STEP step=%" PetscInt_FMT " phase=init omega=%.8e lambda=%.8e accepted=true newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT "\n",
                         step, (double)omega_prev, (double)lambda_prev, nstats.newton_its, nstats.total_linear_its));
-  stats->accepted_steps++;
-  stats->total_newton_its += nstats.newton_its;
-  stats->total_linear_its += nstats.total_linear_its;
-  stats->total_line_search_its += nstats.line_search_its;
-  stats->final_rel            = nstats.final_rel;
-  stats->final_rel_correction = nstats.final_rel_correction;
+  PetscCall(SsrStatsAcceptContinuationStep(stats, &nstats));
   step++;
 
   while (PETSC_TRUE) {
     const PetscInt basis_snapshot = solver->n_raw_basis;
+    SsrNativeNewtonInput ninput = {0};
 
     lambda_cur = lambda_prev + d_lambda;
     PetscCall(VecCopy(u_prev, u_cur));
     PetscCall(PetscPrintf(comm, "SSR_INIT phase=advance lambda=%.8e d_lambda=%.8e basis_snapshot=%" PetscInt_FMT "\n", (double)lambda_cur, (double)d_lambda, basis_snapshot));
-    PetscCall(FixedLambdaNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_cur, lambda_cur, rhs_norm, app->init_newton_stopping_criterion, app->init_newton_stopping_tol, &nstats));
+    ninput.dm = dm; ninput.actx = actx; ninput.app = app; ninput.solver = solver; ninput.Areg = Areg; ninput.Kelastic = Kelastic; ninput.Ktangent = Ktangent;
+    ninput.f_ext = f_ext; ninput.u = u_cur; ninput.lambda = lambda_cur; ninput.rhs_norm = rhs_norm;
+    ninput.criterion = app->init_newton_stopping_criterion; ninput.stop_tol = app->init_newton_stopping_tol;
+    PetscCall(fixed_newton_ops->solve(&ninput, &nstats));
     attempts++;
     if (!nstats.converged) {
       PetscCall(LinearSolverTruncateRawBasis(solver, basis_snapshot));
@@ -94,12 +101,7 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
   PetscCall(CurveWriteRow(csv, &row));
   PetscCall(PetscPrintf(comm, "SSR_STEP step=%" PetscInt_FMT " phase=init omega=%.8e lambda=%.8e d_omega=%.8e d_lambda=%.8e accepted=true newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT "\n",
                         step, (double)omega_cur, (double)lambda_cur, (double)(omega_cur - omega_prev), (double)(lambda_cur - lambda_prev), nstats.newton_its, nstats.total_linear_its));
-  stats->accepted_steps++;
-  stats->total_newton_its += nstats.newton_its;
-  stats->total_linear_its += nstats.total_linear_its;
-  stats->total_line_search_its += nstats.line_search_its;
-  stats->final_rel            = nstats.final_rel;
-  stats->final_rel_correction = nstats.final_rel_correction;
+  PetscCall(SsrStatsAcceptContinuationStep(stats, &nstats));
   step++;
 
   d_omega = omega_cur - omega_prev;
@@ -115,6 +117,7 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
     PetscReal      alpha_sec = (target - omega_cur) / (omega_cur - omega_prev);
     PetscReal      omega_old = omega_cur;
     PetscBool      branch_double = PETSC_FALSE;
+    SsrNativeNewtonInput ninput = {0};
 
     PetscCall(PetscStrcmp(stats->stop_reason, "running", &reason_running));
     if (!reason_running || step >= app->continuation_step_max || omega_cur >= app->omega_max) break;
@@ -133,7 +136,10 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
       if (omega_reductions >= 5) PetscCall(PetscStrncpy(stats->stop_reason, "omega_reduction_limit", sizeof(stats->stop_reason)));
       continue;
     }
-    PetscCall(IndirectNewtonSolve(dm, actx, app, solver, Areg, Kelastic, Ktangent, f_ext, u_guess, &lambda_guess, target, rhs_norm, app->r_min, app->newton_stopping_criterion, app->newton_stopping_tol, &nstats));
+    ninput.dm = dm; ninput.actx = actx; ninput.app = app; ninput.solver = solver; ninput.Areg = Areg; ninput.Kelastic = Kelastic; ninput.Ktangent = Ktangent;
+    ninput.f_ext = f_ext; ninput.u = u_guess; ninput.lambda_ref = &lambda_guess; ninput.omega_target = target;
+    ninput.rhs_norm = rhs_norm; ninput.initial_r = app->r_min; ninput.criterion = app->newton_stopping_criterion; ninput.stop_tol = app->newton_stopping_tol;
+    PetscCall(continuation_newton_ops->solve(&ninput, &nstats));
     attempts++;
     if (!nstats.converged) {
       PetscCall(LinearSolverTruncateRawBasis(solver, basis_snapshot));
@@ -160,12 +166,7 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
                           "SSR_STEP step=%" PetscInt_FMT " phase=cont omega=%.8e lambda=%.8e d_omega=%.8e d_lambda=%.8e accepted=true newton_its=%" PetscInt_FMT " linear_its=%" PetscInt_FMT " rel_res=%.6e\n",
                           step, (double)omega_cur, (double)lambda_cur, (double)(omega_cur - omega_prev), (double)(lambda_cur - lambda_prev),
                           nstats.newton_its, nstats.total_linear_its, (double)nstats.final_rel));
-    stats->accepted_steps++;
-    stats->total_newton_its += nstats.newton_its;
-    stats->total_linear_its += nstats.total_linear_its;
-    stats->total_line_search_its += nstats.line_search_its;
-    stats->final_rel            = nstats.final_rel;
-    stats->final_rel_correction = nstats.final_rel_correction;
+    PetscCall(SsrStatsAcceptContinuationStep(stats, &nstats));
     step++;
 
     if (branch_double) d_omega *= 2.0;
@@ -186,8 +187,8 @@ static PetscErrorCode SSRContinuationSolve(DM dm, AssemblyCtx *actx, AppCtx *app
   stats->omega_last  = omega_cur;
   stats->lambda_last = lambda_cur;
   if (u_out) PetscCall(VecCopy(u_cur, u_out));
-  PetscCall(PetscTime(&t_end));
-  stats->wall_time = t_end - t_start;
+  SSR_PROFILE_TIMER_END(NULL, &run_timer, &wall_time);
+  stats->wall_time = wall_time;
   PetscCall(PetscPrintf(comm,
                         "SSR_RESULT omega_last=%.8e lambda_last=%.8e accepted_steps=%" PetscInt_FMT " total_newton_iterations=%" PetscInt_FMT " total_linear_iterations=%" PetscInt_FMT " total_line_search_iterations=%" PetscInt_FMT " wall_time=%.6g stop_reason=%s curve_csv=%s\n",
                         (double)stats->omega_last, (double)stats->lambda_last, stats->accepted_steps, stats->total_newton_its,

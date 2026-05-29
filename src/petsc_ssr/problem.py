@@ -145,13 +145,38 @@ class ProblemSpec:
             tokens.extend(material.option_tokens())
         seepage_pressure_csv = self.metadata.get("seepage_pressure_csv")
         if seepage_pressure_csv:
+            seepage_pressure_source = str(self.metadata.get("seepage_pressure_source", "")).strip()
+            if seepage_pressure_source != "hydro_prepass_coordinate_bridge":
+                raise ValueError(
+                    "seepage_pressure_csv is a coordinate bridge and requires "
+                    "metadata['seepage_pressure_source']='hydro_prepass_coordinate_bridge'"
+                )
+            tokens.extend(["-seepage_pressure_source", seepage_pressure_source])
             tokens.extend(["-seepage_pressure_csv", str(seepage_pressure_csv)])
         seepage_grho = self.metadata.get("seepage_grho")
         if seepage_grho is not None:
             tokens.extend(["-seepage_grho", f"{float(seepage_grho):.17g}"])
+        seepage_boundary_labels_csv = self.metadata.get("seepage_boundary_labels_csv")
+        if seepage_boundary_labels_csv:
+            tokens.extend(["-seepage_boundary_labels_csv", str(seepage_boundary_labels_csv)])
         mechanics_bc_nodes_csv = self.metadata.get("mechanics_bc_nodes_csv")
         if mechanics_bc_nodes_csv:
+            if not bool(self.metadata.get("debug_coordinate_bc_table", False)):
+                raise ValueError(
+                    "mechanics_bc_nodes_csv is a debug compatibility input and requires "
+                    "metadata['debug_coordinate_bc_table']=True"
+                )
+            tokens.extend(["-debug_coordinate_bc_table", "true"])
             tokens.extend(["-mechanics_bc_nodes_csv", str(mechanics_bc_nodes_csv)])
+        mechanics_bc_labels_csv = self.metadata.get("mechanics_bc_labels_csv")
+        if mechanics_bc_labels_csv:
+            tokens.extend(["-mechanics_bc_labels_csv", str(mechanics_bc_labels_csv)])
+        mechanics_neumann_labels_csv = self.metadata.get("mechanics_neumann_labels_csv")
+        if mechanics_neumann_labels_csv:
+            tokens.extend(["-mechanics_neumann_labels_csv", str(mechanics_neumann_labels_csv)])
+        native_problem_manifest = self.metadata.get("native_problem_manifest")
+        if native_problem_manifest:
+            tokens.extend(["-native_problem_manifest", str(native_problem_manifest)])
         return tokens
 
     def to_dict(self) -> dict[str, Any]:

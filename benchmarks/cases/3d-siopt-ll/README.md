@@ -13,7 +13,7 @@ This 3D case runs a config-driven limit-load (LL) analysis using asset `3d_siopt
 - Case config: [`case.toml`](case.toml)
 - Asset: `3d_siopt`
 - Mesh variant: `reference_l0`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `ll`
 - Element order: `P2`
 

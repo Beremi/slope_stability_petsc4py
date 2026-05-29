@@ -1,14 +1,12 @@
 [case]
-name = "3d-siopt-ll"
+id = "3d-siopt-ll"
 title = "3D SIOPT LL"
-tags = ["3d", "p2", "mechanics", "limit-load"]
+tags = ["regression"]
 
 [mesh]
 asset = "3d_siopt"
 variant = "reference_l0"
 element = "P2"
-refine_levels = 0
-partitioner = "parmetis"
 profile = "fixed_base"
 
 [physics.mechanics]
@@ -16,31 +14,11 @@ model = "mohr_coulomb_limit_load"
 davis = "B"
 
 [continuation]
-profile = "indirect-classic"
+profile = "direct-limit-load"
 omega_max = 36000000.0
-lambda_ell = 1.0
-d_t_min = 0.001
-d_omega_ini_scale = 0.2
-step_max = 100
 
 [newton]
-profile = "indirect-regularized"
-it_max = 100
-it_damp_max = 10
-tol = 0.0001
-r_min = 0.0001
+profile = "limit-load-regularized-it100"
 
 [linear]
-profile = "baseline-pmg-deflated"
-tolerance = 0.1
-max_iterations = 200
-
-[output]
-solution = ["vtu", "petscbin"]
-history = ["summary_json", "curve_csv"]
-
-[notebook]
-family = "3d_continuation"
-slice_planes_y = [30.0]
-slice_planes_z = [43.30127019]
-strain_clim_scale_max = 0.25
+profile = "pmg-deflated-baseline"

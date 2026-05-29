@@ -1,0 +1,63 @@
+description = "Maintained scalable full-C PMG baseline with cached deflation."
+
+[linear]
+algorithm = "ksp_deflated"
+ksp_type = "fgmres"
+norm_type = "unpreconditioned"
+rtol = 1e-1
+max_it = 200
+recycle_preconditioner = true
+
+[deflation]
+enabled = true
+basis_tolerance = 1e-3
+max_vectors = 48
+recycle = "accepted_steps"
+
+[pc]
+type = "pmg_shell"
+
+[pmg]
+rank_policy = "adaptive"
+apply_backend = "shell_vcycle"
+subcomm_type = "interlaced"
+fine_ksp_max_it = 5
+smoother_ksp_type = "chebyshev"
+smoother_pc_type = "jacobi"
+smoother_max_it = 2
+
+[pmg.coarse]
+pc_type = "gamg"
+lu_max_dofs = 50000
+redundant_group_size = 0
+gamg_aggressive_square_graph = false
+
+[pmg.coarse.telescope]
+active_ranks = 0
+subcomm_type = "interlaced"
+ksp_type = "fgmres"
+ksp_rtol = 1e-3
+ksp_max_it = 5
+pc_type = "gamg"
+
+[pmg.p2]
+active_rank_policy = "cap"
+max_active_ranks = 64
+ksp_max_it = 10
+
+[pmg.p2.telescope]
+active_ranks = 0
+subcomm_type = "interlaced"
+ksp_type = "fgmres"
+ksp_rtol = 1e-3
+ksp_max_it = 50
+pc_type = "jacobi"
+
+[pmg.p1]
+active_rank_policy = "fraction"
+fraction = 0.5
+max_active_ranks = 64
+
+[petsc]
+options_file = "configs/petsc/pmg_shell_baseline.opts"
+extra = []

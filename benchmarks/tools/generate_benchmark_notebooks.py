@@ -25,6 +25,10 @@ def _load_metadata(case_toml: Path) -> dict[str, object]:
     import tomllib
 
     raw = tomllib.loads(case_toml.read_text(encoding="utf-8"))
+    notebook_path = case_toml.parent / "notebook.toml"
+    if notebook_path.exists():
+        sidecar = tomllib.loads(notebook_path.read_text(encoding="utf-8"))
+        raw["notebook"] = dict(sidecar.get("notebook", {}))
     case = dict(raw.get("case", {}))
     mesh = dict(raw.get("mesh", {}))
     physics = dict(raw.get("physics", {}))
@@ -43,7 +47,7 @@ def _load_metadata(case_toml: Path) -> dict[str, object]:
             "mpi_ranks": 8,
             "asset": str(mesh.get("asset", "")),
             "mesh_variant": str(mesh.get("variant", "")),
-            "profile": str(linear.get("profile", "baseline-pmg-deflated") or "baseline-pmg-deflated"),
+            "profile": str(linear.get("profile", "pmg-deflated-baseline") or "pmg-deflated-baseline"),
             "analysis": analysis,
             "elem_type": str(mesh.get("element", "")),
             "family": str(notebook.get("family", "")),
@@ -101,9 +105,8 @@ def _load_case_cell():
         """
         metadata = nb.load_case_metadata(CASE_TOML)
         sections = nb.load_case_sections(CASE_TOML)
-        materials = nb.load_case_materials(CASE_TOML)
 
-        print(nb.summarize_sections(sections, materials))
+        print(nb.summarize_sections(sections, []))
         metadata
         """
     )
@@ -119,7 +122,7 @@ def _simulation_controls_cell():
         PREVIEW_CONFIG = nb.write_generated_case_toml(
             case_toml=CASE_TOML,
             sections=sections,
-            materials=materials,
+            materials=None,
             run_label=RUN_LABEL,
             root=CASE_DIR,
         )
@@ -134,7 +137,7 @@ def _execution_cell():
         execution = nb.ensure_notebook_artifacts(
             case_toml=CASE_TOML,
             sections=sections,
-            materials=materials,
+            materials=None,
             run_label=RUN_LABEL,
             run_mode=RUN_MODE,
             execution_profile=EXECUTION_PROFILE,
@@ -459,13 +462,13 @@ def build_simulation_notebook(case_toml: Path):
             """
             ## Editable Runtime Sections
 
-            Modify values directly in `sections` or `materials`, then rerun the config-write and solver cells below.
+            Modify values directly in `sections`, then rerun the config-write and solver cells below.
+            Geometry, material, and boundary-condition supports are owned by the selected mesh asset.
             Notebook configs and notebook-local solver artifacts are written under
             `artifacts/<run_label>/` inside this benchmark folder.
             """
         ),
         _code_cell("sections"),
-        _code_cell("materials"),
         _simulation_controls_cell(),
         _execution_cell(),
         _simulation_summary_cell(),

@@ -1,8 +1,9 @@
 #include "assembly.h"
-#include "material_mc.h"
+#include "petsc_ssr_algorithms.h"
 
 #include <petscdualspace.h>
 #include <petscdmplex.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,17 @@ typedef struct {
   PetscReal x[3];
   PetscBool constrained[3];
 } ConstraintPoint;
+
+typedef struct {
+  char      support_kind[32];
+  char      support_name[128];
+  char      dm_label[64];
+  PetscInt  tag;
+  PetscBool constrained[3];
+} LabelConstraintRule;
+
+static PetscErrorCode CopyConstrainedGlobalIndices(AssemblyCtx *ctx);
+static PetscErrorCode RestrictConstrainedISOwned(DM dm, AssemblyCtx *ctx);
 
 static long long PressureCoordKey(PetscReal x, PetscReal tol)
 {
@@ -75,6 +87,428 @@ static PetscErrorCode MechanicsPointCentroid(DM dm, PetscInt point, PetscReal x[
 static PetscBool ConstraintPointMatches(const ConstraintPoint *point, const PetscReal x[3], PetscReal tol)
 {
   return (PetscAbsReal(point->x[0] - x[0]) <= tol && PetscAbsReal(point->x[1] - x[1]) <= tol && PetscAbsReal(point->x[2] - x[2]) <= tol) ? PETSC_TRUE : PETSC_FALSE;
+}
+
+static char *TrimField(char *text)
+{
+  char *end;
+
+  while (*text && isspace((unsigned char)*text)) ++text;
+  end = text + strlen(text);
+  while (end > text && isspace((unsigned char)end[-1])) --end;
+  *end = '\0';
+  return text;
+}
+
+static PetscInt SplitCsvFields(char *line, char *fields[], PetscInt max_fields)
+{
+  PetscInt n = 0;
+  char    *start = line;
+
+  for (char *p = line;; ++p) {
+    if (*p == ',' || *p == '\n' || *p == '\r' || *p == '\0') {
+      const char sep = *p;
+
+      *p = '\0';
+      if (n < max_fields) fields[n++] = start;
+      if (sep == '\0' || sep == '\n' || sep == '\r') break;
+      start = p + 1;
+    }
+  }
+  return n;
+}
+
+static PetscErrorCode SplitQuotedCsvFields(char *line, char *fields[], PetscInt max_fields, PetscInt *nfields, const char context[])
+{
+  PetscInt  n = 0;
+  char     *src = line;
+  char     *dst = line;
+  PetscBool in_quotes = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  PetscCheck(nfields, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "SplitQuotedCsvFields requires an output field count");
+  if (max_fields > 0) fields[n++] = dst;
+  for (;;) {
+    const char c = *src++;
+
+    if (c == '\0') {
+      PetscCheck(!in_quotes, PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Unterminated quoted %s CSV field", context);
+      *dst = '\0';
+      break;
+    }
+    if (c == '"') {
+      if (in_quotes && *src == '"') {
+        *dst++ = '"';
+        ++src;
+      } else {
+        in_quotes = in_quotes ? PETSC_FALSE : PETSC_TRUE;
+      }
+      continue;
+    }
+    if (!in_quotes && (c == ',' || c == '\n' || c == '\r')) {
+      *dst++ = '\0';
+      if (c == '\n' || c == '\r') break;
+      if (n < max_fields) fields[n] = dst;
+      ++n;
+      continue;
+    }
+    *dst++ = c;
+  }
+  *nfields = n;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ParseConstraintComponents(const char text[], PetscBool constrained[3])
+{
+  PetscBool any = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  for (PetscInt c = 0; c < 3; ++c) constrained[c] = PETSC_FALSE;
+  for (const char *p = text; *p;) {
+    while (*p && (isspace((unsigned char)*p) || *p == ';' || *p == '|' || *p == '+')) ++p;
+    if (!*p) break;
+    if (*p == 'x' || *p == 'X' || *p == '0') {
+      constrained[0] = PETSC_TRUE;
+      any = PETSC_TRUE;
+    } else if (*p == 'y' || *p == 'Y' || *p == '1') {
+      constrained[1] = PETSC_TRUE;
+      any = PETSC_TRUE;
+    } else if (*p == 'z' || *p == 'Z' || *p == '2') {
+      constrained[2] = PETSC_TRUE;
+      any = PETSC_TRUE;
+    } else {
+      SETERRQ(PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Unsupported mechanics constraint component token starting at '%s'", p);
+    }
+    while (*p && !(isspace((unsigned char)*p) || *p == ';' || *p == '|' || *p == '+')) ++p;
+  }
+  PetscCheck(any, PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Mechanics label constraint row has no constrained components");
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ParseLabelConstraintRule(char line[], LabelConstraintRule *rule, PetscBool *is_header)
+{
+  char    *fields[8];
+  PetscInt nfields;
+  char    *support_kind, *support_name, *dm_label, *tag_text, *components, *values;
+
+  PetscFunctionBeginUser;
+  *is_header = PETSC_FALSE;
+  nfields = SplitCsvFields(line, fields, 8);
+  PetscCheck(nfields >= 5, PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Mechanics label constraint row has %" PetscInt_FMT " fields; expected at least 5", nfields);
+  support_kind = TrimField(fields[0]);
+  support_name = TrimField(fields[1]);
+  dm_label = TrimField(fields[2]);
+  tag_text = TrimField(fields[3]);
+  components = TrimField(fields[4]);
+  values = nfields > 5 ? TrimField(fields[5]) : (char *)"";
+  if (!strcmp(support_kind, "support_kind")) {
+    *is_header = PETSC_TRUE;
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  PetscCheck(!values[0], PETSC_COMM_SELF, PETSC_ERR_SUP,
+             "Nonzero mechanics label constraint values are not supported yet; row target=%s values=%s", support_name, values);
+  PetscCall(PetscStrncpy(rule->support_kind, support_kind, sizeof(rule->support_kind)));
+  PetscCall(PetscStrncpy(rule->support_name, support_name, sizeof(rule->support_name)));
+  PetscCall(PetscStrncpy(rule->dm_label, dm_label, sizeof(rule->dm_label)));
+  {
+    char *end = NULL;
+    long  tag = strtol(tag_text, &end, 10);
+
+    PetscCheck(end && end != tag_text && !TrimField(end)[0], PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG,
+               "Invalid mechanics label constraint tag %s", tag_text);
+    rule->tag = (PetscInt)tag;
+  }
+  PetscCall(ParseConstraintComponents(components, rule->constrained));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscBool SortedIntArrayContains(const PetscInt idx[], PetscInt n, PetscInt value)
+{
+  PetscInt lo = 0, hi = n;
+
+  while (lo < hi) {
+    PetscInt mid = lo + (hi - lo) / 2;
+    if (idx[mid] == value) return PETSC_TRUE;
+    if (idx[mid] < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return PETSC_FALSE;
+}
+
+static PetscErrorCode AppendPoint(PetscInt point, PetscInt **points, PetscInt *npoints, PetscInt *cap_points)
+{
+  PetscFunctionBeginUser;
+  if (*npoints >= *cap_points) {
+    *cap_points = *cap_points ? 2 * *cap_points : 128;
+    PetscCall(PetscRealloc(sizeof(**points) * *cap_points, points));
+  }
+  (*points)[(*npoints)++] = point;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PointDepthFromStrata(DM dm, PetscInt point, PetscInt dim, PetscInt *depth)
+{
+  PetscFunctionBeginUser;
+  *depth = -1;
+  for (PetscInt d = 0; d <= dim; ++d) {
+    PetscInt pStart, pEnd;
+
+    PetscCall(DMPlexGetDepthStratum(dm, d, &pStart, &pEnd));
+    if (point >= pStart && point < pEnd) {
+      *depth = d;
+      PetscFunctionReturn(PETSC_SUCCESS);
+    }
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PointClosureVerticesInSet(DM dm, PetscInt point, PetscInt dim, const PetscInt selected[], PetscInt nselected, PetscBool *all_selected, PetscInt *nverts)
+{
+  PetscInt nclosure = 0, *closure = NULL;
+
+  PetscFunctionBeginUser;
+  *all_selected = PETSC_TRUE;
+  *nverts = 0;
+  PetscCall(DMPlexGetTransitiveClosure(dm, point, PETSC_TRUE, &nclosure, &closure));
+  for (PetscInt i = 0; i < nclosure; ++i) {
+    PetscInt p = closure[2 * i], depth;
+
+    PetscCall(PointDepthFromStrata(dm, p, dim, &depth));
+    if (depth != 0) continue;
+    ++*nverts;
+    if (!SortedIntArrayContains(selected, nselected, p)) {
+      *all_selected = PETSC_FALSE;
+      break;
+    }
+  }
+  PetscCall(DMPlexRestoreTransitiveClosure(dm, point, PETSC_TRUE, &nclosure, &closure));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode PointTouchesBoundary(DM dm, PetscInt point, PetscInt depth, PetscInt dim, PetscBool *touches)
+{
+  PetscFunctionBeginUser;
+  *touches = PETSC_FALSE;
+  if (depth == dim - 1) {
+    PetscInt support_size = 0;
+
+    PetscCall(DMPlexGetSupportSize(dm, point, &support_size));
+    *touches = support_size == 1 ? PETSC_TRUE : PETSC_FALSE;
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  if (depth > 0 && depth < dim - 1) {
+    PetscInt nclosure = 0, *closure = NULL;
+
+    PetscCall(DMPlexGetTransitiveClosure(dm, point, PETSC_FALSE, &nclosure, &closure));
+    for (PetscInt i = 0; i < nclosure; ++i) {
+      PetscInt p = closure[2 * i], pdepth;
+
+      PetscCall(PointDepthFromStrata(dm, p, dim, &pdepth));
+      if (pdepth == dim - 1) {
+        PetscInt support_size = 0;
+
+        PetscCall(DMPlexGetSupportSize(dm, p, &support_size));
+        if (support_size == 1) {
+          *touches = PETSC_TRUE;
+          break;
+        }
+      }
+    }
+    PetscCall(DMPlexRestoreTransitiveClosure(dm, point, PETSC_FALSE, &nclosure, &closure));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode AppendConstraintDofsForPoint(AssemblyCtx *ctx, PetscSection gsec, PetscInt point, const PetscBool flags[3], PetscInt **idx, PetscInt *nidx, PetscInt *cap_idx, PetscBool *added)
+{
+  MPI_Comm comm;
+  PetscInt dof = 0, off = 0, scalar_dofs;
+
+  PetscFunctionBeginUser;
+  *added = PETSC_FALSE;
+  if (!flags[0] && !flags[1] && !flags[2]) PetscFunctionReturn(PETSC_SUCCESS);
+  comm = PetscObjectComm((PetscObject)ctx->dm);
+  PetscCall(PetscSectionGetDof(gsec, point, &dof));
+  if (dof <= 0) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(PetscSectionGetOffset(gsec, point, &off));
+  if (off < 0) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCheck(dof % ctx->basis->components == 0, comm, PETSC_ERR_PLIB,
+             "Point %" PetscInt_FMT " dof %" PetscInt_FMT " is not divisible by component count %" PetscInt_FMT,
+             point, dof, ctx->basis->components);
+  scalar_dofs = dof / ctx->basis->components;
+  for (PetscInt s = 0; s < scalar_dofs; ++s) {
+    for (PetscInt c = 0; c < ctx->basis->components && c < 3; ++c) {
+      if (!flags[c]) continue;
+      if (*nidx >= *cap_idx) {
+        *cap_idx = *cap_idx ? 2 * *cap_idx : 1024;
+        PetscCall(PetscRealloc(sizeof(**idx) * *cap_idx, idx));
+      }
+      (*idx)[(*nidx)++] = off + s * ctx->basis->components + c;
+      *added = PETSC_TRUE;
+    }
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode AppendExistingSectionConstraintDofsForComponents(AssemblyCtx *ctx, PetscSection gsec, const PetscBool flags[3], PetscInt **idx, PetscInt *nidx, PetscInt *cap_idx, PetscInt *matched_points)
+{
+  MPI_Comm comm;
+  PetscSection lsec = NULL;
+  PetscInt pStart, pEnd;
+
+  PetscFunctionBeginUser;
+  comm = PetscObjectComm((PetscObject)ctx->dm);
+  PetscCall(DMGetLocalSection(ctx->dm, &lsec));
+  PetscCall(DMPlexGetChart(ctx->dm, &pStart, &pEnd));
+  for (PetscInt p = pStart; p < pEnd; ++p) {
+    const PetscInt *constraint_indices = NULL;
+    PetscInt        ldof = 0, gdof = 0, cdof = 0, off = 0;
+    PetscBool       point_added = PETSC_FALSE;
+
+    PetscCall(PetscSectionGetDof(lsec, p, &ldof));
+    if (ldof <= 0) continue;
+    PetscCall(PetscSectionGetConstraintDof(lsec, p, &cdof));
+    if (cdof <= 0) continue;
+    PetscCall(PetscSectionGetDof(gsec, p, &gdof));
+    if (gdof <= 0) continue;
+    PetscCall(PetscSectionGetOffset(gsec, p, &off));
+    if (off < 0) continue;
+    PetscCheck(ldof == gdof, comm, PETSC_ERR_PLIB,
+               "Point %" PetscInt_FMT " local dof %" PetscInt_FMT " differs from global-section dof %" PetscInt_FMT,
+               p, ldof, gdof);
+    PetscCheck(gdof % ctx->basis->components == 0, comm, PETSC_ERR_PLIB,
+               "Point %" PetscInt_FMT " dof %" PetscInt_FMT " is not divisible by component count %" PetscInt_FMT,
+               p, gdof, ctx->basis->components);
+    PetscCall(PetscSectionGetConstraintIndices(lsec, p, &constraint_indices));
+    PetscCheck(constraint_indices || cdof == ldof, comm, PETSC_ERR_PLIB,
+               "Point %" PetscInt_FMT " has partial constrained dofs but no section constraint indices", p);
+    for (PetscInt k = 0; k < cdof; ++k) {
+      const PetscInt local_dof = constraint_indices ? constraint_indices[k] : k;
+      const PetscInt component = local_dof % ctx->basis->components;
+
+      PetscCheck(local_dof >= 0 && local_dof < gdof, comm, PETSC_ERR_PLIB,
+                 "Point %" PetscInt_FMT " constraint local dof %" PetscInt_FMT " is outside dof range %" PetscInt_FMT,
+                 p, local_dof, gdof);
+      if (component < 0 || component >= 3 || !flags[component]) continue;
+      if (*nidx >= *cap_idx) {
+        *cap_idx = *cap_idx ? 2 * *cap_idx : 1024;
+        PetscCall(PetscRealloc(sizeof(**idx) * *cap_idx, idx));
+      }
+      (*idx)[(*nidx)++] = off + local_dof;
+      point_added = PETSC_TRUE;
+    }
+    if (point_added) (*matched_points)++;
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ReplaceExtraConstraints(AssemblyCtx *ctx, PetscInt nidx, PetscInt idx[])
+{
+  MPI_Comm comm = PetscObjectComm((PetscObject)ctx->dm);
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscFree(ctx->constrained_all));
+  ctx->constrained_all = NULL;
+  ctx->n_constrained_all = 0;
+  PetscCall(ISDestroy(&ctx->constrained_all_is));
+  PetscCall(ISDestroy(&ctx->constrained_is));
+  PetscCall(ISCreateGeneral(comm, nidx, idx, PETSC_OWN_POINTER, &ctx->constrained_is));
+  ctx->n_constrained_local = nidx;
+  PetscCall(CopyConstrainedGlobalIndices(ctx));
+  PetscCall(RestrictConstrainedISOwned(ctx->dm, ctx));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode StagedBoundaryCopyField(MPI_Comm comm, const char path[], const char support_name[], const char field_name[], const char text[], char dest[], size_t dest_size)
+{
+  const size_t len = text ? strlen(text) : 0;
+
+  PetscFunctionBeginUser;
+  PetscCheck(dest && dest_size > 0, comm, PETSC_ERR_ARG_NULL, "StagedBoundaryCopyField requires a destination buffer");
+  PetscCheck(text, comm, PETSC_ERR_ARG_NULL, "Boundary field %s for target %s in %s is NULL", field_name, support_name, path);
+  PetscCheck(len < dest_size, comm, PETSC_ERR_ARG_SIZ,
+             "Boundary field %s for target %s in %s is too long (%lu >= %lu)", field_name, support_name, path,
+             (unsigned long)len, (unsigned long)dest_size);
+  PetscCall(PetscStrncpy(dest, text, dest_size));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode AssemblyCtxClearSeepageBoundaryRules(AssemblyCtx *ctx)
+{
+  PetscFunctionBeginUser;
+  PetscCheck(ctx, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "Assembly context is NULL");
+  PetscCall(PetscFree(ctx->seepage_boundary_rules));
+  ctx->seepage_boundary_rule_count = 0;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ParseOptionalBoundaryGeometryOrder(MPI_Comm comm, const char path[], const char support_name[], const char geometry[], const char text[], PetscInt *order)
+{
+  char *end = NULL;
+  long  parsed;
+
+  PetscFunctionBeginUser;
+  PetscCheck(order, comm, PETSC_ERR_ARG_NULL, "ParseOptionalBoundaryGeometryOrder requires an output order");
+  *order = 0;
+  if (!text || !text[0]) {
+    PetscCheck(!geometry || !geometry[0], comm, PETSC_ERR_ARG_WRONG,
+               "Boundary target %s in %s declares geometry but no positive geometry_order", support_name, path);
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  parsed = strtol(text, &end, 10);
+  PetscCheck(end && end != text && !TrimField(end)[0], comm, PETSC_ERR_ARG_WRONG,
+             "Invalid boundary geometry_order %s for target %s in %s", text, support_name, path);
+  PetscCheck(parsed > 0, comm, PETSC_ERR_ARG_OUTOFRANGE, "Boundary geometry_order must be positive for target %s in %s", support_name, path);
+  PetscCheck(geometry && geometry[0], comm, PETSC_ERR_ARG_WRONG,
+             "Boundary target %s in %s declares geometry_order %ld but no geometry patch", support_name, path, parsed);
+  *order = (PetscInt)parsed;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ValidateSeepageBoundaryNativeStatus(MPI_Comm comm, const char path[], const char support_name[], const char field[], const char status[])
+{
+  PetscBool head_ready = PETSC_FALSE, flux_pending = PETSC_FALSE, is_head = PETSC_FALSE, is_flux = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  PetscCheck(status && status[0], comm, PETSC_ERR_ARG_WRONG, "Seepage boundary target %s in %s has empty native_status", support_name, path);
+  PetscCall(PetscStrcasecmp(field, "head", &is_head));
+  PetscCall(PetscStrcasecmp(field, "flux", &is_flux));
+  PetscCall(PetscStrcasecmp(status, "label_ready_coordinate_pressure_bridge_active", &head_ready));
+  PetscCall(PetscStrcasecmp(status, "pending_native_face_quadrature", &flux_pending));
+  PetscCheck((is_head && head_ready) || (is_flux && flux_pending), comm, PETSC_ERR_SUP,
+             "Seepage %s target %s in %s has unsupported native_status %s", field, support_name, path, status);
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode AssemblyCtxAppendSeepageBoundaryRule(AssemblyCtx *ctx, PetscInt *capacity, const char path[], const char field[], const char support_kind[],
+                                                           const char support_name[], const char dm_label[], PetscInt tag, const char kind[], const char geometry[],
+                                                           PetscInt geometry_order, const char value_model[], const char native_status[], PetscInt matched_points)
+{
+  MPI_Comm                    comm;
+  AssemblySeepageBoundaryRule *rule = NULL;
+
+  PetscFunctionBeginUser;
+  PetscCheck(ctx, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "Assembly context is NULL");
+  PetscCheck(capacity, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "AssemblyCtxAppendSeepageBoundaryRule requires a capacity pointer");
+  comm = PetscObjectComm((PetscObject)ctx->dm);
+  if (ctx->seepage_boundary_rule_count >= *capacity) {
+    *capacity = *capacity ? 2 * (*capacity) : 4;
+    PetscCall(PetscRealloc(sizeof(*ctx->seepage_boundary_rules) * (*capacity), &ctx->seepage_boundary_rules));
+  }
+  rule = &ctx->seepage_boundary_rules[ctx->seepage_boundary_rule_count++];
+  PetscCall(PetscMemzero(rule, sizeof(*rule)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "field", field, rule->field, sizeof(rule->field)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "support_kind", support_kind, rule->support_kind, sizeof(rule->support_kind)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "support_name", support_name, rule->support_name, sizeof(rule->support_name)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "dm_label", dm_label, rule->dm_label, sizeof(rule->dm_label)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "kind", kind, rule->kind, sizeof(rule->kind)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "geometry", geometry, rule->geometry, sizeof(rule->geometry)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "value_model", value_model, rule->value_model, sizeof(rule->value_model)));
+  PetscCall(StagedBoundaryCopyField(comm, path, support_name, "native_status", native_status, rule->native_status, sizeof(rule->native_status)));
+  rule->tag            = tag;
+  rule->geometry_order = geometry_order;
+  rule->matched_points = matched_points;
+  PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 static void GradPhys(const P4Basis *basis, PetscInt q, PetscInt b, const PetscReal invJ[9], PetscReal grad[3])
@@ -344,6 +778,264 @@ PetscErrorCode AssemblyCtxCreate(DM dm, P4Basis *basis, AssemblyCtx *ctx)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char path[], PetscBool *loaded, AssemblyLabelConstraintStats *stats)
+{
+  MPI_Comm            comm;
+  FILE               *fh = NULL;
+  char                line[2048];
+  LabelConstraintRule rule;
+  PetscSection        gsec = NULL;
+  PetscInt           *idx = NULL, nidx = 0, cap_idx = 0;
+  PetscInt            nrows = 0, local_matched = 0, global_matched = 0, global_rows = 0;
+  PetscInt            dim = 0, pStart, pEnd;
+
+  PetscFunctionBeginUser;
+  if (loaded) *loaded = PETSC_FALSE;
+  if (stats) PetscCall(PetscMemzero(stats, sizeof(*stats)));
+  if (!path || !path[0]) PetscFunctionReturn(PETSC_SUCCESS);
+  comm = PetscObjectComm((PetscObject)ctx->dm);
+  fh = fopen(path, "r");
+  PetscCheck(fh, comm, PETSC_ERR_FILE_OPEN, "Cannot open mechanics label constraint CSV %s", path);
+  PetscCall(DMGetDimension(ctx->dm, &dim));
+  PetscCall(DMGetGlobalSection(ctx->dm, &gsec));
+  PetscCall(DMPlexGetChart(ctx->dm, &pStart, &pEnd));
+  while (fgets(line, sizeof(line), fh)) {
+    PetscBool is_header = PETSC_FALSE, is_face_label = PETSC_FALSE, is_vertex_label = PETSC_FALSE;
+    DMLabel   label = NULL;
+    IS        points = NULL;
+    PetscInt  local_label_points = 0, global_label_points = 0;
+
+    if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+    PetscCall(ParseLabelConstraintRule(line, &rule, &is_header));
+    if (is_header) continue;
+    nrows++;
+    PetscCheck(rule.tag > 0, comm, PETSC_ERR_ARG_WRONG, "Mechanics label constraint row %s has invalid tag %" PetscInt_FMT, rule.support_name, rule.tag);
+    for (PetscInt c = dim; c < 3; ++c) {
+      PetscCheck(!rule.constrained[c], comm, PETSC_ERR_ARG_WRONG,
+                 "Mechanics label constraint row %s constrains component %" PetscInt_FMT " but mesh dimension is %" PetscInt_FMT,
+                 rule.support_name, c, dim);
+    }
+    PetscCall(PetscStrcasecmp(rule.dm_label, "Face Sets", &is_face_label));
+    PetscCall(PetscStrcasecmp(rule.dm_label, "Vertex Sets", &is_vertex_label));
+    PetscCall(DMGetLabel(ctx->dm, rule.dm_label, &label));
+    if (!label && is_vertex_label) {
+      PetscInt compat_matched = 0, global_compat_matched = 0;
+
+      PetscCall(AppendExistingSectionConstraintDofsForComponents(ctx, gsec, rule.constrained, &idx, &nidx, &cap_idx, &compat_matched));
+      PetscCallMPI(MPI_Allreduce(&compat_matched, &global_compat_matched, 1, MPIU_INT, MPI_SUM, comm));
+      PetscCheck(global_compat_matched > 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+                 "Mesh has no DMPlex label %s for mechanics constraint target %s and no existing PETSc section constraints for the requested components",
+                 rule.dm_label, rule.support_name);
+      local_matched += compat_matched;
+      PetscCall(PetscPrintf(comm,
+                            "MECHANICS_BC_LABELS_COMPAT target=%s label=%s status=missing_vertex_label_using_section_constraints matched_points=%" PetscInt_FMT "\n",
+                            rule.support_name, rule.dm_label, global_compat_matched));
+      continue;
+    }
+    PetscCheck(label, comm, PETSC_ERR_ARG_WRONGSTATE, "Mesh has no DMPlex label %s for mechanics constraint target %s", rule.dm_label, rule.support_name);
+    PetscCall(DMLabelGetStratumIS(label, rule.tag, &points));
+    if (points) PetscCall(ISGetLocalSize(points, &local_label_points));
+    PetscCallMPI(MPI_Allreduce(&local_label_points, &global_label_points, 1, MPIU_INT, MPI_SUM, comm));
+    PetscCheck(global_label_points > 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+               "DMPlex label %s has no stratum tag %" PetscInt_FMT " for mechanics constraint target %s",
+               rule.dm_label, rule.tag, rule.support_name);
+    if (is_face_label) {
+      const PetscInt *face_idx = NULL;
+      PetscInt        nfaces = 0;
+
+      if (points) {
+        PetscCall(ISGetLocalSize(points, &nfaces));
+        PetscCall(ISGetIndices(points, &face_idx));
+        for (PetscInt i = 0; i < nfaces; ++i) {
+          PetscInt nclosure = 0, *closure = NULL;
+
+          PetscCall(DMPlexGetTransitiveClosure(ctx->dm, face_idx[i], PETSC_TRUE, &nclosure, &closure));
+          for (PetscInt j = 0; j < nclosure; ++j) {
+            PetscBool added = PETSC_FALSE;
+
+            PetscCall(AppendConstraintDofsForPoint(ctx, gsec, closure[2 * j], rule.constrained, &idx, &nidx, &cap_idx, &added));
+            if (added) local_matched++;
+          }
+          PetscCall(DMPlexRestoreTransitiveClosure(ctx->dm, face_idx[i], PETSC_TRUE, &nclosure, &closure));
+        }
+        PetscCall(ISRestoreIndices(points, &face_idx));
+      }
+    } else if (is_vertex_label) {
+      IS              expanded_points = NULL;
+      const PetscInt *selected = NULL;
+      PetscInt        nselected = 0;
+
+      if (points) {
+        const PetscInt *raw_points = NULL;
+        PetscInt       *expanded = NULL;
+        PetscInt        nraw = 0, nexpanded = 0, cap_expanded = 0;
+
+        PetscCall(ISGetLocalSize(points, &nraw));
+        PetscCall(ISGetIndices(points, &raw_points));
+        for (PetscInt i = 0; i < nraw; ++i) {
+          PetscInt nclosure = 0, *closure = NULL;
+
+          PetscCall(AppendPoint(raw_points[i], &expanded, &nexpanded, &cap_expanded));
+          PetscCall(DMPlexGetTransitiveClosure(ctx->dm, raw_points[i], PETSC_TRUE, &nclosure, &closure));
+          for (PetscInt j = 0; j < nclosure; ++j) {
+            PetscInt p = closure[2 * j], depth = -1;
+
+            PetscCall(PointDepthFromStrata(ctx->dm, p, dim, &depth));
+            if (depth == 0) PetscCall(AppendPoint(p, &expanded, &nexpanded, &cap_expanded));
+          }
+          PetscCall(DMPlexRestoreTransitiveClosure(ctx->dm, raw_points[i], PETSC_TRUE, &nclosure, &closure));
+        }
+        PetscCall(ISRestoreIndices(points, &raw_points));
+        PetscCall(ISCreateGeneral(comm, nexpanded, expanded, PETSC_OWN_POINTER, &expanded_points));
+        PetscCall(ISSortRemoveDups(expanded_points));
+        PetscCall(ISGetLocalSize(expanded_points, &nselected));
+        PetscCall(ISGetIndices(expanded_points, &selected));
+      }
+      for (PetscInt p = pStart; p < pEnd; ++p) {
+        PetscInt  depth = -1, nverts = 0;
+        PetscBool all_selected = PETSC_FALSE, touches_boundary = PETSC_FALSE, use_point = PETSC_FALSE;
+
+        PetscCall(PointDepthFromStrata(ctx->dm, p, dim, &depth));
+        if (depth < 0 || depth >= dim) continue;
+        if (depth == 0) {
+          use_point = SortedIntArrayContains(selected, nselected, p);
+        } else {
+          PetscCall(PointTouchesBoundary(ctx->dm, p, depth, dim, &touches_boundary));
+          if (touches_boundary) {
+            PetscCall(PointClosureVerticesInSet(ctx->dm, p, dim, selected, nselected, &all_selected, &nverts));
+            use_point = (PetscBool)(nverts > 0 && all_selected);
+          }
+        }
+        if (use_point) {
+          PetscBool added = PETSC_FALSE;
+
+          PetscCall(AppendConstraintDofsForPoint(ctx, gsec, p, rule.constrained, &idx, &nidx, &cap_idx, &added));
+          if (added) local_matched++;
+        }
+      }
+      if (expanded_points) PetscCall(ISRestoreIndices(expanded_points, &selected));
+      PetscCall(ISDestroy(&expanded_points));
+    } else {
+      SETERRQ(comm, PETSC_ERR_SUP, "Unsupported mechanics constraint DMPlex label %s for target %s", rule.dm_label, rule.support_name);
+    }
+    PetscCall(ISDestroy(&points));
+  }
+  fclose(fh);
+  PetscCheck(nrows > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "No mechanics label constraint rows were read from %s", path);
+
+  PetscCallMPI(MPI_Allreduce(&local_matched, &global_matched, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&nidx, &global_rows, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCheck(global_rows > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "Mechanics label constraint CSV %s did not resolve to any algebraic rows", path);
+  PetscCall(ReplaceExtraConstraints(ctx, nidx, idx));
+  if (stats) {
+    stats->rows = nrows;
+    stats->matched_points = global_matched;
+    stats->raw_constrained_rows = global_rows;
+    stats->owned_constraints = ctx->n_constrained_local;
+    stats->global_constraints = ctx->n_constrained_all;
+  }
+  if (loaded) *loaded = PETSC_TRUE;
+  PetscCall(PetscPrintf(comm,
+                        "MECHANICS_BC_LABELS_CONFIG enabled=true path=%s rows=%" PetscInt_FMT " matched_points=%" PetscInt_FMT " raw_constrained_rows=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT "\n",
+                        path, nrows, global_matched, global_rows, ctx->n_constrained_local, ctx->n_constrained_all));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode AssemblyCtxValidateSeepageBoundaryLabelsCSV(AssemblyCtx *ctx, const char path[], PetscInt expected_head_rows, PetscInt expected_flux_rows)
+{
+  MPI_Comm comm;
+  FILE    *fh = NULL;
+  char     line[4096];
+  PetscInt rows = 0, head_rows = 0, flux_rows = 0, matched_points = 0, cap_rules = 0;
+
+  PetscFunctionBeginUser;
+  PetscCheck(ctx, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "Assembly context is NULL");
+  PetscCall(AssemblyCtxClearSeepageBoundaryRules(ctx));
+  comm = PetscObjectComm((PetscObject)ctx->dm);
+  if (!path || !path[0]) {
+    PetscCheck(expected_head_rows <= 0 && expected_flux_rows <= 0, comm, PETSC_ERR_ARG_WRONG,
+               "Native problem manifest declares seepage boundary rows but no seepage boundary label table is available");
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  fh = fopen(path, "r");
+  PetscCheck(fh, comm, PETSC_ERR_FILE_OPEN, "Cannot open seepage boundary label CSV %s", path);
+  while (fgets(line, sizeof(line), fh)) {
+    char    *fields[10];
+    PetscInt nfields;
+    char    *field, *support_kind, *support_name, *dm_label, *tag_text, *kind, *geometry, *geometry_order_text, *value_model, *native_status;
+    long     tag;
+    char    *end = NULL;
+    DMLabel  label = NULL;
+    IS       points = NULL;
+    PetscInt npoints = 0, global_points = 0;
+    PetscInt geometry_order = 0;
+    PetscBool is_head = PETSC_FALSE, is_flux = PETSC_FALSE, is_vertex_label = PETSC_FALSE;
+
+    if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+    PetscCall(SplitQuotedCsvFields(line, fields, 10, &nfields, "seepage boundary label"));
+    PetscCheck(nfields == 10, comm, PETSC_ERR_ARG_WRONG, "Seepage boundary label row in %s has %" PetscInt_FMT " fields; expected exactly 10", path, nfields);
+    field = TrimField(fields[0]);
+    if (!strcmp(field, "field")) continue;
+    support_kind = TrimField(fields[1]);
+    support_name = TrimField(fields[2]);
+    dm_label = TrimField(fields[3]);
+    tag_text = TrimField(fields[4]);
+    kind = TrimField(fields[5]);
+    geometry = TrimField(fields[6]);
+    geometry_order_text = TrimField(fields[7]);
+    value_model = TrimField(fields[8]);
+    native_status = TrimField(fields[9]);
+    tag = strtol(tag_text, &end, 10);
+    PetscCheck(end && end != tag_text && !TrimField(end)[0], comm, PETSC_ERR_ARG_WRONG, "Invalid seepage boundary tag %s in %s", tag_text, path);
+    PetscCheck(kind[0], comm, PETSC_ERR_ARG_WRONG, "Seepage boundary target %s in %s has empty kind", support_name, path);
+    PetscCall(ParseOptionalBoundaryGeometryOrder(comm, path, support_name, geometry, geometry_order_text, &geometry_order));
+    PetscCall(PetscStrcasecmp(field, "head", &is_head));
+    PetscCall(PetscStrcasecmp(field, "flux", &is_flux));
+    PetscCall(PetscStrcasecmp(dm_label, "Vertex Sets", &is_vertex_label));
+    PetscCheck(is_head || is_flux, comm, PETSC_ERR_SUP, "Unsupported seepage boundary field %s in %s", field, path);
+    PetscCall(ValidateSeepageBoundaryNativeStatus(comm, path, support_name, field, native_status));
+    PetscCheck(!strcmp(support_kind, "boundary") || !strcmp(support_kind, "nodeset"), comm, PETSC_ERR_SUP,
+               "Unsupported seepage support kind %s for target %s", support_kind, support_name);
+    PetscCheck(!is_flux || !strcmp(support_kind, "boundary"), comm, PETSC_ERR_SUP, "Seepage flux target %s must use boundary support, got %s", support_name, support_kind);
+    PetscCall(DMGetLabel(ctx->dm, dm_label, &label));
+    if (!label && is_vertex_label && !strcmp(support_kind, "nodeset") && is_head && strstr(native_status, "coordinate_pressure_bridge_active")) {
+      PetscCall(PetscPrintf(comm,
+                            "SEEPAGE_BOUNDARY_LABELS_COMPAT target=%s label=%s status=missing_vertex_label_coordinate_pressure_bridge_active\n",
+                            support_name, dm_label));
+    } else {
+      PetscCheck(label, comm, PETSC_ERR_ARG_WRONGSTATE, "Mesh has no DMPlex label %s for seepage %s target %s", dm_label, field, support_name);
+      PetscCall(DMLabelGetStratumIS(label, (PetscInt)tag, &points));
+      if (points) PetscCall(ISGetLocalSize(points, &npoints));
+      PetscCallMPI(MPI_Allreduce(&npoints, &global_points, 1, MPIU_INT, MPI_SUM, comm));
+      PetscCheck(global_points > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "DMPlex label %s has no stratum tag %ld for seepage %s target %s", dm_label, tag, field, support_name);
+      PetscCall(ISDestroy(&points));
+    }
+    PetscCall(AssemblyCtxAppendSeepageBoundaryRule(ctx, &cap_rules, path, field, support_kind, support_name, dm_label, (PetscInt)tag, kind, geometry, geometry_order,
+                                                   value_model, native_status, global_points));
+    rows++;
+    matched_points += global_points;
+    if (is_head) head_rows++;
+    if (is_flux) flux_rows++;
+  }
+  fclose(fh);
+  if (expected_head_rows >= 0) {
+    PetscCheck(head_rows == expected_head_rows, comm, PETSC_ERR_ARG_WRONG,
+               "Native problem manifest declares %" PetscInt_FMT " seepage head row(s), but label table %s contains %" PetscInt_FMT,
+               expected_head_rows, path, head_rows);
+  }
+  if (expected_flux_rows >= 0) {
+    PetscCheck(flux_rows == expected_flux_rows, comm, PETSC_ERR_ARG_WRONG,
+               "Native problem manifest declares %" PetscInt_FMT " seepage flux row(s), but label table %s contains %" PetscInt_FMT,
+               expected_flux_rows, path, flux_rows);
+  }
+  if (rows > 0) {
+    PetscCall(PetscPrintf(comm,
+                          "SEEPAGE_BOUNDARY_LABELS_CONFIG enabled=true path=%s rows=%" PetscInt_FMT " head=%" PetscInt_FMT " flux=%" PetscInt_FMT " matched_points=%" PetscInt_FMT " status=metadata_only_pressure_csv_active staged_rules=%" PetscInt_FMT "\n",
+                          path, rows, head_rows, flux_rows, matched_points, ctx->seepage_boundary_rule_count));
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 PetscErrorCode AssemblyCtxLoadCoordinateConstraintsCSV(AssemblyCtx *ctx, const char path[])
 {
   MPI_Comm         comm;
@@ -421,15 +1113,7 @@ PetscErrorCode AssemblyCtxLoadCoordinateConstraintsCSV(AssemblyCtx *ctx, const c
 
   PetscCallMPI(MPI_Allreduce(&local_matched, &global_matched, 1, MPIU_INT, MPI_SUM, comm));
   PetscCallMPI(MPI_Allreduce(&nidx, &global_rows, 1, MPIU_INT, MPI_SUM, comm));
-  PetscCall(PetscFree(ctx->constrained_all));
-  ctx->constrained_all = NULL;
-  ctx->n_constrained_all = 0;
-  PetscCall(ISDestroy(&ctx->constrained_all_is));
-  PetscCall(ISDestroy(&ctx->constrained_is));
-  PetscCall(ISCreateGeneral(comm, nidx, idx, PETSC_OWN_POINTER, &ctx->constrained_is));
-  ctx->n_constrained_local = nidx;
-  PetscCall(CopyConstrainedGlobalIndices(ctx));
-  PetscCall(RestrictConstrainedISOwned(ctx->dm, ctx));
+  PetscCall(ReplaceExtraConstraints(ctx, nidx, idx));
   PetscCall(PetscPrintf(comm,
                         "MECHANICS_BC_NODES_CONFIG enabled=true path=%s rows=%" PetscInt_FMT " matched_points=%" PetscInt_FMT " raw_constrained_rows=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT "\n",
                         path, npoints, global_matched, global_rows, ctx->n_constrained_local, ctx->n_constrained_all));
@@ -443,6 +1127,10 @@ PetscErrorCode AssemblyCtxDestroy(AssemblyCtx *ctx)
   PetscCall(PetscFree(ctx->constrained_all));
   PetscCall(PetscFree(ctx->seepage_points));
   PetscCall(PetscFree(ctx->basis_ref_points));
+  PetscCall(PetscFree(ctx->neumann_rules));
+  ctx->neumann_rule_count = 0;
+  PetscCall(PetscFree(ctx->seepage_boundary_rules));
+  ctx->seepage_boundary_rule_count = 0;
   PetscCall(ISDestroy(&ctx->constrained_all_is));
   PetscCall(ISDestroy(&ctx->constrained_is));
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -696,6 +1384,7 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
   const PetscInt  ncomp = basis->components;
   const PetscInt  nstrain = (dim == 2) ? 3 : 6;
   const PetscInt  gravity_comp = 1;
+  const SsrMaterialOps *material_ops = NULL;
   PetscBool       use_local_mat_indices = PETSC_FALSE;
 
   PetscFunctionBeginUser;
@@ -716,6 +1405,8 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
     PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &use_local_mat_indices));
     PetscCall(MatZeroEntries(A));
   }
+  PetscCall(SsrMaterialRegistryFind("mohr_coulomb", &material_ops));
+  PetscCheck(material_ops->evaluate, PetscObjectComm((PetscObject)dm), PETSC_ERR_SUP, "Material model mohr_coulomb has no native evaluator");
   if (out) {
     PetscCall(VecZeroEntries(out));
     PetscCall(DMGetLocalVector(dm, &out_loc));
@@ -734,16 +1425,16 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
     PetscReal     v0[3], J[9], invJ[9], detJ;
     PetscScalar  *u_cell = NULL;
     PetscInt      u_size = 0, region;
-    MaterialMC    mat;
     PetscReal     grad[35][3];
     PetscReal     pressure_vals[35], cell_pressure_avg = 0.0, cell_weight = 0.0, cell_eps = 0.0;
+    PetscReal     cell_gamma_sat = 0.0, cell_gamma_unsat = 0.0;
+    PetscBool     have_cell_material = PETSC_FALSE;
 
     PetscCall(PetscArrayzero(elem_vec, ndof));
     if (elem_mat) PetscCall(PetscArrayzero(elem_mat, ndof * ndof));
     PetscCall(DMPlexComputeCellGeometryFEM(dm, cell, NULL, v0, J, invJ, &detJ));
     detJ = PetscAbsReal(detJ);
     PetscCall(CellRegion(ctx, cell, &region));
-    PetscCall(MaterialMCFromRegion(region, &mat));
     if (u_loc || probe_loc) {
       PetscCall(DMPlexVecGetClosure(dm, lsec, u_loc ? u_loc : probe_loc, cell, &u_size, &u_cell));
       PetscCheck(u_size == ndof, PetscObjectComm((PetscObject)dm), PETSC_ERR_PLIB, "Unexpected closure size %" PetscInt_FMT " != %" PetscInt_FMT, u_size, ndof);
@@ -759,6 +1450,8 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
       PetscReal B[105][6], DB[105][6];
       PetscReal w = basis->weights[q] * detJ;
       PetscReal pw_q = 0.0, grad_pw[3] = {0.0, 0.0, 0.0};
+      SsrMaterialPointInput  material_input;
+      SsrMaterialPointResult material_result;
 
       for (PetscInt a = 0; a < basis->n_basis; ++a) {
         GradPhys(basis, q, a, invJ, grad[a]);
@@ -793,12 +1486,20 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
         cell_pressure_avg += pw_q * w;
         cell_weight += w;
       }
-      if (dim == 2) {
-        if (plastic) MaterialMCPlasticStressTangent2D(&mat, lambda, strain, stress, tangent);
-        else MaterialMCElasticStressTangent2D(&mat, strain, stress, tangent);
-      } else {
-        if (plastic) MaterialMCPlasticStressTangent(&mat, lambda, strain, stress, tangent);
-        else MaterialMCElasticStressTangent(&mat, strain, stress, tangent);
+      material_input.dim     = dim;
+      material_input.region  = region;
+      material_input.plastic = plastic;
+      material_input.lambda  = lambda;
+      material_input.strain  = strain;
+      material_result.stress = stress;
+      material_result.tangent = tangent;
+      material_result.gamma_sat = 0.0;
+      material_result.gamma_unsat = 0.0;
+      PetscCall(material_ops->evaluate(NULL, &material_input, &material_result));
+      if (!have_cell_material) {
+        cell_gamma_sat     = material_result.gamma_sat;
+        cell_gamma_unsat   = material_result.gamma_unsat;
+        have_cell_material = PETSC_TRUE;
       }
 
       if (residual) {
@@ -807,7 +1508,7 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
           else AddBTransposeStress3D(elem_vec, a, grad[a], stress, w);
         }
       } else {
-        const PetscReal gamma = ctx->seepage_enabled ? 0.0 : mat.gamma_sat;
+        const PetscReal gamma = ctx->seepage_enabled ? 0.0 : material_result.gamma_sat;
         for (PetscInt a = 0; a < basis->n_basis; ++a) {
           const PetscReal phi = basis->basis[q * basis->n_basis + a];
           if (ctx->seepage_enabled) {
@@ -835,7 +1536,7 @@ static PetscErrorCode AssembleCells(AssemblyCtx *ctx, PetscReal lambda, Vec u, V
       }
     }
     if (ctx->seepage_enabled && !residual) {
-      const PetscReal gamma = (cell_weight > 0.0 && cell_pressure_avg / cell_weight >= 0.1 * cell_eps) ? mat.gamma_sat : mat.gamma_unsat;
+      const PetscReal gamma = (cell_weight > 0.0 && cell_pressure_avg / cell_weight >= 0.1 * cell_eps) ? cell_gamma_sat : cell_gamma_unsat;
       for (PetscInt q = 0; q < basis->n_qp; ++q) {
         PetscReal w = basis->weights[q] * detJ;
         for (PetscInt a = 0; a < basis->n_basis; ++a) {
@@ -900,6 +1601,7 @@ PetscErrorCode AssembleElasticProblem(AssemblyCtx *ctx, Mat A, Vec f_ext)
   PetscFunctionBeginUser;
   PetscCall(VecZeroEntries(f_ext));
   PetscCall(AssembleCells(ctx, 1.0, NULL, f_ext, A, NULL, PETSC_FALSE, PETSC_TRUE));
+  PetscCall(AssemblyCtxAssembleNeumannResidual(ctx, f_ext));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 

@@ -14,6 +14,10 @@ src/petsc_ssr/native/cython/_core.c
 src/petsc_ssr/native/_core*.so
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 continuation_curve.csv
 *.log
 *.out

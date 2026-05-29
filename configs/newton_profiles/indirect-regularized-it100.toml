@@ -1,0 +1,10 @@
+description = "Indirect SSR Newton profile with an extended iteration cap."
+
+[newton]
+algorithm = "indirect-ssr"
+it_max = 100
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+stopping_criterion = "relative_residual"
+line_search = "alg5"

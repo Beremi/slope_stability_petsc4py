@@ -6,11 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-import h5py
 import numpy as np
 
 from .core.elements import infer_simplex_elem_type, SIMPLEX_NODES_PER_SURFACE
 from .core.simplex_lagrange import triangle_lagrange_interior_tuples
+
+
+def _load_h5py():
+    try:
+        import h5py
+    except ImportError as exc:  # pragma: no cover - exercised only in minimal installs
+        raise ImportError("Reading HDF5 mesh files requires the optional 'h5py' package.") from exc
+    return h5py
 
 
 @dataclass
@@ -55,6 +62,7 @@ def _orient_connectivity(connectivity: np.ndarray, valid_nodes_per_entity: tuple
 def _load_lagrange_tet_mesh(path: Path) -> MeshData:
     """Load a MATLAB-exported HDF5 tetrahedral mesh for P1/P2/P3/P4 families."""
 
+    h5py = _load_h5py()
     with h5py.File(str(path), "r") as h5:
         boundary = np.asarray(h5["boundary"][:], dtype=np.int64).ravel()
         elem = _orient_connectivity(_to_zero_based(np.asarray(h5["elem"][:])), (4, 10, 20, 35))
@@ -470,6 +478,7 @@ def load_mesh_file(mesh_file: str | Path, *, elem_type: str | None = None) -> Me
     path = Path(mesh_file)
     lower = path.name.lower()
     if path.suffix.lower() == ".h5":
+        h5py = _load_h5py()
         with h5py.File(str(path), "r") as h5:
             keys = set(h5.keys())
         if {"boundary", "elem", "face", "material", "node"} <= keys:

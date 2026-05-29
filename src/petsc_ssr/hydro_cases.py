@@ -1,18 +1,30 @@
 from __future__ import annotations
 
+import csv
 import json
-import shlex
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from mpi4py import MPI
-from petsc4py import PETSc
 
-from .context import EngineRunResult
+from .config.manifest import (
+    MANIFEST_SCHEMA_VERSION,
+    RESOLVED_CONFIG_KIND,
+    RESOLVED_RUN_MANIFEST_KIND,
+    build_environment_manifest,
+    build_run_command_manifest,
+    dumps_resolved_config_toml,
+)
+from .config.profiles import ResolvedPcVariant, pc_variant_from_backend
+from .runtime.options import quote_option_tokens
+
+
+if TYPE_CHECKING:
+    from .context import EngineRunResult
 
 
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
@@ -33,15 +45,28 @@ class HydroCaseTranslation:
     elem_type: str = "P2"
 
 
-def translate_hydro_case_toml(config_path: str | Path, *, allow_coupled: bool = False) -> HydroCaseTranslation:
+def translate_hydro_case_toml(config_path: str | Path, *, allow_coupled: bool = False, output_preset: str | None = None) -> HydroCaseTranslation:
     ensure_engine_imports()
     try:
-        from petsc_ssr.config import load_run_case_config
+        from petsc_ssr.config import load_run_case_config, normalize_output_preset
         from petsc_ssr.problem_asset_runtime import load_seepage_problem_spec, resolve_problem_asset_from_config
     except Exception as exc:
         return HydroCaseTranslation(False, f"case TOML support is not importable: {exc}")
 
     cfg = load_run_case_config(Path(config_path)).validate()
+    if output_preset is not None:
+        preset = normalize_output_preset(output_preset)
+        write_outputs = preset != "none"
+        cfg = replace(
+            cfg,
+            export=replace(
+                cfg.export,
+                preset=preset,
+                write_solution_vtu=write_outputs,
+                write_history_json=write_outputs,
+                write_custom_debug_bundle=False,
+            ),
+        )
     analysis = str(cfg.problem.analysis).strip().lower()
     if analysis != "seepage" and not (allow_coupled and analysis == "ssr"):
         return HydroCaseTranslation(False, "not a seepage-only case", config=cfg)
@@ -81,11 +106,308 @@ def translate_hydro_case_toml(config_path: str | Path, *, allow_coupled: bool = 
     return HydroCaseTranslation(True, f"supported_{dim}d_seepage_petsc", config=cfg, resolved=resolved, elem_type=elem_type)
 
 
-def _quote_tokens(tokens: list[str]) -> str:
-    return " ".join(shlex.quote(str(token)) for token in tokens)
+def hydro_option_tokens(translation: HydroCaseTranslation, output_dir: str | Path) -> list[str]:
+    if not translation.supported or translation.config is None or translation.resolved is None:
+        raise RuntimeError(f"Cannot build hydro options for unsupported case: {translation.reason}")
+
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import load_seepage_problem_spec
+
+    cfg = translation.config
+    resolved = translation.resolved
+    seepage = load_seepage_problem_spec(resolved).seepage
+    data_dir = Path(output_dir) / "data"
+    tokens = [
+        "-hydro_mesh",
+        str(resolved.mesh_path),
+        "-hydro_dim",
+        str(int(resolved.dimension)),
+        "-hydro_elem_type",
+        translation.elem_type,
+        "-hydro_pc_variant",
+        _hydro_pc_policy(translation).variant,
+        "-hydro_grho",
+        f"{float(seepage.water_unit_weight):.17g}",
+        "-hydro_newton_tol",
+        f"{float(cfg.seepage.linear_tolerance):.17g}",
+        "-hydro_newton_max_it",
+        str(int(cfg.seepage.nonlinear_max_iter)),
+        "-hydro_ksp_rtol",
+        f"{float(cfg.seepage.linear_tolerance):.17g}",
+        "-hydro_ksp_max_it",
+        str(int(cfg.seepage.linear_max_iter)),
+        "-hydro_summary_json",
+        str(data_dir / "hydro_summary.json"),
+        "-hydro_pressure_binary",
+        str(data_dir / "hydro_pressure.bin"),
+        "-hydro_dof_coords_csv",
+        str(data_dir / "hydro_dof_coords.csv"),
+    ]
+    if int(resolved.dimension) == 2:
+        bc = seepage.head_bcs[0]
+        model = dict(bc.value_model)
+        points = model.get("points")
+        if not isinstance(points, (list, tuple)) or len(points) < 2:
+            raise RuntimeError("2D piecewise seepage head model must provide at least two [x, level] points")
+        p0 = points[0]
+        p1 = points[-1]
+        tokens.extend(
+            [
+                "-hydro_head_mode",
+                "support_piecewise",
+                "-hydro_head_x0",
+                f"{float(p0[0]):.17g}",
+                "-hydro_head_y0",
+                f"{float(p0[1]):.17g}",
+                "-hydro_head_x1",
+                f"{float(p1[0]):.17g}",
+                "-hydro_head_y1",
+                f"{float(p1[1]):.17g}",
+            ]
+        )
+    else:
+        tokens.extend(["-hydro_head_mode", "comsol3d"])
+    return tokens
+
+
+def write_hydro_preflight_artifacts(
+    translation: HydroCaseTranslation,
+    output_dir: str | Path,
+    config_path: str | Path,
+    mpi_size: int,
+    *,
+    runner_argv: list[str] | None = None,
+    mode: str = "run",
+) -> None:
+    if not translation.supported or translation.config is None or translation.resolved is None:
+        raise RuntimeError(f"Cannot write hydro preflight artifacts for unsupported case: {translation.reason}")
+
+    output = Path(output_dir)
+    data_dir = output / "data"
+    logs_dir = output / "logs"
+    exports_dir = output / "exports"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    tokens = hydro_option_tokens(translation, output)
+    options_text = quote_option_tokens(tokens) + "\n"
+    (data_dir / "hydro_options.txt").write_text(options_text, encoding="utf-8")
+    (data_dir / "resolved_options.txt").write_text(options_text, encoding="utf-8")
+    native_inputs = _write_hydro_native_problem_inputs(translation, output, config_path, int(mpi_size))
+    (data_dir / "environment.json").write_text(
+        json.dumps(build_environment_manifest(mpi_size=int(mpi_size)), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    resolved_run_manifest = _build_hydro_resolved_run_manifest(
+        translation,
+        output,
+        mpi_size=int(mpi_size),
+        native_inputs=native_inputs,
+    )
+    (data_dir / "resolved_run_manifest.json").write_text(
+        json.dumps(resolved_run_manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    command_json = output / "command.json"
+    if not command_json.exists():
+        command_json.write_text(
+            json.dumps(
+                build_run_command_manifest(
+                    output_dir=output,
+                    mpi_size=int(mpi_size),
+                    argv=[] if runner_argv is None else runner_argv,
+                    mode=mode,
+                    entrypoint="petsc_ssr.runners.run_case_from_config",
+                    resolved_run_manifest=resolved_run_manifest,
+                ),
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    resolved_config = dumps_resolved_config_toml(
+        _build_hydro_resolved_config(
+            translation,
+            output,
+            mpi_size=int(mpi_size),
+            native_inputs=native_inputs,
+            config_path=config_path,
+        )
+    )
+    (data_dir / "resolved_config.toml").write_text(resolved_config, encoding="utf-8")
+    (exports_dir / "resolved_config.toml").write_text(resolved_config, encoding="utf-8")
+    _write_config_copy(config_path, output / "generated_case.toml")
+
+
+def _hydro_pc_policy(translation: HydroCaseTranslation) -> ResolvedPcVariant:
+    cfg = translation.config
+    if cfg is None:
+        raise RuntimeError("Cannot resolve hydro PC policy without a loaded case config.")
+    degree = int(str(translation.elem_type).strip().upper()[1:])
+    return pc_variant_from_backend(
+        cfg.linear_solver.pc_backend,
+        element_degree=degree,
+        supported=("gamg", "pmg", "none"),
+    )
+
+
+def _hydro_head_mode(translation: HydroCaseTranslation) -> str:
+    resolved = translation.resolved
+    if resolved is None:
+        return ""
+    return "support_piecewise" if int(resolved.dimension) == 2 else "comsol3d"
+
+
+def _write_hydro_native_problem_inputs(
+    translation: HydroCaseTranslation,
+    output_dir: Path,
+    config_path: str | Path,
+    mpi_size: int,
+) -> dict[str, str | None]:
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import (
+        SEEPAGE_LABEL_BC_COLUMNS,
+        build_native_problem_manifest,
+        build_seepage_label_bc_rows,
+    )
+
+    cfg = translation.config
+    resolved = translation.resolved
+    assert cfg is not None
+    assert resolved is not None
+    data_dir = output_dir / "data"
+    native_problem_manifest = data_dir / "native_problem_manifest.json"
+    seepage_labels = data_dir / "seepage_boundary_labels.csv"
+    rows = build_seepage_label_bc_rows(resolved)
+    if rows:
+        with seepage_labels.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=SEEPAGE_LABEL_BC_COLUMNS, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+    manifest = build_native_problem_manifest(
+        resolved,
+        case_id=str(cfg.problem.name),
+        case_path=str(Path(config_path).resolve()),
+        analysis=str(cfg.problem.analysis),
+        elem_type=translation.elem_type,
+        solver_profile=str(cfg.linear_solver.profile),
+        world_size=int(mpi_size),
+        compatibility={
+            "seepage_coupled": False,
+            **({"seepage_boundary_label_table": str(seepage_labels)} if rows else {}),
+        },
+    )
+    native_problem_manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return {
+        "native_problem_manifest": str(native_problem_manifest),
+        "seepage_boundary_labels_csv": str(seepage_labels) if rows else None,
+    }
+
+
+def _build_hydro_resolved_run_manifest(
+    translation: HydroCaseTranslation,
+    output_dir: Path,
+    *,
+    mpi_size: int,
+    native_inputs: dict[str, str | None],
+) -> dict[str, Any]:
+    cfg = translation.config
+    resolved = translation.resolved
+    assert cfg is not None
+    assert resolved is not None
+    pc_policy = _hydro_pc_policy(translation)
+    data_dir = output_dir / "data"
+    logs_dir = output_dir / "logs"
+    artifacts = {
+        "hydro_options": str(data_dir / "hydro_options.txt"),
+        "resolved_options": str(data_dir / "resolved_options.txt"),
+        "environment_json": str(data_dir / "environment.json"),
+        "summary_json": str(data_dir / "hydro_summary.json"),
+        "pressure_binary": str(data_dir / "hydro_pressure.bin"),
+        "dof_coords_csv": str(data_dir / "hydro_dof_coords.csv"),
+        "stdout": str(logs_dir / "stdout.txt"),
+        "petsc_log": str(logs_dir / "petsc_log.txt"),
+        **native_inputs,
+    }
+    return {
+        "kind": RESOLVED_RUN_MANIFEST_KIND,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "case": str(cfg.problem.name),
+        "analysis": "seepage",
+        "mpi": {"size": int(mpi_size)},
+        "mesh": {
+            "path": str(resolved.mesh_path),
+            "dimension": int(resolved.dimension),
+            "element_degree": int(translation.elem_type[1:]),
+            "element": translation.elem_type,
+            "refine_levels": int(cfg.problem.refine_levels),
+        },
+        "linear": {
+            "profile": str(cfg.linear_solver.profile),
+            "algorithm": str(cfg.linear_solver.algorithm or cfg.linear_solver.solver_type),
+            "native_algorithm": pc_policy.variant,
+            "rtol": float(cfg.seepage.linear_tolerance),
+            "max_it": int(cfg.seepage.linear_max_iter),
+            "pc_backend": str(cfg.linear_solver.pc_backend or ""),
+            "pc_variant": pc_policy.variant,
+            "requested_pc_variant": pc_policy.requested_variant,
+            "pc_variant_fallback_reason": pc_policy.fallback_reason,
+        },
+        "seepage": {
+            "profile": str(cfg.seepage.profile),
+            "profile_description": str(cfg.seepage.profile_description),
+            "model": "darcy",
+            "newton_max_it": int(cfg.seepage.nonlinear_max_iter),
+            "head_mode": _hydro_head_mode(translation),
+        },
+        "output": {
+            "preset": str(cfg.export.preset),
+            "write_solution": bool(cfg.export.write_solution_vtu),
+            "write_history": bool(cfg.export.write_history_json),
+        },
+        "artifacts": artifacts,
+    }
+
+
+def _build_hydro_resolved_config(
+    translation: HydroCaseTranslation,
+    output_dir: Path,
+    *,
+    mpi_size: int,
+    native_inputs: dict[str, str | None],
+    config_path: str | Path,
+) -> dict[str, Any]:
+    cfg = translation.config
+    resolved = translation.resolved
+    assert cfg is not None
+    assert resolved is not None
+    manifest = _build_hydro_resolved_run_manifest(translation, output_dir, mpi_size=mpi_size, native_inputs=native_inputs)
+    return {
+        "resolved": {
+            "kind": RESOLVED_CONFIG_KIND,
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "source_case": str(Path(config_path).resolve()),
+        },
+        "case": {
+            "id": str(cfg.problem.name),
+            "analysis": "seepage",
+            "asset": str(resolved.asset_name),
+            "mesh_variant": str(resolved.variant_name),
+        },
+        "mpi": {"size": int(mpi_size)},
+        "mesh": manifest["mesh"],
+        "linear": manifest["linear"],
+        "seepage": manifest["seepage"],
+        "output": manifest["output"],
+        "petsc": {"extra_options": []},
+        "artifacts": manifest["artifacts"],
+    }
 
 
 def _read_distributed_vec_binary(path: Path) -> np.ndarray:
+    from petsc4py import PETSc
+
     comm = PETSc.COMM_WORLD.tompi4py()
     viewer = PETSc.Viewer().createBinary(str(path), "r", comm=PETSc.COMM_WORLD)
     vec = PETSc.Vec().load(viewer)
@@ -191,16 +513,13 @@ def run_hydro_case(translation: HydroCaseTranslation, output_dir: str | Path) ->
     if not translation.supported or translation.config is None or translation.resolved is None:
         raise RuntimeError(f"Cannot run unsupported hydro case: {translation.reason}")
 
+    from .context import EngineRunResult
     from .native import _core
 
     comm = MPI.COMM_WORLD
     rank = comm.rank
-    cfg = translation.config
     resolved = translation.resolved
-    ensure_engine_imports()
-    from petsc_ssr.problem_asset_runtime import load_seepage_problem_spec
 
-    seepage = load_seepage_problem_spec(resolved).seepage
     output = Path(output_dir)
     data_dir = output / "data"
     exports_dir = output / "exports"
@@ -212,63 +531,12 @@ def run_hydro_case(translation: HydroCaseTranslation, output_dir: str | Path) ->
         exports_dir.mkdir(parents=True, exist_ok=True)
     comm.Barrier()
 
-    degree = int(translation.elem_type[1:])
-    pc_variant = "gamg" if degree == 1 else "pmg"
-    tokens = [
-        "-hydro_mesh",
-        str(resolved.mesh_path),
-        "-hydro_dim",
-        str(int(resolved.dimension)),
-        "-hydro_elem_type",
-        translation.elem_type,
-        "-hydro_pc_variant",
-        pc_variant,
-        "-hydro_grho",
-        f"{float(seepage.water_unit_weight):.17g}",
-        "-hydro_newton_tol",
-        f"{float(cfg.seepage.linear_tolerance):.17g}",
-        "-hydro_newton_max_it",
-        str(int(cfg.seepage.nonlinear_max_iter)),
-        "-hydro_ksp_rtol",
-        f"{float(cfg.seepage.linear_tolerance):.17g}",
-        "-hydro_ksp_max_it",
-        str(int(cfg.seepage.linear_max_iter)),
-        "-hydro_summary_json",
-        str(summary_json),
-        "-hydro_pressure_binary",
-        str(pressure_binary),
-        "-hydro_dof_coords_csv",
-        str(dof_coords_csv),
-    ]
-    if int(resolved.dimension) == 2:
-        bc = seepage.head_bcs[0]
-        model = dict(bc.value_model)
-        points = model.get("points")
-        if not isinstance(points, (list, tuple)) or len(points) < 2:
-            raise RuntimeError("2D piecewise seepage head model must provide at least two [x, level] points")
-        p0 = points[0]
-        p1 = points[-1]
-        tokens.extend(
-            [
-                "-hydro_head_mode",
-                "support_piecewise",
-                "-hydro_head_x0",
-                f"{float(p0[0]):.17g}",
-                "-hydro_head_y0",
-                f"{float(p0[1]):.17g}",
-                "-hydro_head_x1",
-                f"{float(p1[0]):.17g}",
-                "-hydro_head_y1",
-                f"{float(p1[1]):.17g}",
-            ]
-        )
-    else:
-        tokens.extend(["-hydro_head_mode", "comsol3d"])
+    tokens = hydro_option_tokens(translation, output)
     if rank == 0:
-        (data_dir / "hydro_options.txt").write_text(_quote_tokens(tokens) + "\n", encoding="utf-8")
+        (data_dir / "hydro_options.txt").write_text(quote_option_tokens(tokens) + "\n", encoding="utf-8")
 
     t0 = perf_counter()
-    _core.run_hydro_options(_quote_tokens(tokens))
+    _core.run_hydro_options(quote_option_tokens(tokens))
     wall = perf_counter() - t0
     comm.Barrier()
 
@@ -334,6 +602,7 @@ def write_hydro_case_outputs(result: EngineRunResult, translation: HydroCaseTran
             "elem_type": translation.elem_type,
             "asset_name": "" if resolved is None else str(resolved.asset_name),
             "mesh_variant": "" if resolved is None else str(resolved.variant_name),
+            "seepage_profile": None if cfg is None else str(cfg.seepage.profile),
             "linear_tolerance": None if cfg is None else float(cfg.seepage.linear_tolerance),
             "linear_max_iter": None if cfg is None else int(cfg.seepage.linear_max_iter),
             "nonlinear_max_iter": None if cfg is None else int(cfg.seepage.nonlinear_max_iter),
@@ -355,9 +624,9 @@ def write_hydro_case_outputs(result: EngineRunResult, translation: HydroCaseTran
     if "dof_map_max_error" in arrays:
         payload["run_info"]["dof_map_max_error"] = float(np.asarray(arrays["dof_map_max_error"]).ravel()[0])
     (data_dir / "run_info.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    _write_case_hydro_vtu(exports_dir / "final_solution.vtu", arrays, translation)
-    _write_config_copy(config_path, exports_dir / "resolved_config.toml")
-    _write_config_copy(config_path, output / "generated_case.toml")
+    if cfg is None or bool(cfg.export.write_solution_vtu):
+        _write_case_hydro_vtu(exports_dir / "final_solution.vtu", arrays, translation)
+    write_hydro_preflight_artifacts(translation, output, config_path, comm.size)
 
 
 def _write_case_hydro_vtu(path: Path, arrays: dict[str, np.ndarray], translation: HydroCaseTranslation) -> None:

@@ -1,0 +1,17 @@
+description = "Direct limit-load continuation defaults for debug and LL skeletons."
+
+[continuation]
+algorithm = "direct"
+method = "direct"
+predictor = "secant"
+omega_step_controller = "classic"
+lambda_init = 1.0
+d_lambda_init = 0.1
+d_lambda_min = 0.001
+d_lambda_diff_scaled_min = 0.001
+lambda_ell = 1.0
+d_t_min = 0.001
+d_omega_ini_scale = 0.2
+step_max = 100
+init_newton_stopping_criterion = "relative_correction"
+init_newton_stopping_tol = 0.001

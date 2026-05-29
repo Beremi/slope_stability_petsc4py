@@ -1,37 +1,6 @@
-# C shell V-cycle profile used for the omega=7e6 SSR scalability follow-up.
-# It keeps the maintained scalable active-layout PMG baseline, but spends more
-# smoothing on the P4 and P2 shell levels. For the refined Karolina scaling
-# batch, keep the P1/GAMG coarse cap at 5 iterations; local refined 32-rank
-# comparison showed max_it=10 was not materially better.
+# PETSc-owned extras for the maintained PMG baseline.
+# Algorithm, KSP, deflation, PMG coarse/telescope/smoother policy, and active
+# rank choices are emitted from configs/solver_profiles/pmg-deflated-baseline.toml.
 
--pc_variant pmg
--pmg_apply_backend shell_vcycle
--ksp_type fgmres
--ksp_norm_type unpreconditioned
 -dm_plex_partition_balance true
--pmg_coarse_pc_type gamg
--pmg_coarse_lu_max_dofs 50000
--pmg_coarse_redundant_group_size 0
--pmg_coarse_gamg_aggressive_square_graph false
--pmg_shell_p2_active_ranks 64
--pmg_shell_p1_active_ranks 32
--pmg_shell_subcomm_type interlaced
--pmg_coarse_telescope_ksp_type fgmres
--pmg_coarse_telescope_ksp_rtol 1e-3
--pmg_coarse_telescope_ksp_max_it 5
--pmg_coarse_telescope_pc_type gamg
--pmg_p2_telescope_active_ranks 0
--pmg_smoother_ksp_type chebyshev
--pmg_smoother_pc_type jacobi
--pmg_smoother_max_it 2
-
-# Split smoother overrides:
-# - P4/fine smoother does most of the convergence-rate work.
-# - P2 smoother is cheaper and helps keep the hard continuation steps stable.
--pmg_shell_fine_ksp_max_it 5
--pmg_shell_p2_ksp_max_it 10
-
--deflation true
--linear_rtol 1.0e-1
--ksp_max_it 200
 -ksp_converged_reason

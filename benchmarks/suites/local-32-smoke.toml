@@ -1,0 +1,27 @@
+[suite]
+id = "local-32-smoke"
+title = "Local 32-core smoke sweep"
+cases = ["3d-heterogeneous-ssr-p4"]
+profiles = ["pmg-deflated-baseline"]
+ranks = [1, 2, 4, 8, 16, 32]
+repeats = 1
+timeout = "00:20:00"
+
+[resources.local]
+machine = "local-32-core"
+cores = 32
+max_ranks = 32
+launcher = "mpiexec"
+time_limit = "00:20:00"
+
+[environment]
+OMP_NUM_THREADS = "1"
+
+[overrides.continuation]
+step_max = 3
+
+[collect]
+petsc_log_view = true
+options_view = true
+options_left = true
+environment = true

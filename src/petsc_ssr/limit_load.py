@@ -67,7 +67,7 @@ def _summary(ctx: SsrContext, ops: EngineOps, state: LimitLoadState, totals: Con
 
 def run_limit_load_continuation(ctx: SsrContext) -> ContinuationCurve:
     opts = ctx.options
-    ops = EngineOps(ctx.create_engine())
+    ops = ctx.debug_engine_ops()
     reporter = RankReporter(ctx.rank)
     data_dir = ctx.output_dir / "data"
     curve_csv = data_dir / "continuation_curve.csv"

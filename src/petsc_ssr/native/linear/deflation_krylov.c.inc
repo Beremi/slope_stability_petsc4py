@@ -535,17 +535,18 @@ static PetscErrorCode LinearSolverBiorthogonalizeBasis(LinearSolverCtx *solver, 
 {
   Vec            v = NULL, w = NULL, Av = NULL;
   PetscInt       skipped_small = 0, skipped_pivot = 0;
-  PetscLogDouble t0, t1;
+  PetscLogDouble elapsed = 0.0;
+  SsrProfileTimer profile_timer;
   const PetscInt passes = PetscMax((PetscInt)1, solver->app->deflation_reorthogonalize_sweeps + 1);
 
   PetscFunctionBeginUser;
-  PetscCall(PetscLogStagePush(log_stage_deflation_orthogonalize));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_ORTHOGONALIZE);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_ORTHO, A, solver->dm, &profile_timer);
   PetscCall(LinearSolverClearOrthBasis(solver));
   if (!solver->n_raw_basis) {
-    PetscCall(PetscTime(&t1));
-    solver->deflation_orthogonalization_time += t1 - t0;
-    PetscCall(PetscLogStagePop());
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_orthogonalization_time, elapsed));
+    SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_ORTHOGONALIZE);
     PetscFunctionReturn(PETSC_SUCCESS);
   }
   PetscCall(VecDuplicate(solver->raw_basis[0], &v));
@@ -616,19 +617,19 @@ static PetscErrorCode LinearSolverBiorthogonalizeBasis(LinearSolverCtx *solver, 
   PetscCall(VecDestroy(&v));
   PetscCall(VecDestroy(&w));
   PetscCall(VecDestroy(&Av));
-  PetscCall(PetscTime(&t1));
-  solver->deflation_orthogonalization_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_orthogonalization_time, elapsed));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATION_BIORTHO label=\"%s\" raw_cols=%" PetscInt_FMT " orth_cols=%" PetscInt_FMT " skipped_small=%" PetscInt_FMT " skipped_pivot=%" PetscInt_FMT " passes=%" PetscInt_FMT " default_tol=%.6e pivot_tol=%.6e recycle_active=%s recycle_start=%" PetscInt_FMT " recycle_tol=%.6e krylov_tol=%.6e time=%.6g\n",
                         label, solver->n_raw_basis, solver->n_orth_basis, skipped_small, skipped_pivot, passes,
                         (double)solver->app->deflation_basis_tol, (double)solver->app->deflation_biorthogonal_pivot_tol,
                         solver->recycle_temp_basis_active ? "true" : "false", solver->recycle_temp_start_raw, (double)solver->app->deflation_recycle_basis_tol,
-                        (double)solver->app->deflation_krylov_basis_tol, (double)(t1 - t0)));
+                        (double)solver->app->deflation_krylov_basis_tol, (double)elapsed));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATION_CACHE_CONFIG orth_cols=%" PetscInt_FMT " cached_A_cols=%" PetscInt_FMT " left_cols=%" PetscInt_FMT " projector=biorthogonal\n",
                         solver->n_orth_basis, solver->n_orth_basis, solver->n_orth_basis));
   PetscCall(LinearSolverCheckAOrthonormality(solver, label));
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_ORTHOGONALIZE);
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -636,20 +637,21 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
 {
   Vec            v = NULL, Av = NULL;
   PetscInt       skipped_small = 0, skipped_nonpositive = 0;
-  PetscLogDouble t0, t1;
+  PetscLogDouble elapsed = 0.0;
+  SsrProfileTimer profile_timer;
 
   PetscFunctionBeginUser;
   if (solver->app->deflation_projector == DEFLATION_PROJECTOR_BIORTHOGONAL) {
     PetscCall(LinearSolverBiorthogonalizeBasis(solver, A, label));
     PetscFunctionReturn(PETSC_SUCCESS);
   }
-  PetscCall(PetscLogStagePush(log_stage_deflation_orthogonalize));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_ORTHOGONALIZE);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_ORTHO, A, solver->dm, &profile_timer);
   PetscCall(LinearSolverClearOrthBasis(solver));
   if (!solver->n_raw_basis) {
-    PetscCall(PetscTime(&t1));
-    solver->deflation_orthogonalization_time += t1 - t0;
-    PetscCall(PetscLogStagePop());
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_orthogonalization_time, elapsed));
+    SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_ORTHOGONALIZE);
     PetscFunctionReturn(PETSC_SUCCESS);
   }
   PetscCall(VecDuplicate(solver->raw_basis[0], &v));
@@ -707,29 +709,30 @@ static PetscErrorCode LinearSolverAOrthogonalizeBasis(LinearSolverCtx *solver, M
   PetscCall(LinearSolverReorthogonalizeBasis(solver, label));
   PetscCall(VecDestroy(&v));
   PetscCall(VecDestroy(&Av));
-  PetscCall(PetscTime(&t1));
-  solver->deflation_orthogonalization_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_orthogonalization_time, elapsed));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATION_ORTHO label=\"%s\" raw_cols=%" PetscInt_FMT " orth_cols=%" PetscInt_FMT " skipped_small=%" PetscInt_FMT " skipped_nonpositive=%" PetscInt_FMT " default_tol=%.6e recycle_active=%s recycle_start=%" PetscInt_FMT " recycle_tol=%.6e krylov_tol=%.6e time=%.6g\n",
                         label, solver->n_raw_basis, solver->n_orth_basis, skipped_small, skipped_nonpositive,
                         (double)solver->app->deflation_basis_tol, solver->recycle_temp_basis_active ? "true" : "false",
                         solver->recycle_temp_start_raw, (double)solver->app->deflation_recycle_basis_tol,
-                        (double)solver->app->deflation_krylov_basis_tol, (double)(t1 - t0)));
+                        (double)solver->app->deflation_krylov_basis_tol, (double)elapsed));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATION_CACHE_CONFIG orth_cols=%" PetscInt_FMT " cached_A_cols=%" PetscInt_FMT " left_cols=0 projector=a_orthonormal\n",
                         solver->n_orth_basis, solver->n_orth_basis));
   PetscCall(LinearSolverCheckAOrthonormality(solver, label));
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_ORTHOGONALIZE);
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A, Vec rhs, Vec x, Vec r, Vec work)
 {
-  PetscLogDouble t0, t1;
+  SsrProfileTimer profile_timer;
+  PetscLogDouble  elapsed;
 
   PetscFunctionBeginUser;
-  PetscCall(PetscLogStagePush(log_stage_deflation_initial_guess));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_INITIAL_GUESS);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_COARSE, A, rhs, &profile_timer);
   PetscCall(VecZeroEntries(x));
   PetscCall(VecCopy(rhs, r));
   for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
@@ -739,13 +742,13 @@ static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A
     PetscCall(VecAXPY(x, coeff, solver->orth_basis[i]));
     PetscCall(VecAXPY(r, -coeff, solver->Aorth_basis[i]));
   }
-  PetscCall(PetscTime(&t1));
-  solver->deflation_coarse_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_coarse_time, elapsed));
   ++solver->deflation_coarse_calls;
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATION_COARSE_INITIAL basis_cols=%" PetscInt_FMT " call=%" PetscInt_FMT " time=%.6g cumulative_time=%.6g\n",
-                        solver->n_orth_basis, solver->deflation_coarse_calls, (double)(t1 - t0), (double)solver->deflation_coarse_time));
-  PetscCall(PetscLogStagePop());
+                        solver->n_orth_basis, solver->deflation_coarse_calls, (double)elapsed, (double)solver->deflation_coarse_time));
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_INITIAL_GUESS);
   (void)A;
   (void)work;
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -753,14 +756,16 @@ static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A
 
 static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, PC pc, Vec v, Vec z, Vec Az, PetscBool return_Az)
 {
-  PetscLogDouble t0, t1, t2, pc_time, projector_time = 0.0;
+  SsrProfileTimer pc_timer, projector_timer;
+  PetscLogDouble  pc_time = 0.0, projector_time = 0.0;
 
   PetscFunctionBeginUser;
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PC_APPLY, pc, v, &pc_timer);
   PetscCall(PCApply(pc, v, z));
-  PetscCall(PetscTime(&t1));
+  SSR_PROFILE_TIMER_END(NULL, &pc_timer, &pc_time);
   if (solver->n_orth_basis || return_Az) {
-    PetscCall(PetscLogStagePush(log_stage_deflation_projector));
+    SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_PROJECTOR);
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PROJECT, A, z, &projector_timer);
     PetscCall(MatMult(A, z, Az));
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
       PetscScalar coeff;
@@ -769,27 +774,27 @@ static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, 
       PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
       PetscCall(VecAXPY(Az, -coeff, solver->Aorth_basis[i]));
     }
-    PetscCall(PetscLogStagePop());
+    SSR_PROFILE_TIMER_END(NULL, &projector_timer, &projector_time);
+    SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_PROJECTOR);
   }
-  PetscCall(PetscTime(&t2));
-  pc_time        = t1 - t0;
-  projector_time = t2 - t1;
-  solver->deflation_pc_apply_time += pc_time;
-  solver->deflation_projector_time += projector_time;
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_pc_apply_time, pc_time));
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_projector_time, projector_time));
   ++solver->deflation_projected_pc_calls;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
 static PetscErrorCode DeflationApplyMatlabProjectedPC(LinearSolverCtx *solver, Mat A, PC pc, Vec v, Vec z, Vec work)
 {
-  PetscLogDouble t0, t1, t2, pc_time, projector_time = 0.0;
+  SsrProfileTimer pc_timer, projector_timer;
+  PetscLogDouble  pc_time = 0.0, projector_time = 0.0;
 
   PetscFunctionBeginUser;
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PC_APPLY, pc, v, &pc_timer);
   PetscCall(PCApply(pc, v, z));
-  PetscCall(PetscTime(&t1));
+  SSR_PROFILE_TIMER_END(NULL, &pc_timer, &pc_time);
   if (solver->n_orth_basis) {
-    PetscCall(PetscLogStagePush(log_stage_deflation_projector));
+    SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_PROJECTOR);
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PROJECT, A, z, &projector_timer);
     PetscCall(MatMult(A, z, work));
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
       PetscScalar coeff;
@@ -797,13 +802,11 @@ static PetscErrorCode DeflationApplyMatlabProjectedPC(LinearSolverCtx *solver, M
       PetscCall(VecDot(LinearSolverTestBasis(solver, i), work, &coeff));
       PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
     }
-    PetscCall(PetscLogStagePop());
+    SSR_PROFILE_TIMER_END(NULL, &projector_timer, &projector_time);
+    SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_PROJECTOR);
   }
-  PetscCall(PetscTime(&t2));
-  pc_time        = t1 - t0;
-  projector_time = t2 - t1;
-  solver->deflation_pc_apply_time += pc_time;
-  solver->deflation_projector_time += projector_time;
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_pc_apply_time, pc_time));
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_projector_time, projector_time));
   ++solver->deflation_projected_pc_calls;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -1034,6 +1037,8 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
   PetscReal    rtol, abstol, dtol, rhs_norm, beta, rel = PETSC_MAX_REAL;
   PetscInt     max_it, ksp_max_it, final_its = 0;
   PetscBool    converged = PETSC_FALSE;
+  SsrProfileTimer coarse_timer;
+  PetscLogDouble  coarse_time = 0.0;
 
   PetscFunctionBeginUser;
   PetscCall(KSPSetUp(ksp));
@@ -1048,7 +1053,8 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
   PetscCall(VecDuplicate(rhs, &work));
   PetscCall(PetscCalloc2((max_it + 1) * max_it, &H, max_it, &y));
 
-  PetscCall(PetscLogStagePush(log_stage_deflation_initial_guess));
+  SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_INITIAL_GUESS);
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_COARSE, A, rhs, &coarse_timer);
   PetscCall(VecZeroEntries(x));
   for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
     PetscScalar coeff;
@@ -1058,7 +1064,9 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
   }
   PetscCall(MatMult(A, x, work));
   PetscCall(VecWAXPY(r, -1.0, work, rhs));
-  PetscCall(PetscLogStagePop());
+  SSR_PROFILE_TIMER_END(NULL, &coarse_timer, &coarse_time);
+  SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_INITIAL_GUESS);
+  PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_coarse_time, coarse_time));
   ++solver->deflation_coarse_calls;
 
   PetscCall(VecNorm(rhs, NORM_2, &rhs_norm));
@@ -1270,17 +1278,13 @@ static PetscErrorCode LinearSolverSolvePrepared(LinearSolverCtx *solver, KSP ksp
   PetscCheck(solver, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "Linear solver pointer is NULL");
   PetscCheck(ksp, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "KSP is not set up");
   if (solver->app->use_deflation && nonlinear_tangent && solver->n_raw_basis > 0) {
+    const SsrNativeDeflationOps *deflation_ops = NULL;
     PetscReal reported_rel = PETSC_MAX_REAL;
 
     if (!basis_already_orthogonalized) PetscCall(LinearSolverAOrthogonalizeBasis(solver, solver->A, label));
     PetscCall(VecZeroEntries(x));
-    if (solver->app->deflation_solver == DEFLATION_SOLVER_FGMRES) {
-      PetscCall(DeflatedFGMRESSolve(solver, ksp, rhs, x, label, its, &reported_rel));
-    } else if (solver->app->deflation_solver == DEFLATION_SOLVER_MATLAB_DFGMRES) {
-      PetscCall(DeflatedMatlabDFGMRESSolve(solver, ksp, rhs, x, label, its, &reported_rel));
-    } else {
-      PetscCall(DeflatedCGSolve(solver, ksp, rhs, x, label, its, &reported_rel));
-    }
+    PetscCall(SsrNativeDeflationRegistryFind(solver->app->deflation_solver, &deflation_ops));
+    PetscCall(SsrNativeDeflationSolve(deflation_ops, solver, ksp, rhs, x, label, its, &reported_rel));
     PetscCall(CheckLinearSolutionExplicit(solver->dm, solver->app, solver->A, rhs, x, label, *its, reported_rel));
   } else {
     PetscCall(KSPSolve(ksp, rhs, x));

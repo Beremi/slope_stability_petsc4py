@@ -1,0 +1,18 @@
+description = "P1/GAMG baseline profile for validation and debug runs without a p-hierarchy."
+
+[linear]
+algorithm = "fgmres"
+ksp_type = "fgmres"
+norm_type = "unpreconditioned"
+rtol = 1e-1
+max_it = 200
+reuse_preconditioner = true
+
+[deflation]
+enabled = false
+
+[pc]
+type = "gamg"
+
+[petsc]
+extra = []

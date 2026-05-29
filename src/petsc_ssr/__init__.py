@@ -1,12 +1,7 @@
 """Scriptable PETSc-owned slope-stability SSR engine."""
 
-from .context import SsrContext
-from .continuation import ContinuationCurve, run_indirect_ssr
-from .hydro import HydroMesh, HydroResult, load_comsol_seepage_mesh, solve_comsol_seepage
-from .limit_load import run_limit_load_continuation
 from .options import LinearOptions, PmgOptions, SsrOptions
 from .problem import BoundarySpec, MaterialSpec, ProblemSpec
-from .case_config import CaseTranslation, benchmark_capability_rows, translate_case_toml
 
 __all__ = [
     "BoundarySpec",
@@ -27,3 +22,25 @@ __all__ = [
     "solve_comsol_seepage",
     "translate_case_toml",
 ]
+
+
+def __getattr__(name: str):
+    from importlib import import_module
+
+    modules = {
+        "CaseTranslation": ".case_config",
+        "ContinuationCurve": ".continuation",
+        "HydroMesh": ".hydro",
+        "HydroResult": ".hydro",
+        "SsrContext": ".context",
+        "benchmark_capability_rows": ".case_config",
+        "load_comsol_seepage_mesh": ".hydro",
+        "run_indirect_ssr": ".continuation",
+        "run_limit_load_continuation": ".limit_load",
+        "solve_comsol_seepage": ".hydro",
+        "translate_case_toml": ".case_config",
+    }
+    if name in modules:
+        module = import_module(modules[name], __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

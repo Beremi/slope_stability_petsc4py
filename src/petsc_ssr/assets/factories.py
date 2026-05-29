@@ -463,6 +463,9 @@ class CanonicalProblemAsset(ProblemAssetAPI):
     def seepage_spec(self) -> SeepageSpec | None:
         return self._seepage
 
+    def boundary_geometry_specs(self) -> dict[str, tuple[str, int]]:
+        return dict(self._boundary_geometry_specs)
+
     def hydraulic_conductivity(self) -> np.ndarray | None:
         if self._seepage is None:
             return None

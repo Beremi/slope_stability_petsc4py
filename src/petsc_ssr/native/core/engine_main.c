@@ -7,6 +7,10 @@
    any numerical or performance change from the refactor itself.
 */
 #include "context.c.inc"
+#include "../io/problem_manifest.c.inc"
+#include "../profiling/stats.c.inc"
+#include "../algorithms/registry.c.inc"
+#include "public_engine.c.inc"
 #include "../linear/pmg_shell.c.inc"
 #include "../linear/deflation_krylov.c.inc"
 #include "../reporting/reporting.c.inc"

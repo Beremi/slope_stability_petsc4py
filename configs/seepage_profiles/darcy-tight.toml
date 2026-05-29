@@ -1,0 +1,6 @@
+description = "Default Darcy seepage runtime policy for benchmark hydro prepasses."
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 500
+nonlinear_max_iter = 50

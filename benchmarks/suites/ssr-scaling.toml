@@ -1,20 +1,32 @@
 [suite]
-name = "ssr-scaling"
-description = "Maintained SSR scaling sweep for local and Karolina runs."
-
-cases = [
-  "3d-heterogeneous-ssr-p4",
-]
+id = "ssr-scaling"
+title = "Maintained SSR scaling sweep for local and Karolina runs"
+cases = ["3d-heterogeneous-ssr-p4"]
+profiles = ["pmg-deflated-baseline"]
+ranks = [32, 64, 128, 256]
+repeats = 1
+timeout = "00:30:00"
 
 [resources.local]
-ranks = [32, 64]
+machine = "local"
+max_ranks = 64
+launcher = "mpiexec"
 time_limit = "00:30:00"
 
 [resources.karolina]
-nodes = [1, 2]
+machine = "karolina"
+max_ranks = 256
+nodes = 2
 ranks_per_node = 128
 partition = "qcpu"
 time_limit = "00:30:00"
 
-[solver]
-profile = "baseline-pmg-deflated"
+[environment]
+OMP_NUM_THREADS = "1"
+
+[collect]
+petsc_log_view = true
+options_view = true
+options_left = true
+environment = true
+resolved_manifest = true

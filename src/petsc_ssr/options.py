@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+import os
 
 
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
@@ -18,8 +19,28 @@ class PmgOptions:
     """Scalable shell PMG profile used by the maintained C baseline."""
 
     options_file: Path = DEFAULT_OPTIONS_FILE
-    p2_active_ranks: int = 64
-    p1_active_ranks: int = 32
+    apply_backend: str = "shell_vcycle"
+    coarse_pc_type: str = "gamg"
+    coarse_lu_max_dofs: int = 50000
+    coarse_redundant_group_size: int = 0
+    coarse_gamg_aggressive_square_graph: bool = False
+    coarse_telescope_active_ranks: int = 0
+    coarse_telescope_subcomm_type: str = "interlaced"
+    coarse_telescope_ksp_type: str = "fgmres"
+    coarse_telescope_ksp_rtol: float = 1.0e-3
+    coarse_telescope_ksp_max_it: int = 5
+    coarse_telescope_pc_type: str = "gamg"
+    p2_telescope_active_ranks: int = 0
+    p2_telescope_subcomm_type: str = "interlaced"
+    p2_telescope_ksp_type: str = "fgmres"
+    p2_telescope_ksp_rtol: float = 1.0e-3
+    p2_telescope_ksp_max_it: int = 50
+    p2_telescope_pc_type: str = "jacobi"
+    smoother_ksp_type: str = "chebyshev"
+    smoother_pc_type: str = "jacobi"
+    smoother_max_it: int = 2
+    p2_active_ranks: int = 0
+    p1_active_ranks: int = 0
     subcomm_type: str = "interlaced"
     fine_ksp_max_it: int = 5
     p2_ksp_max_it: int = 10
@@ -32,11 +53,32 @@ class PmgOptions:
 
     @classmethod
     def current_baseline(cls) -> "PmgOptions":
-        return cls()
+        world = _world_size()
+        return cls(p2_active_ranks=min(world, 64), p1_active_ranks=max(1, min(world, 64, world // 2 if world > 1 else 1)))
 
     def option_tokens(self) -> list[str]:
         tokens: list[str] = []
         for key, value in (
+            ("-pmg_apply_backend", self.apply_backend),
+            ("-pmg_coarse_pc_type", self.coarse_pc_type),
+            ("-pmg_coarse_lu_max_dofs", self.coarse_lu_max_dofs),
+            ("-pmg_coarse_redundant_group_size", self.coarse_redundant_group_size),
+            ("-pmg_coarse_gamg_aggressive_square_graph", self.coarse_gamg_aggressive_square_graph),
+            ("-pmg_coarse_telescope_active_ranks", self.coarse_telescope_active_ranks),
+            ("-pmg_coarse_telescope_subcomm_type", self.coarse_telescope_subcomm_type),
+            ("-pmg_coarse_telescope_ksp_type", self.coarse_telescope_ksp_type),
+            ("-pmg_coarse_telescope_ksp_rtol", self.coarse_telescope_ksp_rtol),
+            ("-pmg_coarse_telescope_ksp_max_it", self.coarse_telescope_ksp_max_it),
+            ("-pmg_coarse_telescope_pc_type", self.coarse_telescope_pc_type),
+            ("-pmg_p2_telescope_active_ranks", self.p2_telescope_active_ranks),
+            ("-pmg_p2_telescope_subcomm_type", self.p2_telescope_subcomm_type),
+            ("-pmg_p2_telescope_ksp_type", self.p2_telescope_ksp_type),
+            ("-pmg_p2_telescope_ksp_rtol", self.p2_telescope_ksp_rtol),
+            ("-pmg_p2_telescope_ksp_max_it", self.p2_telescope_ksp_max_it),
+            ("-pmg_p2_telescope_pc_type", self.p2_telescope_pc_type),
+            ("-pmg_smoother_ksp_type", self.smoother_ksp_type),
+            ("-pmg_smoother_pc_type", self.smoother_pc_type),
+            ("-pmg_smoother_max_it", self.smoother_max_it),
             ("-pmg_shell_p2_active_ranks", self.p2_active_ranks),
             ("-pmg_shell_p1_active_ranks", self.p1_active_ranks),
             ("-pmg_shell_subcomm_type", self.subcomm_type),
@@ -50,7 +92,8 @@ class PmgOptions:
             ("-pmg_shell_p1_redundant_pc_type", self.p1_redundant_pc_type),
         ):
             if value is not None:
-                tokens.extend([key, str(value)])
+                token_value = _bool(value) if isinstance(value, bool) else str(value)
+                tokens.extend([key, token_value])
         return tokens
 
 
@@ -83,7 +126,10 @@ class LinearOptions:
 @dataclass(slots=True)
 class SsrOptions:
     analysis: str = "ssr"
+    continuation_algorithm: str = "indirect"
     continuation_method: str = "indirect"
+    newton_algorithm: str = "indirect-ssr"
+    linear_algorithm: str = "pmg-deflated"
     omega_max: float = 7.0e6
     lambda_init: float = 1.0
     d_lambda_init: float = 0.1
@@ -104,12 +150,13 @@ class SsrOptions:
     damping_min: float = 1.0e-3
     line_search: bool = True
     continuation_predictor: str = "secant"
-    omega_step_controller: str = "legacy"
+    omega_step_controller: str = "classic"
     pc_variant: str = "pmg"
     partitioner: str = "parmetis"
     linear: LinearOptions = field(default_factory=LinearOptions)
     pmg: PmgOptions = field(default_factory=PmgOptions.current_baseline)
     petsc_options: list[str] = field(default_factory=list)
+    profile_name: str = ""
 
     @classmethod
     def current_baseline(cls, *, omega_max: float = 7.0e6) -> "SsrOptions":
@@ -119,8 +166,14 @@ class SsrOptions:
         tokens = [
             "-analysis",
             self.analysis,
+            "-continuation_algorithm",
+            self.continuation_algorithm,
             "-continuation_method",
             self.continuation_method,
+            "-newton_algorithm",
+            self.newton_algorithm,
+            "-linear_algorithm",
+            self.linear_algorithm,
             "-omega_max",
             str(self.omega_max),
             "-lambda_init",
@@ -180,3 +233,19 @@ def flatten_tokens(chunks: Iterable[Iterable[str]]) -> list[str]:
     for chunk in chunks:
         tokens.extend(str(part) for part in chunk)
     return tokens
+
+
+def _world_size() -> int:
+    for env_name in ("PETSC_SSR_WORLD_SIZE", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "SLURM_NTASKS"):
+        raw = os.environ.get(env_name)
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+    try:
+        from mpi4py import MPI
+
+        return max(1, int(MPI.COMM_WORLD.Get_size()))
+    except Exception:
+        return 1

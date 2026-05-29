@@ -13,7 +13,7 @@ This 2D case runs a config-driven limit-load (LL) analysis using asset `2d_homo_
 - Case config: [`case.toml`](case.toml)
 - Asset: `2d_homo_slope`
 - Mesh variant: `h0.5`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `ll`
 - Element order: `P2`
 

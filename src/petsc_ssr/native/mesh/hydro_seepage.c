@@ -1,4 +1,5 @@
 #include "hydro_seepage.h"
+#include "petsc_ssr_stats.h"
 #include "p4_basis.h"
 
 #include <petscdmplex.h>
@@ -51,7 +52,7 @@ typedef struct {
   PetscBool     *target_porous;
   PetscBool     *target_free;
   PetscBool     *target_support;
-  PetscLogDouble assembly_time;
+  SsrHydroStats  stats;
   PetscInt       n_constrained_local;
   PetscInt       n_constrained_global;
   HydroOptions   opt;
@@ -618,11 +619,12 @@ static PetscErrorCode HydroAssemble(HydroCtx *ctx, Vec pw, Mat A, Vec rhs, Petsc
   Vec             pw_loc = NULL, rhs_loc = NULL, prescribed_loc = NULL;
   PetscInt        cStart, cEnd, ndof = basis->n_basis;
   PetscScalar    *elem_vec = NULL, *elem_mat = NULL;
-  PetscLogDouble  t0, t1;
+  SsrProfileTimer profile_timer;
+  PetscLogDouble  elapsed = 0.0;
   PetscBool       initial_gravity = (PetscBool)(ctx->opt.dim == 3);
 
   PetscFunctionBeginUser;
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_HYDRO_ASSEMBLE, dm, A, &profile_timer);
   PetscCall(DMGetLocalSection(dm, &lsec));
   PetscCall(DMGetGlobalSection(dm, &gsec));
   PetscCall(MatZeroEntries(A));
@@ -734,8 +736,8 @@ static PetscErrorCode HydroAssemble(HydroCtx *ctx, Vec pw, Mat A, Vec rhs, Petsc
   if (pw_loc) PetscCall(DMRestoreLocalVector(dm, &pw_loc));
   if (prescribed_loc) PetscCall(DMRestoreLocalVector(dm, &prescribed_loc));
   PetscCall(DMRestoreLocalVector(dm, &rhs_loc));
-  PetscCall(PetscTime(&t1));
-  ctx->assembly_time += t1 - t0;
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(SsrStatsAddHydroAssembly(&ctx->stats, elapsed));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -906,21 +908,22 @@ static PetscErrorCode HydroApplyDirichletCorrection(HydroCtx *ctx, Mat A, Vec rh
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode HydroSolveLogged(KSP ksp, const char phase[], PetscInt step, Vec rhs, Vec x, PetscInt *its, PetscLogDouble *time)
+static PetscErrorCode HydroSolveLogged(KSP ksp, const char phase[], PetscInt step, Vec rhs, Vec x, PetscInt *its, SsrHydroStats *stats)
 {
   KSPConvergedReason reason;
-  PetscLogDouble     t0, t1;
+  SsrProfileTimer    profile_timer;
+  PetscLogDouble     elapsed = 0.0;
 
   PetscFunctionBeginUser;
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_HYDRO_LINEAR_SOLVE, ksp, rhs, &profile_timer);
   PetscCall(KSPSolve(ksp, rhs, x));
-  PetscCall(PetscTime(&t1));
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(KSPGetIterationNumber(ksp, its));
   PetscCall(KSPGetConvergedReason(ksp, &reason));
-  *time = t1 - t0;
+  PetscCall(SsrStatsAddHydroLinearSolve(stats, *its, elapsed, reason));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)ksp),
                         "HYDRO_LINEAR phase=%s step=%" PetscInt_FMT " ksp_its=%" PetscInt_FMT " reason=%" PetscInt_FMT " solve_time=%.6g\n",
-                        phase, step, *its, (PetscInt)reason, (double)*time));
+                        phase, step, *its, (PetscInt)reason, (double)elapsed));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -962,8 +965,7 @@ static PetscErrorCode HydroCountSaturated(HydroCtx *ctx, Vec pw, PetscInt *globa
 }
 
 static PetscErrorCode HydroWriteSummary(const HydroOptions *opt, PetscInt ranks, PetscInt degree, PetscInt global_dofs, PetscInt cells, PetscInt constrained, PetscInt newton_its,
-                                        PetscInt total_linear_its, PetscReal final_crit, PetscReal pmin, PetscReal pmax, PetscInt saturated, PetscLogDouble assembly_time,
-                                        PetscLogDouble solve_time, PetscLogDouble wall_time)
+                                        const SsrHydroStats *stats, PetscReal final_crit, PetscReal pmin, PetscReal pmax, PetscInt saturated, PetscLogDouble wall_time)
 {
   PetscMPIInt rank;
   FILE       *fh;
@@ -993,8 +995,8 @@ static PetscErrorCode HydroWriteSummary(const HydroOptions *opt, PetscInt ranks,
           "  \"solve_time\": %.17g,\n"
           "  \"wall_time\": %.17g\n"
           "}\n",
-          opt->pc_variant, ranks, degree, global_dofs, cells, constrained, newton_its, total_linear_its, (double)final_crit, (double)pmin, (double)pmax, opt->pressure_binary, saturated,
-          (double)assembly_time, (double)solve_time, (double)wall_time);
+          opt->pc_variant, ranks, degree, global_dofs, cells, constrained, newton_its, stats ? stats->total_linear_its : 0, (double)final_crit, (double)pmin, (double)pmax,
+          opt->pressure_binary, saturated, (double)(stats ? stats->assembly_time : 0.0), (double)(stats ? stats->solve_time : 0.0), (double)wall_time);
   fclose(fh);
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -1059,14 +1061,15 @@ static PetscErrorCode HydroSeepageRunFromOptions(void)
   Mat           A = NULL;
   Vec           rhs = NULL, pw = NULL, dp = NULL;
   KSP           ksp = NULL;
-  PetscInt      cells_local, cells_global, global_dofs, total_linear = 0, saturated = 0;
+  PetscInt      cells_local, cells_global, global_dofs, saturated = 0;
   PetscReal     norm0, final_crit = PETSC_MAX_REAL, pmin = 0.0, pmax = 0.0;
-  PetscLogDouble t0, t1, solve_time = 0.0, st;
+  SsrProfileTimer run_timer;
+  PetscLogDouble wall_time = 0.0;
   PetscMPIInt   ranks;
 
   PetscFunctionBeginUser;
   PetscCallMPI(MPI_Comm_size(comm, &ranks));
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_HYDRO_RUN, NULL, NULL, &run_timer);
   PetscCall(HydroParseOptions(comm, &opt));
   PetscCall(PetscPrintf(comm, "HYDRO_OPTIONS mesh=%s dim=%" PetscInt_FMT " elem_type=%s pc_variant=%s head_mode=%s\n", opt.mesh, opt.dim, opt.elem_type, opt.pc_variant, opt.head_mode));
   PetscCall(HydroParseGmshHeadSets(comm, opt.mesh, &sets));
@@ -1096,9 +1099,7 @@ static PetscErrorCode HydroSeepageRunFromOptions(void)
   PetscCall(HydroAssemble(&ctx, NULL, A, rhs, PETSC_FALSE));
   PetscCall(HydroApplyDirichletInitial(&ctx, A, rhs));
   PetscCall(KSPSetOperators(ksp, A, A));
-  PetscCall(HydroSolveLogged(ksp, "initial", 0, rhs, pw, &cells_local, &st));
-  total_linear += cells_local;
-  solve_time += st;
+  PetscCall(HydroSolveLogged(ksp, "initial", 0, rhs, pw, &cells_local, &ctx.stats));
   PetscCall(VecNorm(pw, NORM_2, &norm0));
   if (norm0 <= 1.0e-14) norm0 = 1.0e-14;
 
@@ -1110,9 +1111,7 @@ static PetscErrorCode HydroSeepageRunFromOptions(void)
     PetscCall(HydroApplyDirichletCorrection(&ctx, A, rhs));
     PetscCall(KSPSetOperators(ksp, A, A));
     PetscCall(VecZeroEntries(dp));
-    PetscCall(HydroSolveLogged(ksp, "newton", it, rhs, dp, &its, &st));
-    total_linear += its;
-    solve_time += st;
+    PetscCall(HydroSolveLogged(ksp, "newton", it, rhs, dp, &its, &ctx.stats));
     PetscCall(VecAXPY(pw, 1.0, dp));
     PetscCall(VecNorm(dp, NORM_2, &dpnorm));
     final_crit = dpnorm / norm0;
@@ -1121,30 +1120,28 @@ static PetscErrorCode HydroSeepageRunFromOptions(void)
       PetscCall(HydroCountSaturated(&ctx, pw, &saturated));
       PetscCall(VecMin(pw, NULL, &pmin));
       PetscCall(VecMax(pw, NULL, &pmax));
-      PetscCall(PetscTime(&t1));
+      SSR_PROFILE_TIMER_END(NULL, &run_timer, &wall_time);
       PetscCall(HydroWritePressureBinary(&opt, pw));
       PetscCall(HydroWriteDofCoordsCSV(&opt, dm));
       PetscCall(PetscPrintf(comm,
                             "HYDRO_RESULT backend=petsc pc_variant=%s degree=%" PetscInt_FMT " ranks=%d global_dofs=%" PetscInt_FMT " cells=%" PetscInt_FMT " constrained_dofs=%" PetscInt_FMT " newton_iterations=%" PetscInt_FMT " total_linear_iterations=%" PetscInt_FMT " final_criterion=%.8e pressure_min=%.8e pressure_max=%.8e saturated_elements=%" PetscInt_FMT " assembly_time=%.6g solve_time=%.6g wall_time=%.6g summary_json=%s pressure_binary=%s\n",
-                            opt.pc_variant, opt.degree, ranks, global_dofs, cells_global, ctx.n_constrained_global, it, total_linear, (double)final_crit, (double)pmin,
-                            (double)pmax, saturated, (double)ctx.assembly_time, (double)solve_time, (double)(t1 - t0), opt.summary_json, opt.pressure_binary));
-      PetscCall(HydroWriteSummary(&opt, ranks, opt.degree, global_dofs, cells_global, ctx.n_constrained_global, it, total_linear, final_crit, pmin, pmax, saturated, ctx.assembly_time,
-                                  solve_time, t1 - t0));
+                            opt.pc_variant, opt.degree, ranks, global_dofs, cells_global, ctx.n_constrained_global, it, ctx.stats.total_linear_its, (double)final_crit, (double)pmin,
+                            (double)pmax, saturated, (double)ctx.stats.assembly_time, (double)ctx.stats.solve_time, (double)wall_time, opt.summary_json, opt.pressure_binary));
+      PetscCall(HydroWriteSummary(&opt, ranks, opt.degree, global_dofs, cells_global, ctx.n_constrained_global, it, &ctx.stats, final_crit, pmin, pmax, saturated, wall_time));
       goto cleanup;
     }
   }
   PetscCall(HydroCountSaturated(&ctx, pw, &saturated));
   PetscCall(VecMin(pw, NULL, &pmin));
   PetscCall(VecMax(pw, NULL, &pmax));
-  PetscCall(PetscTime(&t1));
+  SSR_PROFILE_TIMER_END(NULL, &run_timer, &wall_time);
   PetscCall(HydroWritePressureBinary(&opt, pw));
   PetscCall(HydroWriteDofCoordsCSV(&opt, dm));
   PetscCall(PetscPrintf(comm,
                         "HYDRO_RESULT backend=petsc pc_variant=%s degree=%" PetscInt_FMT " ranks=%d global_dofs=%" PetscInt_FMT " cells=%" PetscInt_FMT " constrained_dofs=%" PetscInt_FMT " newton_iterations=%" PetscInt_FMT " total_linear_iterations=%" PetscInt_FMT " final_criterion=%.8e pressure_min=%.8e pressure_max=%.8e saturated_elements=%" PetscInt_FMT " assembly_time=%.6g solve_time=%.6g wall_time=%.6g summary_json=%s pressure_binary=%s\n",
-                        opt.pc_variant, opt.degree, ranks, global_dofs, cells_global, ctx.n_constrained_global, opt.newton_max_it, total_linear, (double)final_crit, (double)pmin,
-                        (double)pmax, saturated, (double)ctx.assembly_time, (double)solve_time, (double)(t1 - t0), opt.summary_json, opt.pressure_binary));
-  PetscCall(HydroWriteSummary(&opt, ranks, opt.degree, global_dofs, cells_global, ctx.n_constrained_global, opt.newton_max_it, total_linear, final_crit, pmin, pmax, saturated,
-                              ctx.assembly_time, solve_time, t1 - t0));
+                        opt.pc_variant, opt.degree, ranks, global_dofs, cells_global, ctx.n_constrained_global, opt.newton_max_it, ctx.stats.total_linear_its, (double)final_crit,
+                        (double)pmin, (double)pmax, saturated, (double)ctx.stats.assembly_time, (double)ctx.stats.solve_time, (double)wall_time, opt.summary_json, opt.pressure_binary));
+  PetscCall(HydroWriteSummary(&opt, ranks, opt.degree, global_dofs, cells_global, ctx.n_constrained_global, opt.newton_max_it, &ctx.stats, final_crit, pmin, pmax, saturated, wall_time));
 
 cleanup:
   if (opt.log_view) PetscCall(PetscLogView(PETSC_VIEWER_STDOUT_WORLD));

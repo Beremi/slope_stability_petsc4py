@@ -13,7 +13,7 @@ This 2D case runs a config-driven shear strength reduction (SSR) analysis using 
 - Case config: [`case.toml`](case.toml)
 - Asset: `2d_homo_slope`
 - Mesh variant: `h1.0`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `ssr`
 - Element order: `P2`
 

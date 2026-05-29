@@ -1,0 +1,11 @@
+description = "Indirect SSR Newton profile with absolute lambda-step stopping."
+
+[newton]
+algorithm = "indirect-ssr"
+it_max = 200
+it_damp_max = 10
+tol = 0.0001
+r_min = 0.0001
+stopping_criterion = "absolute_delta_lambda"
+stopping_tol = 0.0001
+line_search = "alg5"

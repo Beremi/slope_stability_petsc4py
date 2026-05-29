@@ -1114,7 +1114,8 @@ static PetscErrorCode LinearReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Lin
   PetscBool        mapped = PETSC_FALSE;
   PetscBool        have_f = PETSC_FALSE, have_F = PETSC_FALSE, have_G = PETSC_FALSE, have_F_eps = PETSC_FALSE;
   PetscInt         itsW = 0, itsV = 0;
-  PetscLogDouble   t0, t1;
+  PetscLogDouble   elapsed;
+  SsrProfileTimer  profile_timer;
 
   PetscFunctionBeginUser;
   PetscCall(LinearReplayReadMeta(comm, app->linear_replay_dir, &meta));
@@ -1144,14 +1145,14 @@ static PetscErrorCode LinearReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Lin
     PetscCall(LinearReplayMatResidual(comm, "exported_A_solutionV_minus_rhsV", replayA, dV_exp, rhsV_exp));
   }
 
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_ASSEMBLE_TANGENT, Ktangent, residual, &profile_timer);
   PetscCall(AssemblePlasticResidualJacobian(actx, meta.lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
   PetscCall(ComputeLambdaDerivativeFD(actx, app, meta.lambda, u, f_ext, residual, residual_eps, G));
   PetscCall(VecWAXPY(F, 1.0, residual, f_ext));
   PetscCall(VecWAXPY(F_eps, 1.0, residual_eps, f_ext));
   PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, meta.r));
-  PetscCall(PetscTime(&t1));
-  PetscCall(PetscPrintf(comm, "REPLAY_ASSEMBLY time=%.6g\n", (double)(t1 - t0)));
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(PetscPrintf(comm, "REPLAY_ASSEMBLY time=%.6g\n", (double)elapsed));
 
   if (have_f) PetscCall(LinearReplayVecDiff(comm, "f_free_exported_minus_C", f_exp, f_ext));
   if (have_f) {
@@ -1235,7 +1236,8 @@ static PetscErrorCode StepReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Linea
   Mat            replayA = NULL;
   PetscBool      have_f = PETSC_FALSE, have_F = PETSC_FALSE, have_G = PETSC_FALSE, have_F_eps = PETSC_FALSE, have_rhsW = PETSC_FALSE, have_rhsV = PETSC_FALSE;
   PetscReal      lambda;
-  PetscLogDouble t0, t1;
+  PetscLogDouble  elapsed;
+  SsrProfileTimer profile_timer;
 
   PetscFunctionBeginUser;
   PetscCall(LinearReplayReadMeta(comm, app->step_replay_dir, &meta));
@@ -1262,14 +1264,14 @@ static PetscErrorCode StepReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Linea
   PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "rhs_w.vec", f_ext, c_to_export, mapped, &rhsW_exp, &have_rhsW));
   PetscCall(LinearReplayLoadMappedVecOptional(comm, app->step_replay_dir, "rhs_v.vec", f_ext, c_to_export, mapped, &rhsV_exp, &have_rhsV));
 
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_ASSEMBLE_TANGENT, Ktangent, residual, &profile_timer);
   PetscCall(AssemblePlasticResidualJacobian(actx, meta.lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
   PetscCall(ComputeLambdaDerivativeFD(actx, app, meta.lambda, u, f_ext, residual, residual_eps, G));
   PetscCall(VecWAXPY(F, 1.0, residual, f_ext));
   PetscCall(VecWAXPY(F_eps, 1.0, residual_eps, f_ext));
   PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, meta.r));
-  PetscCall(PetscTime(&t1));
-  PetscCall(PetscPrintf(comm, "STEP_REPLAY_ASSEMBLY_CHECK time=%.6g\n", (double)(t1 - t0)));
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(PetscPrintf(comm, "STEP_REPLAY_ASSEMBLY_CHECK time=%.6g\n", (double)elapsed));
 
   PetscCall(VecCopy(G, rhsW));
   PetscCall(VecScale(rhsW, -1.0));
@@ -1347,7 +1349,8 @@ static PetscErrorCode InitReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Linea
   PetscInt       its = 0;
   PetscReal      rel = PETSC_MAX_REAL, alpha_c = 0.0, initial_decrease_c = PETSC_MAX_REAL, du_norm, u_norm, rel_corr_c;
   PetscInt       ls_c = 0;
-  PetscLogDouble t0, t1;
+  PetscLogDouble  elapsed;
+  SsrProfileTimer profile_timer;
 
   PetscFunctionBeginUser;
   PetscCall(LinearReplayReadMeta(comm, app->init_replay_dir, &meta));
@@ -1377,11 +1380,11 @@ static PetscErrorCode InitReplayRun(DM dm, AssemblyCtx *actx, AppCtx *app, Linea
   PetscCall(LinearReplayLoadMappedMatNamed(comm, app->init_replay_dir, "Ktangent_free.mat", f_ext, c_to_export, mapped, &Ktangent_exp));
   PetscCall(LinearReplayLoadMappedMatNamed(comm, app->init_replay_dir, "Kelastic_free.mat", f_ext, c_to_export, mapped, &Kelastic_exp));
 
-  PetscCall(PetscTime(&t0));
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_ASSEMBLE_TANGENT, Ktangent, residual, &profile_timer);
   PetscCall(AssemblePlasticResidualJacobian(actx, meta.lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
   PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, meta.r));
-  PetscCall(PetscTime(&t1));
-  PetscCall(PetscPrintf(comm, "INIT_REPLAY_ASSEMBLY time=%.6g\n", (double)(t1 - t0)));
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  PetscCall(PetscPrintf(comm, "INIT_REPLAY_ASSEMBLY time=%.6g\n", (double)elapsed));
   PetscCall(ResidualNormFree(actx, residual, rhs_norm, &rel));
   PetscCall(VecWAXPY(F, 1.0, residual, f_ext));
   PetscCall(VecCopy(residual, rhs_c));

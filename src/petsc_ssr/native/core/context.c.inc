@@ -1,6 +1,10 @@
 #include "assembly.h"
 #include "material_mc.h"
 #include "p4_basis.h"
+#include "petsc_ssr_algorithms.h"
+#include "petsc_ssr_engine.h"
+#include "petsc_ssr_profile.h"
+#include "petsc_ssr_stats.h"
 
 #include <petscblaslapack.h>
 #include <petscdmplex.h>
@@ -11,27 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static PetscLogStage log_stage_deflation_orthogonalize = -1;
-static PetscLogStage log_stage_deflation_initial_guess = -1;
-static PetscLogStage log_stage_deflation_projector     = -1;
-static PetscLogStage log_stage_pmg_shell_fine_smooth   = -1;
-static PetscLogStage log_stage_pmg_shell_residual      = -1;
-static PetscLogStage log_stage_pmg_shell_transfer      = -1;
-static PetscLogStage log_stage_pmg_shell_p2            = -1;
-static PetscLogStage log_stage_pmg_shell_p1            = -1;
-
 static PetscErrorCode RegisterLogStages(void)
 {
   PetscFunctionBeginUser;
-  if (log_stage_deflation_orthogonalize >= 0) PetscFunctionReturn(PETSC_SUCCESS);
-  PetscCall(PetscLogStageRegister("deflation_orthogonalize", &log_stage_deflation_orthogonalize));
-  PetscCall(PetscLogStageRegister("deflation_initial_guess", &log_stage_deflation_initial_guess));
-  PetscCall(PetscLogStageRegister("deflation_projector", &log_stage_deflation_projector));
-  PetscCall(PetscLogStageRegister("pmg_shell_fine_smooth", &log_stage_pmg_shell_fine_smooth));
-  PetscCall(PetscLogStageRegister("pmg_shell_residual", &log_stage_pmg_shell_residual));
-  PetscCall(PetscLogStageRegister("pmg_shell_transfer", &log_stage_pmg_shell_transfer));
-  PetscCall(PetscLogStageRegister("pmg_shell_p2", &log_stage_pmg_shell_p2));
-  PetscCall(PetscLogStageRegister("pmg_shell_p1", &log_stage_pmg_shell_p1));
+  PetscCall(SsrProfilerRegister(NULL));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -55,6 +42,7 @@ typedef enum {
 } DeflationProjectorType;
 
 typedef struct {
+  SsrRuntimeProfile resolved_profile;
   char      mesh[PETSC_MAX_PATH_LEN];
   PetscInt  refine_levels;
   PetscReal newton_rtol;
@@ -75,7 +63,10 @@ typedef struct {
   PetscReal r_min;
   char      newton_stopping_criterion[32];
   char      init_newton_stopping_criterion[32];
+  char      continuation_algorithm[32];
   char      continuation_method[32];
+  char      newton_algorithm[32];
+  char      linear_algorithm[32];
   char      continuation_predictor[32];
   char      omega_step_controller[32];
   char      curve_csv[PETSC_MAX_PATH_LEN];
@@ -83,8 +74,19 @@ typedef struct {
   char      solution_binary[PETSC_MAX_PATH_LEN];
   char      solution_vtk[PETSC_MAX_PATH_LEN];
   char      solution_points_csv[PETSC_MAX_PATH_LEN];
+  char      native_problem_manifest[PETSC_MAX_PATH_LEN];
+  char      mechanics_bc_labels_csv[PETSC_MAX_PATH_LEN];
+  char      mechanics_neumann_labels_csv[PETSC_MAX_PATH_LEN];
+  char      seepage_boundary_labels_csv[PETSC_MAX_PATH_LEN];
+  char      seepage_pressure_source[64];
   char      seepage_pressure_csv[PETSC_MAX_PATH_LEN];
   char      mechanics_bc_nodes_csv[PETSC_MAX_PATH_LEN];
+  PetscBool debug_coordinate_bc_table;
+  PetscBool native_problem_manifest_loaded;
+  PetscInt  native_manifest_mechanics_dirichlet;
+  PetscInt  native_manifest_mechanics_neumann;
+  PetscInt  native_manifest_seepage_head;
+  PetscInt  native_manifest_seepage_flux;
   PetscReal seepage_grho;
   PetscInt  element_degree;
   PetscInt  mechanics_dim;
@@ -94,6 +96,8 @@ typedef struct {
   PetscBool use_box_mesh;
   PCVariant variant;
   char      variant_name[32];
+  char      requested_variant_name[32];
+  char      variant_fallback_reason[64];
   char      mesh_bc_mode[32];
   PetscInt  bc_tag_base;
   PetscInt  bc_tag_x_min;
@@ -164,17 +168,7 @@ typedef struct {
   PetscBool init_replay_check_damping;
 } AppCtx;
 
-typedef struct {
-  PetscReal      final_rel;
-  PetscReal      final_rel_correction;
-  PetscInt       newton_its;
-  PetscInt       total_linear_its;
-  PetscInt       line_search_its;
-  PetscLogDouble assembly_time;
-  PetscLogDouble solve_time;
-  PetscLogDouble wall_time;
-  PetscBool      converged;
-} NewtonStats;
+typedef SsrNewtonStepStats NewtonStats;
 
 typedef struct {
   DM           dm;
@@ -229,6 +223,171 @@ static PetscErrorCode PMGApplyBackendIsShell(const AppCtx *app, PetscBool *is_sh
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static const char *SsrLinearAlgorithmNameForApp(const AppCtx *app)
+{
+  if (app->variant == VARIANT_PMG) return app->use_deflation ? "pmg-deflated" : "pmg";
+  if (app->variant == VARIANT_GAMG) return "gamg";
+  if (app->variant == VARIANT_BDDC) return "bddc";
+  if (app->variant == VARIANT_FETIDP) return "fetidp";
+  return "none";
+}
+
+static void SsrNormalizeAlgorithmName(char name[])
+{
+  if (!name) return;
+  for (char *p = name; *p; ++p) {
+    if (*p == '_') *p = '-';
+  }
+}
+
+static PetscErrorCode AppCtxNormalizeAlgorithmSelectors(MPI_Comm comm, AppCtx *app)
+{
+  const char *expected_linear = NULL;
+  const char *expected_newton = NULL;
+  PetscBool   flg = PETSC_FALSE, indirect = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  SsrNormalizeAlgorithmName(app->continuation_algorithm);
+  SsrNormalizeAlgorithmName(app->newton_algorithm);
+  SsrNormalizeAlgorithmName(app->linear_algorithm);
+
+  PetscCall(PetscStrcasecmp(app->continuation_algorithm, "auto", &flg));
+  if (flg) PetscCall(PetscStrncpy(app->continuation_algorithm, app->continuation_method, sizeof(app->continuation_algorithm)));
+
+  PetscCall(PetscStrcasecmp(app->continuation_method, "indirect", &indirect));
+  expected_newton = indirect ? "indirect-ssr" : "fixed-load";
+  PetscCall(PetscStrcasecmp(app->newton_algorithm, "auto", &flg));
+  if (flg) PetscCall(PetscStrncpy(app->newton_algorithm, expected_newton, sizeof(app->newton_algorithm)));
+
+  expected_linear = SsrLinearAlgorithmNameForApp(app);
+  PetscCall(PetscStrcasecmp(app->linear_algorithm, "auto", &flg));
+  if (flg) PetscCall(PetscStrncpy(app->linear_algorithm, expected_linear, sizeof(app->linear_algorithm)));
+
+  PetscCall(PetscStrcasecmp(app->continuation_algorithm, app->continuation_method, &flg));
+  PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-continuation_algorithm must match -continuation_method for the current native continuation implementations");
+
+  PetscCall(PetscStrcasecmp(app->newton_algorithm, expected_newton, &flg));
+  PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-newton_algorithm must be %s for continuation method %s", expected_newton, app->continuation_method);
+
+  PetscCall(PetscStrcasecmp(app->linear_algorithm, expected_linear, &flg));
+  if (!flg && app->variant == VARIANT_NONE) {
+    PetscCall(PetscStrcasecmp(app->linear_algorithm, "debug-direct", &flg));
+  }
+  PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-linear_algorithm must be compatible with -pc_variant and -deflation");
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode ValidateAlgorithmRegistrySelection(MPI_Comm comm, const AppCtx *app)
+{
+  const SsrContinuationOps *continuation_ops = NULL;
+  const SsrNewtonOps       *newton_ops = NULL;
+  const SsrLinearOps       *linear_ops = NULL;
+  const SsrMaterialOps     *material_ops = NULL;
+  PetscBool                 indirect = PETSC_FALSE;
+
+  (void)comm;
+  PetscFunctionBeginUser;
+  PetscCall(SsrContinuationRegistryFind(app->continuation_algorithm, &continuation_ops));
+  PetscCall(SsrNewtonRegistryFind("fixed-load", &newton_ops));
+  PetscCall(PetscStrcasecmp(app->newton_algorithm, "indirect-ssr", &indirect));
+  if (indirect) PetscCall(SsrNewtonRegistryFind(app->newton_algorithm, &newton_ops));
+  PetscCall(SsrLinearRegistryFind(app->linear_algorithm, &linear_ops));
+  PetscCall(SsrMaterialRegistryFind("mohr_coulomb", &material_ops));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode AppCtxSyncResolvedProfile(AppCtx *app)
+{
+  char      ksp_type[32] = "";
+  PetscBool ksp_type_set = PETSC_FALSE;
+  PetscBool ksp_max_it_set = PETSC_FALSE;
+
+  PetscFunctionBeginUser;
+  PetscCall(PetscStrncpy(app->resolved_profile.mesh.mesh, app->mesh, sizeof(app->resolved_profile.mesh.mesh)));
+  app->resolved_profile.mesh.dim = app->mechanics_dim;
+  app->resolved_profile.mesh.element_degree = app->element_degree;
+  app->resolved_profile.mesh.refine_levels = app->refine_levels;
+  PetscCall(PetscStrncpy(app->resolved_profile.mesh.partitioner, "petsc-options", sizeof(app->resolved_profile.mesh.partitioner)));
+
+  PetscCall(PetscStrncpy(app->resolved_profile.physics.analysis, app->analysis, sizeof(app->resolved_profile.physics.analysis)));
+  PetscCall(PetscStrncpy(app->resolved_profile.physics.material_model, "mohr_coulomb", sizeof(app->resolved_profile.physics.material_model)));
+  PetscCall(PetscStrncpy(app->resolved_profile.physics.davis_type, "B", sizeof(app->resolved_profile.physics.davis_type)));
+  app->resolved_profile.physics.seepage_enabled = (PetscBool)(app->seepage_pressure_csv[0] || app->seepage_boundary_labels_csv[0]);
+
+  PetscCall(PetscStrncpy(app->resolved_profile.continuation.algorithm, app->continuation_algorithm, sizeof(app->resolved_profile.continuation.algorithm)));
+  PetscCall(PetscStrncpy(app->resolved_profile.continuation.method, app->continuation_method, sizeof(app->resolved_profile.continuation.method)));
+  PetscCall(PetscStrncpy(app->resolved_profile.continuation.predictor, app->continuation_predictor, sizeof(app->resolved_profile.continuation.predictor)));
+  PetscCall(PetscStrncpy(app->resolved_profile.continuation.step_controller, app->omega_step_controller, sizeof(app->resolved_profile.continuation.step_controller)));
+  app->resolved_profile.continuation.omega_max = app->omega_max;
+  app->resolved_profile.continuation.step_max = app->continuation_step_max;
+
+  PetscCall(PetscStrncpy(app->resolved_profile.newton.algorithm, app->newton_algorithm, sizeof(app->resolved_profile.newton.algorithm)));
+  PetscCall(PetscStrncpy(app->resolved_profile.newton.method, "regularized", sizeof(app->resolved_profile.newton.method)));
+  PetscCall(PetscStrncpy(app->resolved_profile.newton.stopping_criterion, app->newton_stopping_criterion, sizeof(app->resolved_profile.newton.stopping_criterion)));
+  app->resolved_profile.newton.stopping_tol = app->newton_stopping_tol;
+  app->resolved_profile.newton.max_it = app->newton_max_it;
+  app->resolved_profile.newton.damp_max = app->it_damp_max;
+
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.profile, SsrLinearAlgorithmNameForApp(app), sizeof(app->resolved_profile.linear.profile)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.algorithm, app->linear_algorithm, sizeof(app->resolved_profile.linear.algorithm)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pc_variant, app->variant_name, sizeof(app->resolved_profile.linear.pc_variant)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.requested_pc_variant, app->requested_variant_name, sizeof(app->resolved_profile.linear.requested_pc_variant)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pc_variant_fallback_reason, app->variant_fallback_reason, sizeof(app->resolved_profile.linear.pc_variant_fallback_reason)));
+  PetscCall(PetscOptionsGetString(NULL, NULL, "-ksp_type", ksp_type, sizeof(ksp_type), &ksp_type_set));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.ksp_type, ksp_type_set ? ksp_type : "profile-default", sizeof(app->resolved_profile.linear.ksp_type)));
+  app->resolved_profile.linear.rtol = app->ksp_rtol;
+  app->resolved_profile.linear.max_it = 0;
+  PetscCall(PetscOptionsGetInt(NULL, NULL, "-ksp_max_it", &app->resolved_profile.linear.max_it, &ksp_max_it_set));
+  (void)ksp_max_it_set;
+  app->resolved_profile.linear.reuse_preconditioner = app->reuse_linear_solver;
+  app->resolved_profile.linear.pmg_p2_active_ranks = app->pmg_shell_p2_active_ranks;
+  app->resolved_profile.linear.pmg_p1_active_ranks = app->pmg_shell_p1_active_ranks;
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.apply_backend, app->pmg_apply_backend, sizeof(app->resolved_profile.linear.pmg.apply_backend)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.shell_subcomm_type, app->pmg_shell_subcomm_type, sizeof(app->resolved_profile.linear.pmg.shell_subcomm_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.smoother_ksp_type, app->pmg_smoother_ksp_type, sizeof(app->resolved_profile.linear.pmg.smoother_ksp_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.smoother_pc_type, app->pmg_smoother_pc_type, sizeof(app->resolved_profile.linear.pmg.smoother_pc_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.coarse_pc_type, app->pmg_coarse_pc_type, sizeof(app->resolved_profile.linear.pmg.coarse_pc_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.coarse_ksp_type, app->pmg_coarse_telescope_ksp_type, sizeof(app->resolved_profile.linear.pmg.coarse_ksp_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.coarse_inner_pc_type, app->pmg_coarse_telescope_pc_type, sizeof(app->resolved_profile.linear.pmg.coarse_inner_pc_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.coarse_telescope_subcomm_type, app->pmg_coarse_telescope_subcomm_type, sizeof(app->resolved_profile.linear.pmg.coarse_telescope_subcomm_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.p2_telescope_subcomm_type, app->pmg_p2_telescope_subcomm_type, sizeof(app->resolved_profile.linear.pmg.p2_telescope_subcomm_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.p2_telescope_ksp_type, app->pmg_p2_telescope_ksp_type, sizeof(app->resolved_profile.linear.pmg.p2_telescope_ksp_type)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.pmg.p2_telescope_pc_type, app->pmg_p2_telescope_pc_type, sizeof(app->resolved_profile.linear.pmg.p2_telescope_pc_type)));
+  app->resolved_profile.linear.pmg.p2_active_ranks = app->pmg_shell_p2_active_ranks;
+  app->resolved_profile.linear.pmg.p1_active_ranks = app->pmg_shell_p1_active_ranks;
+  app->resolved_profile.linear.pmg.lag_preconditioner = app->pmg_lag_preconditioner;
+  app->resolved_profile.linear.pmg.smoother_max_it = app->pmg_smoother_max_it;
+  app->resolved_profile.linear.pmg.coarse_lu_max_dofs = app->pmg_coarse_lu_max_dofs;
+  app->resolved_profile.linear.pmg.coarse_telescope_active_ranks = app->pmg_coarse_telescope_active_ranks;
+  app->resolved_profile.linear.pmg.coarse_ksp_rtol = app->pmg_coarse_telescope_ksp_rtol;
+  app->resolved_profile.linear.pmg.coarse_ksp_max_it = app->pmg_coarse_telescope_ksp_max_it;
+  app->resolved_profile.linear.pmg.p2_telescope_active_ranks = app->pmg_p2_telescope_active_ranks;
+  app->resolved_profile.linear.pmg.p2_telescope_ksp_rtol = app->pmg_p2_telescope_ksp_rtol;
+  app->resolved_profile.linear.pmg.p2_telescope_ksp_max_it = app->pmg_p2_telescope_ksp_max_it;
+  app->resolved_profile.linear.pmg.coarse_redundant_group_size = app->pmg_coarse_redundant_group_size;
+  app->resolved_profile.linear.pmg.coarse_gamg_aggressive_square_graph = app->pmg_coarse_gamg_aggressive_square_graph;
+  app->resolved_profile.linear.pmg.check_coarse_transfers = app->pmg_check_coarse_transfers;
+  app->resolved_profile.linear.deflation.enabled = app->use_deflation;
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.deflation.solver, app->deflation_solver_name, sizeof(app->resolved_profile.linear.deflation.solver)));
+  PetscCall(PetscStrncpy(app->resolved_profile.linear.deflation.projector, app->deflation_projector_name, sizeof(app->resolved_profile.linear.deflation.projector)));
+  app->resolved_profile.linear.deflation.basis_tol = app->deflation_basis_tol;
+  app->resolved_profile.linear.deflation.max_it = app->deflation_max_it;
+  app->resolved_profile.linear.deflation.max_vectors = app->deflation_max_vectors;
+  app->resolved_profile.linear.deflation.intra_newton_recycle = app->deflation_intra_newton_recycle;
+  app->resolved_profile.linear.deflation.krylov_persistent = app->deflation_krylov_persistent;
+
+  app->resolved_profile.output.output_dir[0] = '\0';
+  PetscCall(PetscStrncpy(app->resolved_profile.output.native_problem_manifest, app->native_problem_manifest, sizeof(app->resolved_profile.output.native_problem_manifest)));
+  PetscCall(PetscStrncpy(app->resolved_profile.output.mechanics_bc_labels_csv, app->mechanics_bc_labels_csv, sizeof(app->resolved_profile.output.mechanics_bc_labels_csv)));
+  PetscCall(PetscStrncpy(app->resolved_profile.output.mechanics_neumann_labels_csv, app->mechanics_neumann_labels_csv, sizeof(app->resolved_profile.output.mechanics_neumann_labels_csv)));
+  PetscCall(PetscStrncpy(app->resolved_profile.output.seepage_boundary_labels_csv, app->seepage_boundary_labels_csv, sizeof(app->resolved_profile.output.seepage_boundary_labels_csv)));
+  PetscCall(PetscStrncpy(app->resolved_profile.output.curve_csv, app->curve_csv, sizeof(app->resolved_profile.output.curve_csv)));
+  PetscCall(PetscStrncpy(app->resolved_profile.output.summary_json, app->summary_json, sizeof(app->resolved_profile.output.summary_json)));
+  app->resolved_profile.output.write_solution = (PetscBool)(app->solution_binary[0] || app->solution_vtk[0] || app->solution_points_csv[0]);
+  PetscCall(PetscOptionsHasName(NULL, NULL, "-log_view", &app->resolved_profile.output.write_log_view));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode RigidTx(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
 {
   (void)dim; (void)time; (void)x; (void)Nc; (void)ctx;
@@ -273,11 +432,25 @@ static PetscErrorCode ZeroDisplacement(PetscInt dim, PetscReal time, const Petsc
   return PETSC_SUCCESS;
 }
 
+static void ResolveDefaultPmgShellActiveRanks(PetscMPIInt comm_size, PetscInt *p2_active_ranks, PetscInt *p1_active_ranks)
+{
+  PetscInt world = (PetscInt)comm_size;
+  PetscInt cap   = world < 64 ? world : 64;
+  PetscInt half  = world > 1 ? world / 2 : 1;
+
+  if (cap < 1) cap = 1;
+  *p2_active_ranks = cap;
+  *p1_active_ranks = half < cap ? half : cap;
+  if (*p1_active_ranks < 1) *p1_active_ranks = 1;
+}
+
 static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
 {
-  PetscBool flg;
+  PetscBool   flg, pmg_shell_p2_active_ranks_set = PETSC_FALSE, pmg_shell_p1_active_ranks_set = PETSC_FALSE;
+  PetscMPIInt comm_size = 1;
 
   PetscFunctionBeginUser;
+  PetscCallMPI(MPI_Comm_size(comm, &comm_size));
   PetscCall(PetscStrncpy(app->mesh, "meshes/3d_hetero_slope/adaptive_family_a_l1.msh", sizeof(app->mesh)));
   app->refine_levels  = 0;
   app->newton_rtol    = 1.0e-4;
@@ -298,16 +471,30 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->r_min         = 1.0e-4;
   PetscCall(PetscStrncpy(app->newton_stopping_criterion, "absolute_delta_lambda", sizeof(app->newton_stopping_criterion)));
   PetscCall(PetscStrncpy(app->init_newton_stopping_criterion, "relative_correction", sizeof(app->init_newton_stopping_criterion)));
+  PetscCall(PetscStrncpy(app->continuation_algorithm, "auto", sizeof(app->continuation_algorithm)));
   PetscCall(PetscStrncpy(app->continuation_method, "indirect", sizeof(app->continuation_method)));
+  PetscCall(PetscStrncpy(app->newton_algorithm, "auto", sizeof(app->newton_algorithm)));
+  PetscCall(PetscStrncpy(app->linear_algorithm, "auto", sizeof(app->linear_algorithm)));
   PetscCall(PetscStrncpy(app->continuation_predictor, "secant", sizeof(app->continuation_predictor)));
-  PetscCall(PetscStrncpy(app->omega_step_controller, "legacy", sizeof(app->omega_step_controller)));
+  PetscCall(PetscStrncpy(app->omega_step_controller, "classic", sizeof(app->omega_step_controller)));
   PetscCall(PetscStrncpy(app->curve_csv, "continuation_curve.csv", sizeof(app->curve_csv)));
   app->summary_json[0] = '\0';
   app->solution_binary[0] = '\0';
   app->solution_vtk[0] = '\0';
   app->solution_points_csv[0] = '\0';
+  app->native_problem_manifest[0] = '\0';
+  app->mechanics_bc_labels_csv[0] = '\0';
+  app->mechanics_neumann_labels_csv[0] = '\0';
+  app->seepage_boundary_labels_csv[0] = '\0';
+  app->seepage_pressure_source[0] = '\0';
   app->seepage_pressure_csv[0] = '\0';
   app->mechanics_bc_nodes_csv[0] = '\0';
+  app->debug_coordinate_bc_table = PETSC_FALSE;
+  app->native_problem_manifest_loaded = PETSC_FALSE;
+  app->native_manifest_mechanics_dirichlet = 0;
+  app->native_manifest_mechanics_neumann = 0;
+  app->native_manifest_seepage_head = 0;
+  app->native_manifest_seepage_flux = 0;
   app->seepage_grho = 9.81;
   app->element_degree = 4;
   app->mechanics_dim  = 3;
@@ -317,6 +504,8 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->use_box_mesh    = PETSC_FALSE;
   app->variant        = VARIANT_PMG;
   PetscCall(PetscStrncpy(app->variant_name, "pmg", sizeof(app->variant_name)));
+  PetscCall(PetscStrncpy(app->requested_variant_name, app->variant_name, sizeof(app->requested_variant_name)));
+  app->variant_fallback_reason[0] = '\0';
   PetscCall(PetscStrncpy(app->mesh_bc_mode, "rollers", sizeof(app->mesh_bc_mode)));
   app->bc_tag_base  = 5;
   app->bc_tag_x_min = 2;
@@ -343,8 +532,8 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   app->pmg_coarse_telescope_ksp_max_it         = 100;
   app->pmg_p2_telescope_active_ranks           = 0;
   app->pmg_p2_telescope_ksp_max_it             = 50;
-  app->pmg_shell_p2_active_ranks                = 64;
-  app->pmg_shell_p1_active_ranks                = 32;
+  app->pmg_shell_p2_active_ranks                = 0;
+  app->pmg_shell_p1_active_ranks                = 0;
   app->pmg_lag_preconditioner                  = 1;
   app->pmg_coarse_gamg_aggressive_square_graph = PETSC_FALSE;
   app->pmg_check_coarse_transfers              = PETSC_FALSE;
@@ -389,7 +578,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscOptionsBegin(comm, NULL, "Standalone P4 indirect SSR options", NULL);
   PetscCall(PetscOptionsString("-mesh", "Gmsh mesh path", NULL, app->mesh, app->mesh, sizeof(app->mesh), NULL));
   PetscCall(PetscOptionsInt("-refine_levels", "Uniform DMPlex refinement levels", NULL, app->refine_levels, &app->refine_levels, NULL));
-  PetscCall(PetscOptionsString("-analysis", "Mechanics analysis label consumed by Python-loop engine: ssr|ll", NULL, app->analysis, app->analysis, sizeof(app->analysis), NULL));
+  PetscCall(PetscOptionsString("-analysis", "Mechanics analysis label: ssr|ll", NULL, app->analysis, app->analysis, sizeof(app->analysis), NULL));
   PetscCall(PetscOptionsReal("-omega_max", "Maximum continuation work omega=f_ext^T u", NULL, app->omega_max, &app->omega_max, NULL));
   PetscCall(PetscOptionsReal("-lambda_init", "Initial strength reduction factor seed", NULL, app->lambda_init, &app->lambda_init, NULL));
   PetscCall(PetscOptionsReal("-d_lambda_init", "Initial lambda increment for continuation seeding", NULL, app->d_lambda_init, &app->d_lambda_init, NULL));
@@ -399,16 +588,23 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsReal("-d_t_min", "Limit-load stop threshold for load-factor increment", NULL, app->d_t_min, &app->d_t_min, NULL));
   PetscCall(PetscOptionsReal("-d_omega_ini_scale", "Limit-load elastic omega predictor scale", NULL, app->d_omega_ini_scale, &app->d_omega_ini_scale, NULL));
   PetscCall(PetscOptionsInt("-continuation_step_max", "Maximum accepted continuation points including initialization", NULL, app->continuation_step_max, &app->continuation_step_max, NULL));
+  PetscCall(PetscOptionsString("-continuation_algorithm", "SSR continuation algorithm selected by the resolved profile; auto follows -continuation_method", NULL, app->continuation_algorithm, app->continuation_algorithm, sizeof(app->continuation_algorithm), NULL));
   PetscCall(PetscOptionsString("-continuation_method", "SSR continuation method: indirect|direct", NULL, app->continuation_method, app->continuation_method, sizeof(app->continuation_method), NULL));
   PetscCall(PetscOptionsString("-continuation_predictor", "Continuation predictor, currently only secant", NULL, app->continuation_predictor, app->continuation_predictor, sizeof(app->continuation_predictor), NULL));
-  PetscCall(PetscOptionsString("-omega_step_controller", "Omega step controller, currently only legacy", NULL, app->omega_step_controller, app->omega_step_controller, sizeof(app->omega_step_controller), NULL));
+  PetscCall(PetscOptionsString("-omega_step_controller", "Omega step controller policy, currently classic", NULL, app->omega_step_controller, app->omega_step_controller, sizeof(app->omega_step_controller), NULL));
   PetscCall(PetscOptionsString("-curve_csv", "Rank-0 CSV output path for accepted continuation curve", NULL, app->curve_csv, app->curve_csv, sizeof(app->curve_csv), NULL));
   PetscCall(PetscOptionsString("-summary_json", "Rank-0 JSON output path for C-hotpath run summary", NULL, app->summary_json, app->summary_json, sizeof(app->summary_json), NULL));
   PetscCall(PetscOptionsString("-solution_binary", "PETSc binary output path for the final displacement Vec", NULL, app->solution_binary, app->solution_binary, sizeof(app->solution_binary), NULL));
   PetscCall(PetscOptionsString("-solution_vtk", "VTK/VTU output path for the final DMPlex displacement field", NULL, app->solution_vtk, app->solution_vtk, sizeof(app->solution_vtk), NULL));
   PetscCall(PetscOptionsString("-solution_points_csv", "Coordinate/displacement CSV for case-TOMLible postprocessing", NULL, app->solution_points_csv, app->solution_points_csv, sizeof(app->solution_points_csv), NULL));
+  PetscCall(PetscOptionsString("-native_problem_manifest", "Resolved asset/support manifest for future DMPlex-native BC ingestion", NULL, app->native_problem_manifest, app->native_problem_manifest, sizeof(app->native_problem_manifest), NULL));
+  PetscCall(PetscOptionsString("-mechanics_bc_labels_csv", "Coordinate-free DMPlex label/tag constraint table for future native BC ingestion", NULL, app->mechanics_bc_labels_csv, app->mechanics_bc_labels_csv, sizeof(app->mechanics_bc_labels_csv), NULL));
+  PetscCall(PetscOptionsString("-mechanics_neumann_labels_csv", "Coordinate-free DMPlex label/tag mechanics Neumann table; currently fail-explicit pending face quadrature", NULL, app->mechanics_neumann_labels_csv, app->mechanics_neumann_labels_csv, sizeof(app->mechanics_neumann_labels_csv), NULL));
+  PetscCall(PetscOptionsString("-seepage_boundary_labels_csv", "Coordinate-free DMPlex label/tag seepage boundary table; current mechanics coupling still uses pressure CSV", NULL, app->seepage_boundary_labels_csv, app->seepage_boundary_labels_csv, sizeof(app->seepage_boundary_labels_csv), NULL));
+  PetscCall(PetscOptionsString("-seepage_pressure_source", "Source contract for -seepage_pressure_csv, currently hydro_prepass_coordinate_bridge", NULL, app->seepage_pressure_source, app->seepage_pressure_source, sizeof(app->seepage_pressure_source), NULL));
   PetscCall(PetscOptionsString("-seepage_pressure_csv", "Coordinate-keyed pressure CSV for seepage-coupled mechanics external load", NULL, app->seepage_pressure_csv, app->seepage_pressure_csv, sizeof(app->seepage_pressure_csv), NULL));
-  PetscCall(PetscOptionsString("-mechanics_bc_nodes_csv", "Coordinate/component CSV for extra mechanics node-set constraints", NULL, app->mechanics_bc_nodes_csv, app->mechanics_bc_nodes_csv, sizeof(app->mechanics_bc_nodes_csv), NULL));
+  PetscCall(PetscOptionsBool("-debug_coordinate_bc_table", "Allow debug coordinate/component mechanics constraint fallback", NULL, app->debug_coordinate_bc_table, &app->debug_coordinate_bc_table, NULL));
+  PetscCall(PetscOptionsString("-mechanics_bc_nodes_csv", "Debug coordinate/component CSV for mechanics constraints; requires -debug_coordinate_bc_table true", NULL, app->mechanics_bc_nodes_csv, app->mechanics_bc_nodes_csv, sizeof(app->mechanics_bc_nodes_csv), NULL));
   PetscCall(PetscOptionsReal("-seepage_grho", "Water unit weight used for seepage saturation threshold", NULL, app->seepage_grho, &app->seepage_grho, NULL));
   PetscCall(PetscOptionsInt("-element_degree", "Mechanics FE degree: 1, 2, or 4", NULL, app->element_degree, &app->element_degree, NULL));
   PetscCall(PetscOptionsInt("-fe_degree", "Alias for -element_degree", NULL, app->element_degree, &app->element_degree, NULL));
@@ -416,6 +612,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsInt("-spatial_dim", "Alias for -mechanics_dim", NULL, app->mechanics_dim, &app->mechanics_dim, NULL));
   PetscCall(PetscOptionsReal("-newton_rtol", "Relative residual tolerance used for nonlinear residual safeguards", NULL, app->newton_rtol, &app->newton_rtol, NULL));
   PetscCall(PetscOptionsInt("-newton_max_it", "Maximum fixed-lambda or indirect Newton iterations", NULL, app->newton_max_it, &app->newton_max_it, NULL));
+  PetscCall(PetscOptionsString("-newton_algorithm", "SSR Newton algorithm selected by the resolved profile; auto follows the continuation method", NULL, app->newton_algorithm, app->newton_algorithm, sizeof(app->newton_algorithm), NULL));
   PetscCall(PetscOptionsString("-newton_stopping_criterion", "Indirect Newton stop: absolute_delta_lambda|relative_residual|relative_correction", NULL, app->newton_stopping_criterion, app->newton_stopping_criterion, sizeof(app->newton_stopping_criterion), NULL));
   PetscCall(PetscOptionsReal("-newton_stopping_tol", "Indirect Newton stopping tolerance for the selected criterion", NULL, app->newton_stopping_tol, &app->newton_stopping_tol, NULL));
   PetscCall(PetscOptionsString("-init_newton_stopping_criterion", "Initialization Newton stop: absolute_delta_lambda|relative_residual|relative_correction", NULL, app->init_newton_stopping_criterion, app->init_newton_stopping_criterion, sizeof(app->init_newton_stopping_criterion), NULL));
@@ -424,6 +621,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsReal("-r_min", "Minimum regularization weight in K_r=r*K_elastic+(1-r)*K_tangent", NULL, app->r_min, &app->r_min, NULL));
   PetscCall(PetscOptionsReal("-linear_rtol", "Default KSP relative tolerance", NULL, app->ksp_rtol, &app->ksp_rtol, NULL));
   PetscCall(PetscOptionsBool("-line_search", "Use residual backtracking", NULL, app->line_search, &app->line_search, NULL));
+  PetscCall(PetscOptionsString("-linear_algorithm", "SSR linear algorithm selected by the resolved profile; auto follows -pc_variant and -deflation", NULL, app->linear_algorithm, app->linear_algorithm, sizeof(app->linear_algorithm), NULL));
   PetscCall(PetscOptionsBool("-use_box_mesh", "Use a tiny generated unit-box tetra mesh for smoke tests", NULL, app->use_box_mesh, &app->use_box_mesh, NULL));
   PetscCall(PetscOptionsString("-mesh_bc_mode", "Boundary mode for imported meshes: rollers|base_only|full_sides", NULL, app->mesh_bc_mode, app->mesh_bc_mode, sizeof(app->mesh_bc_mode), NULL));
   PetscCall(PetscOptionsInt("-bc_tag_base", "Face Sets/boundary_marker tag for base boundary", NULL, app->bc_tag_base, &app->bc_tag_base, NULL));
@@ -453,8 +651,8 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsString("-pmg_smoother_pc_type", "PMG smoother PC type", NULL, app->pmg_smoother_pc_type, app->pmg_smoother_pc_type, sizeof(app->pmg_smoother_pc_type), NULL));
   PetscCall(PetscOptionsInt("-pmg_smoother_max_it", "PMG smoother iterations per V-cycle", NULL, app->pmg_smoother_max_it, &app->pmg_smoother_max_it, NULL));
   PetscCall(PetscOptionsString("-pmg_apply_backend", "PMG apply backend: pcmg|shell_vcycle", NULL, app->pmg_apply_backend, app->pmg_apply_backend, sizeof(app->pmg_apply_backend), NULL));
-  PetscCall(PetscOptionsInt("-pmg_shell_p2_active_ranks", "Active MPI ranks for the shell V-cycle P2 layout; 0 or >= ranks keeps all ranks active", NULL, app->pmg_shell_p2_active_ranks, &app->pmg_shell_p2_active_ranks, NULL));
-  PetscCall(PetscOptionsInt("-pmg_shell_p1_active_ranks", "Active MPI ranks for the shell V-cycle P1 layout; 0 or >= ranks keeps all ranks active", NULL, app->pmg_shell_p1_active_ranks, &app->pmg_shell_p1_active_ranks, NULL));
+  PetscCall(PetscOptionsInt("-pmg_shell_p2_active_ranks", "Active MPI ranks for the shell V-cycle P2 layout; 0 or >= ranks keeps all ranks active", NULL, app->pmg_shell_p2_active_ranks, &app->pmg_shell_p2_active_ranks, &pmg_shell_p2_active_ranks_set));
+  PetscCall(PetscOptionsInt("-pmg_shell_p1_active_ranks", "Active MPI ranks for the shell V-cycle P1 layout; 0 or >= ranks keeps all ranks active", NULL, app->pmg_shell_p1_active_ranks, &app->pmg_shell_p1_active_ranks, &pmg_shell_p1_active_ranks_set));
   PetscCall(PetscOptionsString("-pmg_shell_subcomm_type", "Shell V-cycle active-rank layout: interlaced|contiguous", NULL, app->pmg_shell_subcomm_type, app->pmg_shell_subcomm_type, sizeof(app->pmg_shell_subcomm_type), NULL));
   PetscCall(PetscOptionsBool("-pmg_check_coarse_transfers", "Check PMG P4->P2 and P2->P1 transfer matrices on exact polynomial fields", NULL, app->pmg_check_coarse_transfers, &app->pmg_check_coarse_transfers, NULL));
   PetscCall(PetscOptionsInt("-pmg_lag_preconditioner", "Rebuild persistent PMG preconditioner every N Newton linear solves; 1 rebuilds every solve", NULL, app->pmg_lag_preconditioner, &app->pmg_lag_preconditioner, NULL));
@@ -495,6 +693,15 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   PetscCall(PetscOptionsBool("-init_replay_check_damping", "Compare C fixed-lambda damping against exported petsc4py damping metadata", NULL, app->init_replay_check_damping, &app->init_replay_check_damping, NULL));
   PetscOptionsEnd();
 
+  if (!pmg_shell_p2_active_ranks_set || !pmg_shell_p1_active_ranks_set) {
+    PetscInt default_p2_active_ranks = 0, default_p1_active_ranks = 0;
+    ResolveDefaultPmgShellActiveRanks(comm_size, &default_p2_active_ranks, &default_p1_active_ranks);
+    if (!pmg_shell_p2_active_ranks_set) app->pmg_shell_p2_active_ranks = default_p2_active_ranks;
+    if (!pmg_shell_p1_active_ranks_set) app->pmg_shell_p1_active_ranks = default_p1_active_ranks;
+  }
+
+  PetscCall(PetscStrncpy(app->requested_variant_name, app->variant_name, sizeof(app->requested_variant_name)));
+  app->variant_fallback_reason[0] = '\0';
   PetscCall(PetscStrcasecmp(app->variant_name, "gamg", &flg));
   if (flg) app->variant = VARIANT_GAMG;
   else {
@@ -529,6 +736,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
   if (app->element_degree == 1 && app->variant == VARIANT_PMG) {
     app->variant = VARIANT_GAMG;
     PetscCall(PetscStrncpy(app->variant_name, "gamg", sizeof(app->variant_name)));
+    PetscCall(PetscStrncpy(app->variant_fallback_reason, "p1_has_no_p_hierarchy", sizeof(app->variant_fallback_reason)));
     PetscCall(PetscPrintf(comm, "FE_DEGREE_CONFIG degree=1 requested_pc_variant=pmg fallback_pc_variant=gamg reason=p1_has_no_p_hierarchy\n"));
   }
   PetscCheck(app->newton_rtol > 0.0, comm, PETSC_ERR_ARG_OUTOFRANGE, "-newton_rtol must be positive");
@@ -541,10 +749,16 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
     PetscCall(PetscStrcasecmp(app->continuation_method, "direct", &flg));
     PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-continuation_method must be indirect or direct");
   }
+  PetscCall(AppCtxNormalizeAlgorithmSelectors(comm, app));
+  PetscCall(ValidateAlgorithmRegistrySelection(comm, app));
   PetscCall(PetscStrcasecmp(app->continuation_predictor, "secant", &flg));
   PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-continuation_predictor currently supports only secant");
-  PetscCall(PetscStrcasecmp(app->omega_step_controller, "legacy", &flg));
-  PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-omega_step_controller currently supports only legacy");
+  PetscCall(PetscStrcasecmp(app->omega_step_controller, "classic", &flg));
+  if (!flg) {
+    PetscCall(PetscStrcasecmp(app->omega_step_controller, "legacy", &flg));
+    if (flg) PetscCall(PetscStrncpy(app->omega_step_controller, "classic", sizeof(app->omega_step_controller)));
+    PetscCheck(flg, comm, PETSC_ERR_ARG_WRONG, "-omega_step_controller currently supports only classic");
+  }
   PetscCall(PetscStrcasecmp(app->newton_stopping_criterion, "absolute_delta_lambda", &flg));
   if (!flg) {
     PetscCall(PetscStrcasecmp(app->newton_stopping_criterion, "relative_residual", &flg));
@@ -641,6 +855,7 @@ static PetscErrorCode ParseOptions(MPI_Comm comm, AppCtx *app)
              "-deflation_krylov_persistent requires -deflation_max_vectors 0 so Krylov history is not evicted inside the Newton solve");
   PetscCheck(!app->use_deflation || app->variant != VARIANT_FETIDP, comm, PETSC_ERR_SUP,
              "Explicit deflation currently wraps PETSc PCs; KSPFETIDP is itself a KSP and is not supported by -deflation");
+  PetscCall(AppCtxSyncResolvedProfile(app));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 

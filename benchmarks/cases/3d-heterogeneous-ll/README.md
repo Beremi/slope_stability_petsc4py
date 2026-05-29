@@ -13,7 +13,7 @@ This 3D case runs a config-driven limit-load (LL) analysis using asset `3d_heter
 - Case config: [`case.toml`](case.toml)
 - Asset: `3d_hetero_slope`
 - Mesh variant: `adaptive_family_b_l1`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `ll`
 - Element order: `P2`
 

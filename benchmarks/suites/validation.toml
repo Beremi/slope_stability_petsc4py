@@ -1,0 +1,33 @@
+[suite]
+id = "validation"
+title = "Single-rank validation sweep"
+cases = [
+  "2d-homogeneous-ssr",
+  "2d-kozinec-ll",
+  "2d-sloan2013-seepage",
+  "3d-heterogeneous-ssr-p4",
+]
+profiles = ["pmg-deflated-baseline"]
+ranks = [1]
+repeats = 1
+timeout = "00:30:00"
+
+[resources.local]
+machine = "validation-local"
+max_ranks = 1
+launcher = "mpiexec"
+time_limit = "00:30:00"
+
+[environment]
+OMP_NUM_THREADS = "1"
+
+[overrides.continuation]
+step_max = 5
+
+[overrides.output]
+preset = "smoke"
+
+[collect]
+options_left = true
+environment = true
+resolved_manifest = true

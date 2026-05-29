@@ -14,6 +14,10 @@ except Exception:  # pragma: no cover - optional dependency
     pymetis = None
 
 
+_DMPLEX_NATIVE_ORDERINGS = {"native_dmplex", "dmplex_native", "petsc_dmplex"}
+_BLOCK_METIS_ORDERINGS = {"block_metis", "legacy_block_metis"}
+
+
 @dataclass(frozen=True)
 class ReorderedMesh:
     coord: np.ndarray
@@ -121,8 +125,21 @@ def _block_metis_order(coord: np.ndarray, elem: np.ndarray, n_nodes: int, n_part
     return order
 
 
+def canonical_node_ordering_strategy(strategy: str) -> str:
+    strategy = str(strategy).strip().lower()
+    if strategy in _DMPLEX_NATIVE_ORDERINGS:
+        return "original"
+    if strategy in _BLOCK_METIS_ORDERINGS:
+        return "block_metis"
+    return strategy
+
+
+def node_ordering_requires_partitions(strategy: str) -> bool:
+    return canonical_node_ordering_strategy(strategy) == "block_metis"
+
+
 def compute_node_permutation(coord: np.ndarray, elem: np.ndarray, strategy: str, *, n_parts: int | None = None) -> np.ndarray:
-    strategy = str(strategy).lower()
+    strategy = canonical_node_ordering_strategy(strategy)
     n_nodes = int(coord.shape[1])
     if strategy in {"none", "original", "identity"}:
         return np.arange(n_nodes, dtype=np.int64)
@@ -147,7 +164,8 @@ def reorder_mesh_nodes(
     n_parts: int | None = None,
 ) -> ReorderedMesh:
     partition_offsets = None
-    if str(strategy).lower() == "block_metis" and n_parts is not None and int(n_parts) > 1:
+    canonical_strategy = canonical_node_ordering_strategy(strategy)
+    if canonical_strategy == "block_metis" and n_parts is not None and int(n_parts) > 1:
         perm, partition_offsets = _block_metis_order_and_offsets(
             coord,
             elem,
@@ -155,7 +173,7 @@ def reorder_mesh_nodes(
             int(n_parts),
         )
     else:
-        perm = compute_node_permutation(coord, elem, strategy, n_parts=n_parts)
+        perm = compute_node_permutation(coord, elem, canonical_strategy, n_parts=n_parts)
     inv_perm = np.empty_like(perm)
     inv_perm[perm] = np.arange(perm.size, dtype=np.int64)
 

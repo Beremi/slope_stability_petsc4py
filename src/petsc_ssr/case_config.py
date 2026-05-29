@@ -5,15 +5,20 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .context import EngineRunResult
+from .assets.support.physical_names import parse_gmsh_physical_names as _parse_gmsh_physical_names
+from .config.profiles import native_linear_algorithm_selector, pc_variant_from_backend
 from .options import LinearOptions, PmgOptions, SsrOptions
 from .problem import BoundarySpec, MaterialSpec, ProblemSpec
+
+
+if TYPE_CHECKING:
+    from .context import EngineRunResult
 
 
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
@@ -38,15 +43,34 @@ class CaseTranslation:
     mesh_info: dict[str, Any] | None = None
 
 
-def translate_case_toml(config_path: str | Path, *, refine_levels: int | None = None, force_full_c_baseline: bool = False) -> CaseTranslation:
+def translate_case_toml(
+    config_path: str | Path,
+    *,
+    refine_levels: int | None = None,
+    force_full_c_baseline: bool = False,
+    output_preset: str | None = None,
+) -> CaseTranslation:
     ensure_engine_imports()
     try:
-        from petsc_ssr.config import load_run_case_config
+        from petsc_ssr.config import load_run_case_config, normalize_output_preset
         from petsc_ssr.problem_asset_runtime import resolve_problem_asset_from_config
     except Exception as exc:
         return CaseTranslation(False, f"case TOML support is not importable: {exc}")
 
     cfg = load_run_case_config(Path(config_path)).validate()
+    if output_preset is not None:
+        preset = normalize_output_preset(output_preset)
+        write_outputs = preset != "none"
+        cfg = replace(
+            cfg,
+            export=replace(
+                cfg.export,
+                preset=preset,
+                write_solution_vtu=write_outputs,
+                write_history_json=write_outputs,
+                write_custom_debug_bundle=False,
+            ),
+        )
     resolved = resolve_problem_asset_from_config(cfg)
     analysis = str(cfg.problem.analysis).strip().lower()
     method = str(cfg.continuation.method).strip().lower()
@@ -75,11 +99,35 @@ def translate_case_toml(config_path: str | Path, *, refine_levels: int | None = 
     linear = LinearOptions(
         rtol=float(cfg.linear_solver.tolerance),
         max_it=int(cfg.linear_solver.max_iterations),
-        deflation=True,
-        deflation_solver=_deflation_solver_from_solver_name(str(cfg.linear_solver.solver_type)),
+        ksp_type=str(cfg.linear_solver.ksp_type),
+        norm_type=str(cfg.linear_solver.norm_type),
+        deflation=bool(cfg.linear_solver.deflation),
+        deflation_solver=str(cfg.linear_solver.deflation_solver or _deflation_solver_from_solver_name(str(cfg.linear_solver.solver_type))),
     )
     pmg = PmgOptions.current_baseline()
+    if cfg.linear_solver.pmg_options_file is not None:
+        pmg.options_file = cfg.linear_solver.pmg_options_file
     for name, value in (
+        ("apply_backend", cfg.linear_solver.pmg_apply_backend),
+        ("coarse_pc_type", cfg.linear_solver.pmg_coarse_pc_type),
+        ("coarse_lu_max_dofs", cfg.linear_solver.pmg_coarse_lu_max_dofs),
+        ("coarse_redundant_group_size", cfg.linear_solver.pmg_coarse_redundant_group_size),
+        ("coarse_gamg_aggressive_square_graph", cfg.linear_solver.pmg_coarse_gamg_aggressive_square_graph),
+        ("coarse_telescope_active_ranks", cfg.linear_solver.pmg_coarse_telescope_active_ranks),
+        ("coarse_telescope_subcomm_type", cfg.linear_solver.pmg_coarse_telescope_subcomm_type),
+        ("coarse_telescope_ksp_type", cfg.linear_solver.pmg_coarse_telescope_ksp_type),
+        ("coarse_telescope_ksp_rtol", cfg.linear_solver.pmg_coarse_telescope_ksp_rtol),
+        ("coarse_telescope_ksp_max_it", cfg.linear_solver.pmg_coarse_telescope_ksp_max_it),
+        ("coarse_telescope_pc_type", cfg.linear_solver.pmg_coarse_telescope_pc_type),
+        ("p2_telescope_active_ranks", cfg.linear_solver.pmg_p2_telescope_active_ranks),
+        ("p2_telescope_subcomm_type", cfg.linear_solver.pmg_p2_telescope_subcomm_type),
+        ("p2_telescope_ksp_type", cfg.linear_solver.pmg_p2_telescope_ksp_type),
+        ("p2_telescope_ksp_rtol", cfg.linear_solver.pmg_p2_telescope_ksp_rtol),
+        ("p2_telescope_ksp_max_it", cfg.linear_solver.pmg_p2_telescope_ksp_max_it),
+        ("p2_telescope_pc_type", cfg.linear_solver.pmg_p2_telescope_pc_type),
+        ("smoother_ksp_type", cfg.linear_solver.pmg_smoother_ksp_type),
+        ("smoother_pc_type", cfg.linear_solver.pmg_smoother_pc_type),
+        ("smoother_max_it", cfg.linear_solver.pmg_smoother_max_it),
         ("p2_active_ranks", cfg.linear_solver.pmg_shell_p2_active_ranks),
         ("p1_active_ranks", cfg.linear_solver.pmg_shell_p1_active_ranks),
         ("subcomm_type", cfg.linear_solver.pmg_shell_subcomm_type),
@@ -95,10 +143,17 @@ def translate_case_toml(config_path: str | Path, *, refine_levels: int | None = 
         if value is not None:
             setattr(pmg, name, value)
 
-    pc_variant = "gamg" if degree == 1 else "pmg"
+    pc_policy = pc_variant_from_backend(cfg.linear_solver.pc_backend, element_degree=degree)
     options = SsrOptions(
         analysis=analysis,
+        continuation_algorithm=str(cfg.continuation.algorithm or method),
         continuation_method=method,
+        newton_algorithm=str(cfg.newton.algorithm or ("indirect-ssr" if method == "indirect" else "fixed-load")),
+        linear_algorithm=native_linear_algorithm_selector(
+            str(cfg.linear_solver.algorithm or cfg.linear_solver.solver_type),
+            pc_variant=pc_policy.variant,
+            deflation=bool(cfg.linear_solver.deflation),
+        ),
         omega_max=float(cfg.continuation.omega_max),
         lambda_init=float(cfg.continuation.lambda_init),
         d_lambda_init=float(cfg.continuation.d_lambda_init),
@@ -119,14 +174,78 @@ def translate_case_toml(config_path: str | Path, *, refine_levels: int | None = 
         line_search=(str(cfg.newton.line_search).strip().lower() == "alg5"),
         continuation_predictor=str(cfg.continuation.predictor),
         omega_step_controller=str(cfg.continuation.omega_step_controller),
-        pc_variant=pc_variant,
+        pc_variant=pc_policy.variant,
         partitioner=str(cfg.problem.partitioner),
         linear=linear,
         pmg=pmg,
         petsc_options=list(cfg.linear_solver.petsc_opt),
+        profile_name=str(cfg.linear_solver.profile),
     )
     if force_full_c_baseline:
         options.linear.deflation_solver = "fgmres"
+
+    metadata = {
+        "case_config": str(Path(config_path).resolve()),
+        "asset": resolved.asset_name,
+        "mesh_variant": resolved.variant_name,
+        "elem_type": elem_type,
+        "seepage_coupled": seepage_coupled,
+        "continuation_profile": str(cfg.continuation.profile),
+        "continuation_profile_description": str(cfg.continuation.profile_description),
+        "continuation_algorithm": str(cfg.continuation.algorithm),
+        "newton_profile": str(cfg.newton.profile),
+        "newton_profile_description": str(cfg.newton.profile_description),
+        "newton_algorithm": str(cfg.newton.algorithm),
+        "linear_profile": str(cfg.linear_solver.profile),
+        "profile_description": str(cfg.linear_solver.profile_description),
+        "linear_algorithm": str(cfg.linear_solver.algorithm or cfg.linear_solver.solver_type),
+        "linear_ksp_type": str(cfg.linear_solver.ksp_type),
+        "linear_norm_type": str(cfg.linear_solver.norm_type),
+        "linear_deflation": bool(cfg.linear_solver.deflation),
+        "linear_deflation_solver": str(cfg.linear_solver.deflation_solver or _deflation_solver_from_solver_name(str(cfg.linear_solver.solver_type))),
+        "pc_backend": str(cfg.linear_solver.pc_backend or ""),
+        "requested_pc_variant": pc_policy.requested_variant,
+        "pc_variant_fallback_reason": pc_policy.fallback_reason,
+        "resolved_world_size": int(cfg.linear_solver.resolved_world_size),
+        "pmg_shell_p2_active_ranks": cfg.linear_solver.pmg_shell_p2_active_ranks,
+        "pmg_shell_p1_active_ranks": cfg.linear_solver.pmg_shell_p1_active_ranks,
+        "pmg_shell_p2_rank_policy": cfg.linear_solver.pmg_shell_p2_rank_policy,
+        "pmg_shell_p1_rank_policy": cfg.linear_solver.pmg_shell_p1_rank_policy,
+        "pmg_rank_policy": cfg.linear_solver.pmg_rank_policy,
+        "pmg_apply_backend": cfg.linear_solver.pmg_apply_backend,
+        "pmg_coarse_pc_type": cfg.linear_solver.pmg_coarse_pc_type,
+        "pmg_coarse_lu_max_dofs": cfg.linear_solver.pmg_coarse_lu_max_dofs,
+        "pmg_coarse_redundant_group_size": cfg.linear_solver.pmg_coarse_redundant_group_size,
+        "pmg_coarse_gamg_aggressive_square_graph": cfg.linear_solver.pmg_coarse_gamg_aggressive_square_graph,
+        "pmg_coarse_telescope_active_ranks": cfg.linear_solver.pmg_coarse_telescope_active_ranks,
+        "pmg_coarse_telescope_subcomm_type": cfg.linear_solver.pmg_coarse_telescope_subcomm_type,
+        "pmg_coarse_telescope_ksp_type": cfg.linear_solver.pmg_coarse_telescope_ksp_type,
+        "pmg_coarse_telescope_ksp_rtol": cfg.linear_solver.pmg_coarse_telescope_ksp_rtol,
+        "pmg_coarse_telescope_ksp_max_it": cfg.linear_solver.pmg_coarse_telescope_ksp_max_it,
+        "pmg_coarse_telescope_pc_type": cfg.linear_solver.pmg_coarse_telescope_pc_type,
+        "pmg_p2_telescope_active_ranks": cfg.linear_solver.pmg_p2_telescope_active_ranks,
+        "pmg_p2_telescope_subcomm_type": cfg.linear_solver.pmg_p2_telescope_subcomm_type,
+        "pmg_p2_telescope_ksp_type": cfg.linear_solver.pmg_p2_telescope_ksp_type,
+        "pmg_p2_telescope_ksp_rtol": cfg.linear_solver.pmg_p2_telescope_ksp_rtol,
+        "pmg_p2_telescope_ksp_max_it": cfg.linear_solver.pmg_p2_telescope_ksp_max_it,
+        "pmg_p2_telescope_pc_type": cfg.linear_solver.pmg_p2_telescope_pc_type,
+        "pmg_smoother_ksp_type": cfg.linear_solver.pmg_smoother_ksp_type,
+        "pmg_smoother_pc_type": cfg.linear_solver.pmg_smoother_pc_type,
+        "pmg_smoother_max_it": cfg.linear_solver.pmg_smoother_max_it,
+        "output_preset": cfg.export.preset,
+        "write_solution_vtu": bool(cfg.export.write_solution_vtu),
+        "write_history_json": bool(cfg.export.write_history_json),
+    }
+    if cfg.seepage.profile:
+        metadata.update(
+            {
+                "seepage_profile": str(cfg.seepage.profile),
+                "seepage_profile_description": str(cfg.seepage.profile_description),
+                "seepage_linear_tolerance": float(cfg.seepage.linear_tolerance),
+                "seepage_linear_max_iter": int(cfg.seepage.linear_max_iter),
+                "seepage_nonlinear_max_iter": int(cfg.seepage.nonlinear_max_iter),
+            }
+        )
 
     problem = ProblemSpec(
         name=str(cfg.problem.name or cfg.problem.case or Path(config_path).parent.name),
@@ -136,13 +255,7 @@ def translate_case_toml(config_path: str | Path, *, refine_levels: int | None = 
         refine_levels=int(cfg.problem.refine_levels if refine_levels is None else refine_levels),
         boundary=boundary,
         materials=materials,
-        metadata={
-            "case_config": str(Path(config_path).resolve()),
-            "asset": resolved.asset_name,
-            "mesh_variant": resolved.variant_name,
-            "elem_type": elem_type,
-            "seepage_coupled": seepage_coupled,
-        },
+        metadata=metadata,
     )
     suffix = "_seepage_coupled" if seepage_coupled else ""
     return CaseTranslation(True, f"supported_{dimension}d_{method}_{analysis}{suffix}", problem=problem, options=options, config=cfg, mesh_info=mesh_info)
@@ -219,7 +332,9 @@ def write_case_outputs(result: EngineRunResult, translation: CaseTranslation, co
         "newton_iterations_total": int(result.summary.get("total_newton_its", 0)),
     }
     (data_dir / "run_info.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    _write_case_vtu(exports_dir / "final_solution.vtu", translation, case_mesh, displacement, extra_arrays=coupled_fields)
+    if translation.config is None or bool(translation.config.export.write_solution_vtu):
+        _write_case_vtu(exports_dir / "final_solution.vtu", translation, case_mesh, displacement, extra_arrays=coupled_fields)
+    _copy_config_if_different(config_path, data_dir / "resolved_config.toml")
     _copy_config_if_different(config_path, exports_dir / "resolved_config.toml")
     _copy_config_if_different(config_path, output_dir / "generated_case.toml")
 
@@ -486,12 +601,13 @@ def write_capability_report(path: str | Path, rows: list[dict[str, str]]) -> Non
 
 
 def write_mechanics_constraint_table(translation: CaseTranslation, output_dir: str | Path) -> Path:
-    """Write case q_mask constraints as coordinate/component rows for the C engine.
+    """Write compatibility q_mask constraints as coordinate/component rows.
 
     Root assets can constrain named node sets as well as boundary faces. The C
-    DMPlex path consumes this compact table as an additional algebraic
-    constraint layer, so the benchmark translation follows the case q_mask
-    exactly without duplicating asset-specific node-set expansion rules in C.
+    DMPlex path still consumes this compact table as an additional algebraic
+    constraint layer. Keep new assets label/section-oriented and treat this as a
+    compatibility bridge until native constraint labels replace coordinate
+    matching.
     """
 
     if translation.config is None or translation.problem is None:
@@ -519,38 +635,158 @@ def write_mechanics_constraint_table(translation: CaseTranslation, output_dir: s
     return out
 
 
-def _parse_gmsh_physical_names(path: Path | None) -> dict[str, dict[str, int]]:
-    regions: dict[str, int] = {}
-    boundaries: dict[str, int] = {}
-    nodesets: dict[str, int] = {}
-    if path is None or not Path(path).exists():
-        return {"regions": regions, "boundaries": boundaries, "nodesets": nodesets}
-    lines = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
-    try:
-        start = lines.index("$PhysicalNames")
-    except ValueError:
-        return {"regions": regions, "boundaries": boundaries, "nodesets": nodesets}
-    n = int(lines[start + 1].strip())
-    for raw in lines[start + 2 : start + 2 + n]:
-        parts = raw.split(maxsplit=2)
-        if len(parts) < 3:
-            continue
-        dim = int(parts[0])
-        tag = int(parts[1])
-        name = parts[2].strip().strip('"')
-        if name.startswith("region:"):
-            regions[name.split(":", 1)[1]] = tag
-        elif name.startswith("boundary:"):
-            boundaries[name.split(":", 1)[1]] = tag
-        elif name.startswith("nodeset:"):
-            nodesets[name.split(":", 1)[1]] = tag
-        elif dim == 3:
-            regions[name] = tag
-        elif dim == 2:
-            boundaries[name] = tag
-        elif dim == 0:
-            nodesets[name] = tag
-    return {"regions": regions, "boundaries": boundaries, "nodesets": nodesets}
+def write_mechanics_label_constraint_table(translation: CaseTranslation, output_dir: str | Path) -> Path:
+    """Write native-ready mechanics constraints as DMPlex label/tag rows."""
+
+    if translation.config is None:
+        raise ValueError("mechanics label constraint table requires a supported mechanics translation")
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import (
+        MECHANICS_LABEL_CONSTRAINT_COLUMNS,
+        build_mechanics_label_constraint_rows,
+        resolve_problem_asset_from_config,
+    )
+
+    resolved = resolve_problem_asset_from_config(translation.config)
+    rows = build_mechanics_label_constraint_rows(resolved)
+    out = Path(output_dir) / "data" / "mechanics_bc_labels.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=MECHANICS_LABEL_CONSTRAINT_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return out
+
+
+def planned_mechanics_neumann_label_table(translation: CaseTranslation, output_dir: str | Path) -> Path | None:
+    if translation.config is None:
+        return None
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import build_mechanics_neumann_label_rows, resolve_problem_asset_from_config
+
+    resolved = resolve_problem_asset_from_config(translation.config)
+    return Path(output_dir) / "data" / "mechanics_neumann_labels.csv" if build_mechanics_neumann_label_rows(resolved) else None
+
+
+def write_mechanics_neumann_label_table(translation: CaseTranslation, output_dir: str | Path) -> Path | None:
+    """Write native-ready mechanics Neumann rules as DMPlex label/tag rows."""
+
+    if translation.config is None:
+        raise ValueError("mechanics Neumann label table requires a supported mechanics translation")
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import (
+        MECHANICS_NEUMANN_LABEL_COLUMNS,
+        build_mechanics_neumann_label_rows,
+        resolve_problem_asset_from_config,
+    )
+
+    resolved = resolve_problem_asset_from_config(translation.config)
+    rows = build_mechanics_neumann_label_rows(resolved)
+    if not rows:
+        return None
+    out = Path(output_dir) / "data" / "mechanics_neumann_labels.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=MECHANICS_NEUMANN_LABEL_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return out
+
+
+def planned_seepage_label_table(translation: CaseTranslation, output_dir: str | Path) -> Path | None:
+    if translation.config is None:
+        return None
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import build_seepage_label_bc_rows, resolve_problem_asset_from_config
+
+    resolved = resolve_problem_asset_from_config(translation.config)
+    return Path(output_dir) / "data" / "seepage_boundary_labels.csv" if build_seepage_label_bc_rows(resolved) else None
+
+
+def write_seepage_label_table(translation: CaseTranslation, output_dir: str | Path) -> Path | None:
+    """Write native-ready seepage head/flux rules as DMPlex label/tag rows."""
+
+    if translation.config is None:
+        raise ValueError("seepage label table requires a supported case translation")
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import (
+        SEEPAGE_LABEL_BC_COLUMNS,
+        build_seepage_label_bc_rows,
+        resolve_problem_asset_from_config,
+    )
+
+    resolved = resolve_problem_asset_from_config(translation.config)
+    rows = build_seepage_label_bc_rows(resolved)
+    if not rows:
+        return None
+    out = Path(output_dir) / "data" / "seepage_boundary_labels.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=SEEPAGE_LABEL_BC_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return out
+
+
+def write_native_problem_manifest(
+    translation: CaseTranslation,
+    output_dir: str | Path,
+    *,
+    mechanics_coordinate_constraint_table: str | Path | None = None,
+) -> Path:
+    """Write a coordinate-free asset/problem manifest for the native boundary path."""
+
+    if translation.config is None:
+        raise ValueError("native problem manifest requires a supported case translation")
+    ensure_engine_imports()
+    from petsc_ssr.problem_asset_runtime import build_native_problem_manifest, resolve_problem_asset_from_config
+
+    resolved = resolve_problem_asset_from_config(translation.config)
+    cfg = translation.config
+    compatibility = {}
+    compatibility["seepage_coupled"] = bool(cfg.problem.seepage_coupled)
+    compatibility["mechanics_label_constraint_table"] = str(Path(output_dir) / "data" / "mechanics_bc_labels.csv")
+    if mechanics_coordinate_constraint_table is not None:
+        compatibility["mechanics_coordinate_constraint_table"] = str(mechanics_coordinate_constraint_table)
+        compatibility["debug_coordinate_bc_table"] = True
+    neumann_table = planned_mechanics_neumann_label_table(translation, output_dir)
+    if neumann_table is not None:
+        compatibility["mechanics_neumann_label_table"] = str(neumann_table)
+    seepage_table = planned_seepage_label_table(translation, output_dir)
+    if seepage_table is not None:
+        compatibility["seepage_boundary_label_table"] = str(seepage_table)
+    if translation.problem is not None:
+        if translation.problem.metadata.get("seepage_pressure_csv"):
+            pressure_source = str(translation.problem.metadata.get("seepage_pressure_source", "")).strip()
+            if pressure_source != "hydro_prepass_coordinate_bridge":
+                raise ValueError(
+                    "seepage_pressure_csv compatibility manifest requires "
+                    "seepage_pressure_source='hydro_prepass_coordinate_bridge'"
+                )
+            compatibility["seepage_pressure_table"] = str(translation.problem.metadata["seepage_pressure_csv"])
+            compatibility["seepage_pressure_source"] = pressure_source
+        compatibility["boundary_mode"] = translation.problem.boundary.mode
+        compatibility["boundary_tag_options"] = {
+            "base": translation.problem.boundary.tag_base,
+            "x_min": translation.problem.boundary.tag_x_min,
+            "x_max": translation.problem.boundary.tag_x_max,
+            "z_min": translation.problem.boundary.tag_z_min,
+            "z_max": translation.problem.boundary.tag_z_max,
+        }
+    payload = build_native_problem_manifest(
+        resolved,
+        case_id=str(cfg.problem.name),
+        case_path=None if translation.problem is None else translation.problem.metadata.get("case_config"),
+        analysis=str(cfg.problem.analysis),
+        elem_type=str(cfg.problem.elem_type),
+        solver_profile=str(cfg.linear_solver.profile),
+        world_size=int(cfg.linear_solver.resolved_world_size),
+        compatibility=compatibility,
+    )
+    out = Path(output_dir) / "data" / "native_problem_manifest.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return out
 
 
 def _material_specs_from_asset(resolved: Any, mesh_info: dict[str, Any]) -> list[MaterialSpec]:

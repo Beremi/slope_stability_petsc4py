@@ -17,19 +17,6 @@ typedef struct {
 } SSRCurveRow;
 
 typedef struct {
-  PetscInt       accepted_steps;
-  PetscInt       total_newton_its;
-  PetscInt       total_linear_its;
-  PetscInt       total_line_search_its;
-  PetscReal      omega_last;
-  PetscReal      lambda_last;
-  PetscReal      final_rel;
-  PetscReal      final_rel_correction;
-  PetscLogDouble wall_time;
-  char           stop_reason[64];
-} SSRStats;
-
-typedef struct {
   AppCtx          app;
   P4Basis         basis;
   DM              dm;
@@ -300,8 +287,19 @@ static PetscErrorCode WriteSummaryJSON(const AppCtx *app, PetscMPIInt ranks, con
                      "  \"final_rel\": %.17g,\n"
                      "  \"final_rel_correction\": %.17g,\n"
                      "  \"stop_reason\": \"%s\",\n"
+                     "  \"native_linear_algorithm\": \"%s\",\n"
+                     "  \"linear_algorithm\": \"%s\",\n"
+                     "  \"pc_variant\": \"%s\",\n"
+                     "  \"requested_pc_variant\": \"%s\",\n"
+                     "  \"pc_variant_fallback_reason\": \"%s\",\n"
+                     "  \"pmg_p2_active_ranks\": %" PetscInt_FMT ",\n"
+                     "  \"pmg_p1_active_ranks\": %" PetscInt_FMT ",\n"
+                     "  \"reuse_preconditioner\": %s,\n"
+                     "  \"pmg_lag_preconditioner\": %" PetscInt_FMT ",\n"
                      "  \"deflation\": %s,\n"
                      "  \"deflation_solver\": \"%s\",\n"
+                     "  \"deflation_projector\": \"%s\",\n"
+                     "  \"deflation_max_vectors\": %" PetscInt_FMT ",\n"
                      "  \"deflation_basis_cols\": %" PetscInt_FMT ",\n"
                      "  \"deflation_orthogonalization_time\": %.17g,\n"
                      "  \"deflation_coarse_initial_time\": %.17g,\n"
@@ -309,6 +307,10 @@ static PetscErrorCode WriteSummaryJSON(const AppCtx *app, PetscMPIInt ranks, con
                      "  \"deflation_pc_apply_time\": %.17g,\n"
                      "  \"deflation_projector_time\": %.17g,\n"
                      "  \"deflation_projected_pc_calls\": %" PetscInt_FMT ",\n"
+                     "  \"native_problem_manifest\": \"%s\",\n"
+                     "  \"mechanics_bc_labels_csv\": \"%s\",\n"
+                     "  \"mechanics_neumann_labels_csv\": \"%s\",\n"
+                     "  \"seepage_boundary_labels_csv\": \"%s\",\n"
                      "  \"curve_csv\": \"%s\",\n"
                      "  \"solution_binary\": \"%s\",\n"
                      "  \"solution_vtk\": \"%s\",\n"
@@ -318,11 +320,16 @@ static PetscErrorCode WriteSummaryJSON(const AppCtx *app, PetscMPIInt ranks, con
                      stats->accepted_steps, stats->total_newton_its, stats->total_linear_its, stats->total_line_search_its,
                      (double)elastic_assembly_time, (double)stats->wall_time, (double)wall_time,
                      (double)stats->omega_last, (double)stats->lambda_last, (double)stats->final_rel,
-                     (double)stats->final_rel_correction, stats->stop_reason, app->use_deflation ? "true" : "false",
-                     app->deflation_solver_name, solver->n_raw_basis, (double)solver->deflation_orthogonalization_time,
+                     (double)stats->final_rel_correction, stats->stop_reason, app->linear_algorithm, app->linear_algorithm,
+                     app->variant_name, app->requested_variant_name, app->variant_fallback_reason, app->pmg_shell_p2_active_ranks,
+                     app->pmg_shell_p1_active_ranks, app->reuse_linear_solver ? "true" : "false",
+                     app->pmg_lag_preconditioner, app->use_deflation ? "true" : "false", app->deflation_solver_name,
+                     app->deflation_projector_name, app->deflation_max_vectors, solver->n_raw_basis,
+                     (double)solver->deflation_orthogonalization_time,
                      (double)solver->deflation_coarse_time, solver->deflation_coarse_calls,
                      (double)solver->deflation_pc_apply_time, (double)solver->deflation_projector_time,
-                     solver->deflation_projected_pc_calls, app->curve_csv, app->solution_binary, app->solution_vtk, app->solution_points_csv) > 0,
+                     solver->deflation_projected_pc_calls, app->native_problem_manifest, app->mechanics_bc_labels_csv, app->mechanics_neumann_labels_csv, app->seepage_boundary_labels_csv, app->curve_csv,
+                     app->solution_binary, app->solution_vtk, app->solution_points_csv) > 0,
              PETSC_COMM_SELF, PETSC_ERR_FILE_WRITE, "Failed to write summary JSON %s", app->summary_json);
   fclose(fp);
   PetscFunctionReturn(PETSC_SUCCESS);

@@ -1,0 +1,6 @@
+description = "Sloan2013 seepage runtime policy with the historical nonlinear cap."
+
+[seepage]
+linear_tolerance = 1e-10
+linear_max_iter = 300
+nonlinear_max_iter = 100

@@ -1,42 +1,23 @@
 [case]
-name = "2d-homogeneous-ll"
+id = "2d-homogeneous-ll"
 title = "2D homogeneous LL"
-tags = ["2d", "p2", "mechanics", "limit-load"]
+tags = ["regression"]
 
 [mesh]
 asset = "2d_homo_slope"
 variant = "h0.5"
 element = "P2"
-refine_levels = 0
-partitioner = "parmetis"
 
 [physics.mechanics]
 model = "mohr_coulomb_limit_load"
 davis = "B"
 
 [continuation]
-profile = "indirect-classic"
+profile = "direct-limit-load"
 omega_max = 2000.0
-lambda_ell = 1.0
-d_t_min = 0.001
-d_omega_ini_scale = 0.2
-step_max = 100
 
 [newton]
-profile = "indirect-regularized"
-it_max = 100
-it_damp_max = 10
-tol = 0.0001
-r_min = 0.0001
+profile = "limit-load-regularized-it100"
 
 [linear]
-profile = "baseline-pmg-deflated"
-tolerance = 0.1
-max_iterations = 100
-
-[output]
-solution = ["vtu", "petscbin"]
-history = ["summary_json", "curve_csv"]
-
-[notebook]
-family = "2d_continuation"
+profile = "pmg-deflated-baseline"

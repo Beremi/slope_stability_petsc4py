@@ -1,0 +1,18 @@
+description = "Serial/direct debug profile using PETSc preonly+LU options."
+
+[linear]
+algorithm = "direct_debug"
+ksp_type = "preonly"
+norm_type = "unpreconditioned"
+rtol = 1e-12
+max_it = 1
+reuse_preconditioner = false
+
+[deflation]
+enabled = false
+
+[pc]
+type = "none"
+
+[petsc]
+extra = ["-pc_type", "lu"]

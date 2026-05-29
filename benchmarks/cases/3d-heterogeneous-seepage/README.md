@@ -13,7 +13,7 @@ This 3D case runs a config-driven seepage analysis using asset `3d_hetero_seepag
 - Case config: [`case.toml`](case.toml)
 - Asset: `3d_hetero_seepage`
 - Mesh variant: `concave_family_b`
-- Solver profile: `baseline-pmg-deflated`
+- Solver profile: `pmg-deflated-baseline`
 - Analysis: `seepage`
 - Element order: `P2`
 

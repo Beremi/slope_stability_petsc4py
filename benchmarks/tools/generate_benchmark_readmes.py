@@ -34,7 +34,7 @@ def _load_case(case_toml: Path) -> dict[str, object]:
             "analysis": analysis,
             "asset": str(mesh.get("asset", "")).strip(),
             "mesh_variant": str(mesh.get("variant", "")).strip(),
-            "profile": str(linear.get("profile", "baseline-pmg-deflated") or "baseline-pmg-deflated").strip(),
+            "profile": str(linear.get("profile", "pmg-deflated-baseline") or "pmg-deflated-baseline").strip(),
             "elem_type": str(mesh.get("element", "")).strip(),
         }
     return {
