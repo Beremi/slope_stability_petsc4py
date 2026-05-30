@@ -46,7 +46,7 @@ static PetscErrorCode ConfigureKSP(KSP ksp, DM dm, AssemblyCtx *actx, AppCtx *ap
       PetscBool use_shell_vcycle = PETSC_FALSE;
 
       PetscCall(PMGApplyBackendIsShell(app, &use_shell_vcycle));
-      if (use_shell_vcycle) PetscCall(ConfigurePMGShellVCycle(pc, dm, actx, app));
+      if (use_shell_vcycle) PetscCall(ConfigurePMGShellVCycle(pc, dm, actx, app, solver));
       else PetscCall(ConfigurePMG(pc, dm, actx, app, solver));
     } else {
       PetscCall(PCSetType(pc, PCNONE));
@@ -104,6 +104,7 @@ static PetscErrorCode LinearSolverClearRecycleBasis(LinearSolverCtx *solver);
 static PetscErrorCode LinearSolverPrepareKSP(LinearSolverCtx *solver, PetscBool nonlinear_tangent, KSP *ksp_out, PetscBool *owned_out);
 static PetscErrorCode LinearSolverSolvePrepared(LinearSolverCtx *solver, KSP ksp, Vec rhs, Vec x, const char *label, PetscBool nonlinear_tangent, PetscBool basis_already_orthogonalized, PetscInt *its);
 static PetscErrorCode LinearSolverFinishPreparedKSP(KSP *ksp, PetscBool owned);
+static PetscErrorCode LinearSolverTimedKSPSetUp(LinearSolverCtx *solver, KSP ksp);
 
 static PetscErrorCode LinearSolverInit(LinearSolverCtx *solver, DM dm, AssemblyCtx *actx, AppCtx *app, Mat A)
 {
@@ -117,6 +118,20 @@ static PetscErrorCode LinearSolverInit(LinearSolverCtx *solver, DM dm, AssemblyC
   solver->recycle_temp_start_raw = -1;
   solver->force_reuse_preconditioner = PETSC_FALSE;
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "LINEAR_SOLVER_REUSE enabled=%s\n", solver->reuse ? "true" : "false"));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LinearSolverTimedKSPSetUp(LinearSolverCtx *solver, KSP ksp)
+{
+  SsrProfileTimer profile_timer;
+  PetscLogDouble  elapsed;
+
+  PetscFunctionBeginUser;
+  PetscCheck(ksp, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "KSP setup requires a valid KSP");
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KSP_SETUP, ksp, solver ? solver->A : NULL, &profile_timer);
+  PetscCall(KSPSetUp(ksp));
+  SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+  if (solver) PetscCall(SsrStatsAccumulateElapsed(&solver->ksp_setup_time, elapsed));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -756,28 +771,33 @@ static PetscErrorCode DeflationCoarseInitialGuess(LinearSolverCtx *solver, Mat A
 
 static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, PC pc, Vec v, Vec z, Vec Az, PetscBool return_Az)
 {
-  SsrProfileTimer pc_timer, projector_timer;
-  PetscLogDouble  pc_time = 0.0, projector_time = 0.0;
+  SsrProfileTimer pc_timer, matvec_timer, projector_timer;
+  PetscLogDouble  pc_time = 0.0, matvec_time = 0.0, projector_time = 0.0;
 
   PetscFunctionBeginUser;
   SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PC_APPLY, pc, v, &pc_timer);
   PetscCall(PCApply(pc, v, z));
   SSR_PROFILE_TIMER_END(NULL, &pc_timer, &pc_time);
   if (solver->n_orth_basis || return_Az) {
-    SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_PROJECTOR);
-    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PROJECT, A, z, &projector_timer);
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_LINEAR_OPERATOR_MATVEC, A, z, &matvec_timer);
     PetscCall(MatMult(A, z, Az));
-    for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
-      PetscScalar coeff;
+    SSR_PROFILE_TIMER_END(NULL, &matvec_timer, &matvec_time);
+    if (solver->n_orth_basis) {
+      SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_PROJECTOR);
+      SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PROJECT, A, z, &projector_timer);
+      for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
+        PetscScalar coeff;
 
-      PetscCall(VecDot(LinearSolverTestBasis(solver, i), Az, &coeff));
-      PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
-      PetscCall(VecAXPY(Az, -coeff, solver->Aorth_basis[i]));
+        PetscCall(VecDot(LinearSolverTestBasis(solver, i), Az, &coeff));
+        PetscCall(VecAXPY(z, -coeff, solver->orth_basis[i]));
+        PetscCall(VecAXPY(Az, -coeff, solver->Aorth_basis[i]));
+      }
+      SSR_PROFILE_TIMER_END(NULL, &projector_timer, &projector_time);
+      SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_PROJECTOR);
     }
-    SSR_PROFILE_TIMER_END(NULL, &projector_timer, &projector_time);
-    SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_PROJECTOR);
   }
   PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_pc_apply_time, pc_time));
+  PetscCall(SsrStatsAccumulateElapsed(&solver->linear_operator_matvec_time, matvec_time));
   PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_projector_time, projector_time));
   ++solver->deflation_projected_pc_calls;
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -785,17 +805,19 @@ static PetscErrorCode DeflationApplyProjectedPC(LinearSolverCtx *solver, Mat A, 
 
 static PetscErrorCode DeflationApplyMatlabProjectedPC(LinearSolverCtx *solver, Mat A, PC pc, Vec v, Vec z, Vec work)
 {
-  SsrProfileTimer pc_timer, projector_timer;
-  PetscLogDouble  pc_time = 0.0, projector_time = 0.0;
+  SsrProfileTimer pc_timer, matvec_timer, projector_timer;
+  PetscLogDouble  pc_time = 0.0, matvec_time = 0.0, projector_time = 0.0;
 
   PetscFunctionBeginUser;
   SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PC_APPLY, pc, v, &pc_timer);
   PetscCall(PCApply(pc, v, z));
   SSR_PROFILE_TIMER_END(NULL, &pc_timer, &pc_time);
   if (solver->n_orth_basis) {
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_LINEAR_OPERATOR_MATVEC, A, z, &matvec_timer);
+    PetscCall(MatMult(A, z, work));
+    SSR_PROFILE_TIMER_END(NULL, &matvec_timer, &matvec_time);
     SSR_PROFILE_STAGE_PUSH(SSR_STAGE_DEFLATION_PROJECTOR);
     SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PROJECT, A, z, &projector_timer);
-    PetscCall(MatMult(A, z, work));
     for (PetscInt i = 0; i < solver->n_orth_basis; ++i) {
       PetscScalar coeff;
 
@@ -806,6 +828,7 @@ static PetscErrorCode DeflationApplyMatlabProjectedPC(LinearSolverCtx *solver, M
     SSR_PROFILE_STAGE_POP(SSR_STAGE_DEFLATION_PROJECTOR);
   }
   PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_pc_apply_time, pc_time));
+  PetscCall(SsrStatsAccumulateElapsed(&solver->linear_operator_matvec_time, matvec_time));
   PetscCall(SsrStatsAccumulateElapsed(&solver->deflation_projector_time, projector_time));
   ++solver->deflation_projected_pc_calls;
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -955,9 +978,11 @@ static PetscErrorCode DeflatedFGMRESSolve(LinearSolverCtx *solver, KSP ksp, Vec 
   PetscReal    rtol, abstol, dtol, rhs_norm, beta, rel = PETSC_MAX_REAL;
   PetscInt     max_it, ksp_max_it, final_its = 0;
   PetscBool    converged = PETSC_FALSE;
+  SsrProfileTimer phase_timer;
+  PetscLogDouble  phase_elapsed = 0.0;
 
   PetscFunctionBeginUser;
-  PetscCall(KSPSetUp(ksp));
+  PetscCall(LinearSolverTimedKSPSetUp(solver, ksp));
   PetscCall(KSPGetPC(ksp, &pc));
   PetscCall(KSPGetTolerances(ksp, &rtol, &abstol, &dtol, &ksp_max_it));
   (void)abstol; (void)dtol; (void)ksp_max_it;
@@ -990,6 +1015,7 @@ static PetscErrorCode DeflatedFGMRESSolve(LinearSolverCtx *solver, KSP ksp, Vec 
     PetscCall(DeflationApplyProjectedPC(solver, A, pc, V[j], Z[j], Az, PETSC_TRUE));
     PetscCall(LinearSolverCaptureRecycleVector(solver, Z[j]));
     PetscCall(LinearSolverAppendPersistentKrylovVector(solver, Z[j], label, j));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_ORTHOGONALIZE, A, Az, &phase_timer);
     for (PetscInt i = 0; i <= j; ++i) {
       PetscScalar hij;
 
@@ -1003,7 +1029,12 @@ static PetscErrorCode DeflatedFGMRESSolve(LinearSolverCtx *solver, KSP ksp, Vec 
       PetscCall(VecCopy(Az, V[j + 1]));
       PetscCall(VecScale(V[j + 1], 1.0 / hnext));
     }
+    SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->krylov_orthogonalization_time, phase_elapsed));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_LEAST_SQUARES, A, rhs, &phase_timer);
     PetscCall(DenseLeastSquaresNormal(max_it, H, beta, j + 2, j + 1, y, &res_norm));
+    SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->krylov_least_squares_time, phase_elapsed));
     rel        = res_norm / rhs_norm;
     final_its  = j + 1;
     if (solver->app->deflation_monitor) {
@@ -1012,7 +1043,10 @@ static PetscErrorCode DeflatedFGMRESSolve(LinearSolverCtx *solver, KSP ksp, Vec 
     if (rel <= rtol) converged = PETSC_TRUE;
     if (hnext <= 1.0e-14) break;
   }
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_SOLUTION_UPDATE, A, x, &phase_timer);
   for (PetscInt i = 0; i < final_its; ++i) PetscCall(VecAXPY(x, y[i], Z[i]));
+  SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&solver->krylov_solution_update_time, phase_elapsed));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATED_SOLVE label=\"%s\" method=fgmres basis_cols=%" PetscInt_FMT " iterations=%" PetscInt_FMT " reported_rel=%.6e converged=%s\n",
                         label, solver->n_orth_basis, final_its, (double)rel, converged ? "true" : "false"));
@@ -1038,10 +1072,11 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
   PetscInt     max_it, ksp_max_it, final_its = 0;
   PetscBool    converged = PETSC_FALSE;
   SsrProfileTimer coarse_timer;
-  PetscLogDouble  coarse_time = 0.0;
+  SsrProfileTimer phase_timer;
+  PetscLogDouble  coarse_time = 0.0, phase_elapsed = 0.0;
 
   PetscFunctionBeginUser;
-  PetscCall(KSPSetUp(ksp));
+  PetscCall(LinearSolverTimedKSPSetUp(solver, ksp));
   PetscCall(KSPGetPC(ksp, &pc));
   PetscCall(KSPGetTolerances(ksp, &rtol, &abstol, &dtol, &ksp_max_it));
   (void)abstol; (void)dtol; (void)ksp_max_it;
@@ -1087,9 +1122,13 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
     PetscReal hnext, res_norm;
 
     PetscCall(DeflationApplyMatlabProjectedPC(solver, A, pc, V[j], Z[j], work));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_LINEAR_OPERATOR_MATVEC, A, Z[j], &phase_timer);
     PetscCall(MatMult(A, Z[j], work));
+    SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->linear_operator_matvec_time, phase_elapsed));
     PetscCall(LinearSolverCaptureRecycleVector(solver, Z[j]));
     PetscCall(LinearSolverAppendPersistentKrylovVector(solver, Z[j], label, j));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_ORTHOGONALIZE, A, work, &phase_timer);
     for (PetscInt i = 0; i <= j; ++i) {
       PetscScalar hij;
 
@@ -1099,6 +1138,8 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
     }
     PetscCall(VecNorm(work, NORM_2, &hnext));
     H[(j + 1) * max_it + j] = hnext;
+    SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->krylov_orthogonalization_time, phase_elapsed));
     if (j == 0) {
       PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                             "DEFLATED_MATLAB_DFGMRES_SAMPLE label=\"%s\" it=1 h00=%.17e h10=%.17e\n",
@@ -1106,20 +1147,29 @@ static PetscErrorCode DeflatedMatlabDFGMRESSolve(LinearSolverCtx *solver, KSP ks
     }
     final_its = j + 1;
     if (hnext <= 1.0e-14) {
+      SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_LEAST_SQUARES, A, rhs, &phase_timer);
       PetscCall(DenseLeastSquaresLAPACK(max_it, H, beta, final_its + 1, final_its, y, &res_norm));
+      SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+      PetscCall(SsrStatsAccumulateElapsed(&solver->krylov_least_squares_time, phase_elapsed));
       rel = res_norm / rhs_norm;
       break;
     }
     PetscCall(VecCopy(work, V[j + 1]));
     PetscCall(VecScale(V[j + 1], 1.0 / hnext));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_LEAST_SQUARES, A, rhs, &phase_timer);
     PetscCall(DenseLeastSquaresLAPACK(max_it, H, beta, j + 2, j + 1, y, &res_norm));
+    SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->krylov_least_squares_time, phase_elapsed));
     rel = res_norm / rhs_norm;
     if (solver->app->deflation_monitor) {
       PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm), "DEFLATED_MATLAB_DFGMRES label=\"%s\" it=%" PetscInt_FMT " rel=%.6e\n", label, final_its, (double)rel));
     }
     if (rel <= rtol) converged = PETSC_TRUE;
   }
+  SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_SOLUTION_UPDATE, A, x, &phase_timer);
   for (PetscInt i = 0; i < final_its; ++i) PetscCall(VecAXPY(x, y[i], Z[i]));
+  SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+  PetscCall(SsrStatsAccumulateElapsed(&solver->krylov_solution_update_time, phase_elapsed));
   PetscCall(PetscPrintf(PetscObjectComm((PetscObject)solver->dm),
                         "DEFLATED_SOLVE label=\"%s\" method=matlab_dfgmres basis_cols=%" PetscInt_FMT " iterations=%" PetscInt_FMT " reported_rel=%.6e converged=%s\n",
                         label, solver->n_orth_basis, final_its, (double)rel, converged ? "true" : "false"));
@@ -1142,9 +1192,11 @@ static PetscErrorCode DeflatedCGSolve(LinearSolverCtx *solver, KSP ksp, Vec rhs,
   PetscReal rtol, abstol, dtol, rhs_norm, rnorm, rel, rho_real = 0.0;
   PetscInt  max_it, ksp_max_it, final_its = 0;
   PetscBool converged = PETSC_FALSE;
+  SsrProfileTimer phase_timer;
+  PetscLogDouble  phase_elapsed = 0.0;
 
   PetscFunctionBeginUser;
-  PetscCall(KSPSetUp(ksp));
+  PetscCall(LinearSolverTimedKSPSetUp(solver, ksp));
   PetscCall(KSPGetPC(ksp, &pc));
   PetscCall(KSPGetTolerances(ksp, &rtol, &abstol, &dtol, &ksp_max_it));
   (void)abstol; (void)dtol; (void)ksp_max_it;
@@ -1177,7 +1229,10 @@ static PetscErrorCode DeflatedCGSolve(LinearSolverCtx *solver, KSP ksp, Vec rhs,
     PetscScalar pAp_scalar, rho_new;
     PetscReal   pAp_real, alpha, beta_cg;
 
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_LINEAR_OPERATOR_MATVEC, A, p, &phase_timer);
     PetscCall(MatMult(A, p, Ap));
+    SSR_PROFILE_TIMER_END(NULL, &phase_timer, &phase_elapsed);
+    PetscCall(SsrStatsAccumulateElapsed(&solver->linear_operator_matvec_time, phase_elapsed));
     PetscCall(VecDot(p, Ap, &pAp_scalar));
     pAp_real = PetscRealPart(pAp_scalar);
     PetscCheck(pAp_real > 0.0, PetscObjectComm((PetscObject)solver->dm), PETSC_ERR_NOT_CONVERGED,
@@ -1287,6 +1342,7 @@ static PetscErrorCode LinearSolverSolvePrepared(LinearSolverCtx *solver, KSP ksp
     PetscCall(SsrNativeDeflationSolve(deflation_ops, solver, ksp, rhs, x, label, its, &reported_rel));
     PetscCall(CheckLinearSolutionExplicit(solver->dm, solver->app, solver->A, rhs, x, label, *its, reported_rel));
   } else {
+    PetscCall(LinearSolverTimedKSPSetUp(solver, ksp));
     PetscCall(KSPSolve(ksp, rhs, x));
     PetscCall(CheckLinearSolve(solver->dm, solver->actx, solver->app, solver->A, rhs, x, label, ksp, its));
   }

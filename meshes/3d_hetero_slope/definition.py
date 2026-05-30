@@ -5,6 +5,20 @@ from petsc_ssr.assets.factories import build_problem_asset_3d
 
 ASSET_DIR = Path(__file__).resolve().parent
 
+GLUED_BOTTOM_DIRICHLET = [
+    {"target": "x_lock", "components": ["x"]},
+    {"target": "base", "components": ["x", "y", "z"]},
+    {"target": "z_lock", "components": ["z"]},
+]
+
+LEGACY_C_ROLLER_DIRICHLET = [
+    {"target": "base", "components": ["y"]},
+    {"target": "x_min", "components": ["x"]},
+    {"target": "x_max", "components": ["x"]},
+    {"target": "z_min", "components": ["z"]},
+    {"target": "z_max", "components": ["z"]},
+]
+
 ASSET = build_problem_asset_3d(
     asset_id="3d_hetero_slope",
     asset_dir=ASSET_DIR,
@@ -39,10 +53,11 @@ ASSET = build_problem_asset_3d(
         "slope_mass": "slope_mass",
     },
     mechanics={
-        "dirichlet": [
-            {"target": "x_lock", "components": ["x"]},
-            {"target": "base", "components": ["y"]},
-            {"target": "z_lock", "components": ["z"]},
-        ],
+        "dirichlet": GLUED_BOTTOM_DIRICHLET,
+        "profiles": {
+            "default": {"dirichlet": GLUED_BOTTOM_DIRICHLET},
+            "glued_bottom": {"dirichlet": GLUED_BOTTOM_DIRICHLET},
+            "legacy_c_rollers": {"dirichlet": LEGACY_C_ROLLER_DIRICHLET},
+        },
     },
 )

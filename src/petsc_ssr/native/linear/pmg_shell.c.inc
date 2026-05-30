@@ -617,6 +617,7 @@ typedef struct {
   const SsrPmgOptions *pmg;
   DM             dm;
   AssemblyCtx   *actx;
+  LinearSolverCtx *owner;
   Mat            A4;
   PetscBool      setup_done;
   PetscBool      p1_basis_created;
@@ -874,12 +875,14 @@ static PetscErrorCode PMGShellUpdateOperators(PC pc, PMGShellVCycleCtx *ctx, Mat
   PetscCall(PetscPrintf(comm, "PMG_SHELL_OPERATOR_UPDATE level=0 reuse=%s ptap_time=%.6g redistribute_time=%.6g submatrix_time=%.6g concatenate_time=%.6g\n",
                         reuse_label, (double)p1_ptap, (double)p1_redist, (double)sub_time, (double)cat_time));
   ctx->operator_updates++;
+  if (ctx->owner) ctx->owner->pmg_operator_updates++;
   SSR_PROFILE_TIMER_END(NULL, &update_timer, &update_elapsed);
   PetscCall(SsrStatsAccumulateElapsed(&ctx->operator_update_time, update_elapsed));
+  if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_operator_update_time, update_elapsed));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode PMGShellResidual(Mat A, Vec rhs, Vec x, Vec r, Vec tmp, PetscLogDouble *accum_time)
+static PetscErrorCode PMGShellResidual(Mat A, Vec rhs, Vec x, Vec r, Vec tmp, PetscLogDouble *accum_time, PetscLogDouble *owner_accum_time)
 {
   SsrProfileTimer profile_timer;
   PetscLogDouble  elapsed;
@@ -891,6 +894,7 @@ static PetscErrorCode PMGShellResidual(Mat A, Vec rhs, Vec x, Vec r, Vec tmp, Pe
   PetscCall(VecWAXPY(r, -1.0, tmp, rhs));
   SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(SsrStatsAccumulateElapsed(accum_time, elapsed));
+  PetscCall(SsrStatsAccumulateElapsed(owner_accum_time, elapsed));
   SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_RESIDUAL);
   PetscFunctionReturn(PETSC_SUCCESS);
 }
@@ -940,16 +944,18 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(KSPSolve(ctx->smooth4, x, y));
   SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(SsrStatsAccumulateElapsed(&ctx->fine_smooth_time, elapsed));
+  if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_fine_smooth_time, elapsed));
   PetscCall(PMGShellDebugCapture(ctx, y, &ctx->debug_fine_pre));
   SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_FINE_SMOOTH);
 
-  PetscCall(PMGShellResidual(ctx->A4, x, y, ctx->r4, ctx->tmp4, &ctx->residual_time));
+  PetscCall(PMGShellResidual(ctx->A4, x, y, ctx->r4, ctx->tmp4, &ctx->residual_time, ctx->owner ? &ctx->owner->pmg_residual_time : NULL));
   PetscCall(PMGShellDebugCapture(ctx, ctx->r4, &ctx->debug_fine_residual));
   SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_TRANSFER);
   SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_TRANSFER, ctx->P42, ctx->r4, &profile_timer);
   PetscCall(MatMultTranspose(ctx->P42, ctx->r4, ctx->p2_rhs_full));
   SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(SsrStatsAccumulateElapsed(&ctx->restrict_time, elapsed));
+  if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_restrict_time, elapsed));
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p2_layout, ctx->p2_rhs_full, ctx->p2_rhs));
   PetscCall(PMGShellDebugCapture(ctx, ctx->p2_rhs, &ctx->debug_p2_rhs));
   SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
@@ -961,9 +967,10 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_rhs, ctx->p2_x));
     SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
     PetscCall(SsrStatsAccumulateElapsed(&ctx->p2_smooth_time, elapsed));
+    if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_p2_smooth_time, elapsed));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p2_x, &ctx->debug_p2_pre));
     SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_P2);
-    PetscCall(PMGShellResidual(ctx->A2_sub, ctx->p2_rhs, ctx->p2_x, ctx->p2_r, ctx->p2_delta, &ctx->residual_time));
+    PetscCall(PMGShellResidual(ctx->A2_sub, ctx->p2_rhs, ctx->p2_x, ctx->p2_r, ctx->p2_delta, &ctx->residual_time, ctx->owner ? &ctx->owner->pmg_residual_time : NULL));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p2_r, &ctx->debug_p2_residual));
   }
   SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_TRANSFER);
@@ -972,6 +979,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(MatMultTranspose(ctx->P21, ctx->p2_r_full, ctx->p1_rhs_full));
   SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(SsrStatsAccumulateElapsed(&ctx->restrict_time, elapsed));
+  if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_restrict_time, elapsed));
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p1_layout, ctx->p1_rhs_full, ctx->p1_rhs));
   PetscCall(PMGShellDebugCapture(ctx, ctx->p1_rhs, &ctx->debug_p1_rhs));
   SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
@@ -983,6 +991,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
     PetscCall(KSPSolve(ctx->coarse1, ctx->p1_rhs, ctx->p1_x));
     SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
     PetscCall(SsrStatsAccumulateElapsed(&ctx->coarse_solve_time, elapsed));
+    if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_coarse_solve_time, elapsed));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p1_x, &ctx->debug_p1_x));
     SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_P1);
   }
@@ -992,6 +1001,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(MatMult(ctx->P21, ctx->p1_x_full, ctx->p2_corr_full));
   SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(SsrStatsAccumulateElapsed(&ctx->prolong_time, elapsed));
+  if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_prolong_time, elapsed));
   PetscCall(PMGActiveLayoutCopyFullToSub(&ctx->p2_layout, ctx->p2_corr_full, ctx->p2_delta));
   SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
   if (ctx->p2_layout.active) {
@@ -1001,6 +1011,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
     PetscCall(KSPSolve(ctx->smooth2, ctx->p2_rhs, ctx->p2_x));
     SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
     PetscCall(SsrStatsAccumulateElapsed(&ctx->p2_smooth_time, elapsed));
+    if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_p2_smooth_time, elapsed));
     PetscCall(PMGShellDebugCapture(ctx, ctx->p2_x, &ctx->debug_p2_post));
     SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_P2);
   }
@@ -1011,6 +1022,7 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(VecAXPY(y, 1.0, ctx->z4));
   SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(SsrStatsAccumulateElapsed(&ctx->prolong_time, elapsed));
+  if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_prolong_time, elapsed));
   SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_TRANSFER);
 
   SSR_PROFILE_STAGE_PUSH(SSR_STAGE_PMG_SHELL_FINE_SMOOTH);
@@ -1018,9 +1030,11 @@ static PetscErrorCode PMGShellVCycleApply(PC pc, Vec x, Vec y)
   PetscCall(KSPSolve(ctx->smooth4, x, y));
   SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
   PetscCall(SsrStatsAccumulateElapsed(&ctx->fine_smooth_time, elapsed));
+  if (ctx->owner) PetscCall(SsrStatsAccumulateElapsed(&ctx->owner->pmg_fine_smooth_time, elapsed));
   SSR_PROFILE_STAGE_POP(SSR_STAGE_PMG_SHELL_FINE_SMOOTH);
   SSR_PROFILE_END(NULL, SSR_EVENT_PMG_APPLY, pc, x);
   ctx->apply_calls++;
+  if (ctx->owner) ctx->owner->pmg_apply_calls++;
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -1080,7 +1094,7 @@ static PetscErrorCode PMGShellVCycleDestroy(PC pc)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
-static PetscErrorCode ConfigurePMGShellVCycle(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app)
+static PetscErrorCode ConfigurePMGShellVCycle(PC pc, DM dm, AssemblyCtx *actx, AppCtx *app, LinearSolverCtx *solver)
 {
   PMGShellVCycleCtx *ctx = NULL;
 
@@ -1090,6 +1104,7 @@ static PetscErrorCode ConfigurePMGShellVCycle(PC pc, DM dm, AssemblyCtx *actx, A
   ctx->pmg  = &app->resolved_profile.linear.pmg;
   ctx->dm   = dm;
   ctx->actx = actx;
+  ctx->owner = solver;
   ctx->p2_layout.subcomm = MPI_COMM_NULL;
   ctx->p1_layout.subcomm = MPI_COMM_NULL;
   PetscCall(PCSetType(pc, PCSHELL));

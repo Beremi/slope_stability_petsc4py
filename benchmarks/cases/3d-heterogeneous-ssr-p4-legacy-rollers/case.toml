@@ -1,0 +1,24 @@
+[case]
+id = "3d-heterogeneous-ssr-p4-legacy-rollers"
+title = "3D heterogeneous SSR P4 legacy C roller support"
+tags = ["regression", "legacy-c-target"]
+
+[mesh]
+asset = "3d_hetero_slope"
+variant = "adaptive_family_a_l1"
+profile = "legacy_c_rollers"
+element = "P4"
+
+[physics.mechanics]
+model = "mohr_coulomb_ssr"
+davis = "B"
+
+[continuation]
+profile = "indirect-classic"
+omega_max = 7000000.0
+
+[newton]
+profile = "indirect-regularized-dlambda-stop"
+
+[linear]
+profile = "pmg-deflated-baseline"

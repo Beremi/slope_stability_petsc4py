@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import csv
 import importlib.util
 from html import escape as html_escape
 import json
@@ -160,7 +161,7 @@ def benchmark_case_tomls(root: Path = BENCHMARKS_DIR) -> list[Path]:
 def load_case_document(case_toml: Path) -> dict[str, Any]:
     case_path = Path(case_toml)
     raw = tomllib.loads(case_path.read_text(encoding="utf-8"))
-    notebook_path = case_path.parent / "notebook.toml"
+    notebook_path = _notebook_sidecar_for_case_path(case_path)
     if notebook_path.exists():
         sidecar = tomllib.loads(notebook_path.read_text(encoding="utf-8"))
         raw["notebook"] = dict(sidecar.get("notebook", {}))
@@ -181,10 +182,11 @@ def load_case_metadata(case_toml: Path) -> dict[str, Any]:
         linear = dict(raw.get("linear", {}))
         model = str(mechanics.get("model", ""))
         analysis = "ll" if "limit" in model else ("ssr" if mechanics else "seepage")
+        mpi_ranks = int(notebook.get("mpi_ranks", benchmark.get("mpi_ranks", 8)))
         benchmark = {
             "title": str(case.get("title", case_toml.parent.name)),
             "comparison_kind": "continuation" if analysis in {"ssr", "ll"} else "seepage",
-            "mpi_ranks": 8,
+            "mpi_ranks": mpi_ranks,
         }
         problem = {
             "name": str(case.get("id", case.get("name", case_toml.parent.name))),
@@ -467,6 +469,8 @@ def run_parallel_case(
 ) -> dict[str, Any]:
     out_dir = Path(out_dir).resolve()
     config_path = Path(config_path).resolve()
+    env = _solver_environment(extra_env)
+    _ensure_native_extension_available(Path(python_executable), env)
     preserved_config_text: str | None = None
     if clean_out_dir and out_dir.exists():
         try:
@@ -495,13 +499,6 @@ def run_parallel_case(
         str(out_dir),
         *(solver_args or []),
     ]
-    env = dict(os.environ)
-    paths = [str(ROOT), str(ROOT / "src")]
-    if env.get("PYTHONPATH"):
-        paths.append(env["PYTHONPATH"])
-    env["PYTHONPATH"] = os.pathsep.join(paths)
-    if extra_env:
-        env.update(extra_env)
 
     print("Launching solver:", flush=True)
     print("  " + " ".join(cmd), flush=True)
@@ -527,6 +524,7 @@ def run_parallel_case(
     stdout_thread = threading.Thread(target=_enqueue_stdout, daemon=True)
     stdout_thread.start()
 
+    captured_stdout: list[str] = []
     progress_path = out_dir / "data" / "progress.jsonl"
     progress_position = 0
     stdout_open = True
@@ -539,6 +537,7 @@ def run_parallel_case(
             if line is None:
                 stdout_open = False
                 break
+            captured_stdout.append(line)
             print(f"[solver] {line.rstrip()}", flush=True)
         progress_position = _drain_progress(progress_path, progress_position)
         if process.poll() is not None and not stdout_open:
@@ -549,7 +548,7 @@ def run_parallel_case(
     _drain_progress(progress_path, progress_position)
     return_code = int(process.wait())
     if return_code != 0 and not _tolerate_sigterm_success(out_dir, return_code):
-        raise RuntimeError(f"Parallel solve failed with exit code {return_code}.")
+        raise RuntimeError(_parallel_failure_message(return_code, captured_stdout))
 
     artifacts = load_run_artifacts(out_dir)
     summary = _run_completion_summary(artifacts)
@@ -573,6 +572,83 @@ def run_parallel_case(
         "omega_last": omega_last,
         "runtime_seconds": runtime,
     }
+
+
+def _solver_environment(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    paths = [str(ROOT), str(ROOT / "src")]
+    if env.get("PYTHONPATH"):
+        paths.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(paths)
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def _ensure_native_extension_available(python_executable: Path, env: dict[str, str]) -> None:
+    """Ensure notebooks can run from a source checkout after local cleanup."""
+
+    if _python_can_import_native_extension(python_executable, env)[0]:
+        return
+    if _env_flag("PETSC_SSR_NOTEBOOK_AUTO_BUILD_NATIVE", default=True) is False:
+        raise RuntimeError(
+            "petsc_ssr.native._core is not importable by the notebook solver Python. "
+            "Run `python setup.py build_ext --inplace` or set PETSC_SSR_NOTEBOOK_AUTO_BUILD_NATIVE=1."
+        )
+
+    print("Native PETSc extension is missing; building it in place for notebook execution.", flush=True)
+    result = subprocess.run(
+        [str(python_executable), "setup.py", "build_ext", "--inplace"],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        for line in result.stdout.splitlines():
+            print(f"[build_ext] {line}", flush=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "petsc_ssr.native._core is not importable, and automatic `build_ext --inplace` failed "
+            f"with exit code {result.returncode}.\n{_tail_text(result.stdout)}"
+        )
+
+    available, probe_output = _python_can_import_native_extension(python_executable, env)
+    if not available:
+        raise RuntimeError(
+            "Automatic `build_ext --inplace` completed, but petsc_ssr.native._core is still not importable.\n"
+            f"{_tail_text(probe_output)}"
+        )
+
+
+def _python_can_import_native_extension(python_executable: Path, env: dict[str, str]) -> tuple[bool, str]:
+    probe = "import importlib; importlib.import_module('petsc_ssr.native._core')"
+    result = subprocess.run(
+        [str(python_executable), "-c", probe],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0, result.stdout or ""
+
+
+def _parallel_failure_message(return_code: int, stdout_lines: list[str]) -> str:
+    tail = _tail_text("".join(stdout_lines))
+    if not tail:
+        return f"Parallel solve failed with exit code {return_code}."
+    return f"Parallel solve failed with exit code {return_code}.\n\nSolver output tail:\n{tail}"
+
+
+def _tail_text(text: str | None, *, lines: int = 40) -> str:
+    payload = str(text or "").strip()
+    if not payload:
+        return ""
+    return "\n".join(payload.splitlines()[-lines:])
 
 
 def _should_use_mpi_oversubscribe(mpi_ranks: int) -> bool:
@@ -808,6 +884,15 @@ def show_run_summary(artifacts: RunArtifacts) -> None:
     if timings:
         print("")
         print(json.dumps(timings, indent=2))
+    summary = dict(artifacts.run_info.get("c_hotpath_summary", {}))
+    continuation_wall = _positive_float(summary.get("continuation_wall_time", timings.get("continuation_total_wall_time", 0.0)))
+    total_wall = _positive_float(summary.get("wall_time", timings.get("wall_time", 0.0)))
+    if continuation_wall or total_wall:
+        print("")
+        if continuation_wall:
+            print(f"Continuation wall time [s]: {continuation_wall:.6g}")
+        if total_wall:
+            print(f"Total wall time [s]:        {total_wall:.6g}")
 
 
 def plot_convergence_dashboard(artifacts: RunArtifacts):
@@ -840,79 +925,241 @@ def plot_convergence_dashboard(artifacts: RunArtifacts):
 
 
 def plot_timing_breakdown(artifacts: RunArtifacts):
-    series = _timing_breakdown_series(artifacts)
-    nonzero = {key: value for key, value in series.items() if value > 0.0}
-    fig, ax = plt.subplots(figsize=(7.4, 4.2), dpi=160)
-    if not nonzero:
+    groups, continuation_wall = _timing_breakdown_groups(artifacts)
+    fig, ax = plt.subplots(figsize=(9.4, 4.8), dpi=160)
+    nonzero = {group: parts for group, parts in groups.items() if any(value > 0.0 for value in parts.values())}
+    if not nonzero or continuation_wall <= 0.0:
         ax.text(0.5, 0.5, "No timing breakdown available", ha="center", va="center")
         ax.set_axis_off()
         return fig
     labels = list(nonzero)
-    values = [nonzero[label] for label in labels]
-    ax.bar(labels, values, color="#3269a8")
-    ax.set_ylabel("Seconds")
-    ax.set_title("Timing breakdown")
-    ax.tick_params(axis="x", rotation=18)
+    bottoms = np.zeros(len(labels), dtype=np.float64)
+    colors = _timing_color_map()
+    handles = []
+    legend_labels = []
+    for part in _timing_part_order(nonzero):
+        values = np.asarray([100.0 * nonzero[label].get(part, 0.0) / continuation_wall for label in labels], dtype=np.float64)
+        if not np.any(values > 0.0):
+            continue
+        bars = ax.bar(labels, values, bottom=bottoms, color=colors.get(part, "#6f7782"), edgecolor="white", linewidth=0.45)
+        bottoms += values
+        handles.append(bars[0])
+        legend_labels.append(part)
+    for idx, label in enumerate(labels):
+        seconds = sum(nonzero[label].values())
+        if seconds > 0.0:
+            ax.text(idx, bottoms[idx] + 1.0, f"{seconds:.2g}s", ha="center", va="bottom", fontsize=8)
+    max_column = float(np.max(bottoms))
+    ax.set_ylim(0.0, max(5.0, max_column * 1.15, max_column + 2.0))
+    ax.set_ylabel("Share of continuation wall time [%]")
+    ax.set_title("Timing breakdown by phase")
+    ax.tick_params(axis="x", rotation=12)
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend(handles, legend_labels, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, fontsize=8)
     fig.tight_layout()
     return fig
 
 
-def _timing_breakdown_series(artifacts: RunArtifacts) -> dict[str, float]:
+def plot_iteration_history(artifacts: RunArtifacts):
+    rows = _load_continuation_curve_rows(artifacts)
+    if rows:
+        steps = np.asarray([int(row.get("step", idx)) for idx, row in enumerate(rows)], dtype=np.int64)
+        newton = np.asarray([int(row.get("newton_iterations", 0) or 0) for row in rows], dtype=np.int64)
+        linear = np.asarray([int(row.get("linear_iterations", 0) or 0) for row in rows], dtype=np.int64)
+    else:
+        steps = np.asarray(artifacts.npz.get("stats_step_index", []), dtype=np.int64)
+        newton = np.asarray(artifacts.npz.get("stats_step_newton_iterations", []), dtype=np.int64)
+        linear = np.asarray(artifacts.npz.get("stats_step_linear_iterations", []), dtype=np.int64)
+    fig, ax_newton = plt.subplots(figsize=(7.8, 4.2), dpi=160)
+    if not steps.size or not newton.size or not linear.size:
+        ax_newton.text(0.5, 0.5, "No iteration history available", ha="center", va="center")
+        ax_newton.set_axis_off()
+        return fig
+    count = min(steps.size, newton.size, linear.size)
+    steps = steps[:count]
+    newton = newton[:count]
+    cumulative_linear = np.cumsum(linear[:count])
+    line_newton = ax_newton.plot(steps, newton, marker="o", linewidth=1.35, color="#3269a8", label="Newton iterations")
+    ax_newton.set_xlabel("Continuation step")
+    ax_newton.set_ylabel("Newton iterations", color="#3269a8")
+    ax_newton.tick_params(axis="y", labelcolor="#3269a8")
+    ax_newton.grid(True, alpha=0.3)
+    ax_linear = ax_newton.twinx()
+    line_linear = ax_linear.plot(steps, cumulative_linear, marker="s", linewidth=1.25, color="#b24f3f", label="Cumulative linear iterations")
+    ax_linear.set_ylabel("Cumulative linear iterations", color="#b24f3f")
+    ax_linear.tick_params(axis="y", labelcolor="#b24f3f")
+    lines = line_newton + line_linear
+    ax_newton.legend(lines, [line.get_label() for line in lines], loc="upper left")
+    ax_newton.set_title("Continuation iteration history")
+    fig.tight_layout()
+    return fig
+
+
+def _timing_breakdown_groups(artifacts: RunArtifacts) -> tuple[dict[str, dict[str, float]], float]:
     timings = dict(artifacts.run_info.get("timings", {}))
     summary = dict(artifacts.run_info.get("c_hotpath_summary", {}))
-    constitutive = dict(timings.get("constitutive", {}))
-    linear = dict(timings.get("linear", {}))
-    series: dict[str, float] = {}
-
-    constitutive_time = _positive_float(sum(float(v) for v in constitutive.values()))
-    if constitutive_time > 0.0:
-        series["Constitutive"] = constitutive_time
-
-    assembly_time = _positive_float(summary.get("elastic_assembly_time", timings.get("assembly_time", 0.0)))
-    if assembly_time > 0.0:
-        series["Elastic assembly"] = assembly_time
-
-    linear_solve_time = _positive_float(linear.get("attempt_linear_solve_time_total", 0.0))
-    if linear_solve_time > 0.0:
-        series["Linear solve"] = linear_solve_time
-
-    pc_apply_time = _positive_float(
-        linear.get(
-            "preconditioner_apply_time_total",
-            summary.get("deflation_pc_apply_time", linear.get("deflation_pc_apply_time", 0.0)),
-        )
-    )
-    if pc_apply_time > 0.0:
-        series["Deflation PC apply"] = pc_apply_time
-
-    projector_time = _positive_float(summary.get("deflation_projector_time", linear.get("deflation_projector_time", 0.0)))
-    if projector_time > 0.0:
-        series["Deflation projector"] = projector_time
-
-    orthogonalization_time = _positive_float(
-        linear.get(
-            "attempt_linear_orthogonalization_time_total",
-            summary.get("deflation_orthogonalization_time", linear.get("deflation_orthogonalization_time", 0.0)),
-        )
-    )
-    if orthogonalization_time > 0.0:
-        series["Orthogonalization"] = orthogonalization_time
-
-    pc_setup_time = _positive_float(linear.get("preconditioner_setup_time_total", 0.0))
-    if pc_setup_time > 0.0:
-        series["PC setup"] = pc_setup_time
-
     continuation_time = _positive_float(summary.get("continuation_wall_time", timings.get("continuation_total_wall_time", 0.0)))
-    if continuation_time > 0.0 and series:
-        accounted = float(sum(series.values()))
-        residual = max(continuation_time - accounted, 0.0)
-        if residual > 1.0e-9:
-            series["Other continuation"] = residual
-    elif not series:
-        wall_time = _positive_float(summary.get("wall_time", timings.get("wall_time", 0.0)))
-        if wall_time > 0.0:
-            series["Wall time"] = wall_time
-    return series
+    assembly = dict(timings.get("assembly", {}))
+    preconditioning = dict(timings.get("preconditioning", {}))
+    deflation = dict(timings.get("deflation", {}))
+    linear = dict(timings.get("linear", {}))
+    line_search_timing = dict(timings.get("line_search", {}))
+
+    tangent = _summary_time(summary, assembly, "tangent_assembly_time")
+    residual = _summary_time(summary, assembly, "residual_assembly_time")
+    operator_build = _summary_time(summary, assembly, "operator_build_time")
+    assembly_total = _summary_time(summary, timings, "assembly_time")
+    if assembly_total <= 0.0:
+        assembly_total = tangent + residual + operator_build
+    assembly_other = max(assembly_total - tangent - residual - operator_build, 0.0)
+
+    base_pc = _summary_time(summary, linear, "deflation_base_pc_apply_time", "deflation_pc_apply_time")
+    ksp_setup = _summary_time(summary, linear, "ksp_setup_time", "preconditioner_setup_time")
+    if base_pc <= 0.0:
+        base_pc = _summary_time(summary, preconditioning, "deflation_base_pc_apply_time", "deflation_pc_apply_time")
+    if ksp_setup <= 0.0:
+        ksp_setup = _summary_time(summary, preconditioning, "ksp_setup_time", "preconditioner_setup_time")
+    pmg_operator_update = _summary_time(summary, preconditioning, "pmg_operator_update_time")
+    pmg_fine = _summary_time(summary, preconditioning, "pmg_fine_smooth_time")
+    pmg_p2 = _summary_time(summary, preconditioning, "pmg_p2_smooth_time")
+    pmg_transfer = _summary_time(summary, preconditioning, "pmg_transfer_time")
+    if pmg_transfer <= 0.0:
+        pmg_transfer = _summary_time(summary, preconditioning, "pmg_restrict_time") + _summary_time(summary, preconditioning, "pmg_prolong_time")
+    pmg_coarse = _summary_time(summary, preconditioning, "pmg_coarse_solve_time")
+    pmg_residual = _summary_time(summary, preconditioning, "pmg_residual_time")
+    pmg_apply_parts = pmg_fine + pmg_p2 + pmg_transfer + pmg_coarse + pmg_residual
+    pc_apply_other = max(base_pc - pmg_apply_parts, 0.0)
+    pc_setup_other = max(ksp_setup - pmg_operator_update, 0.0)
+
+    defl_orth = _summary_time(summary, deflation, "deflation_orthogonalization_time")
+    defl_project = _summary_time(summary, deflation, "deflation_projector_time")
+    defl_coarse = _summary_time(summary, deflation, "deflation_coarse_initial_time")
+
+    linear_total = _summary_time(summary, linear, "linear_solve_time", "attempt_linear_solve_time_total")
+    matvec = _summary_time(summary, linear, "linear_operator_matvec_time")
+    krylov_orth = _summary_time(summary, linear, "krylov_orthogonalization_time")
+    least_squares = _summary_time(summary, linear, "krylov_least_squares_time")
+    solution_update = _summary_time(summary, linear, "krylov_solution_update_time")
+    preconditioning_total = pc_setup_other + pmg_operator_update + pmg_apply_parts + pc_apply_other
+    deflation_total = defl_orth + defl_project + defl_coarse
+    known_linear_rest = matvec + krylov_orth + least_squares + solution_update
+    linear_other = max(linear_total - preconditioning_total - deflation_total - known_linear_rest, 0.0)
+
+    line_search = _summary_time(summary, line_search_timing, "line_search_time")
+    groups = {
+        "Assembly": {
+            "Tangent assembly": tangent,
+            "Residual assembly": residual,
+            "Operator build": operator_build,
+            "Assembly other": assembly_other,
+        },
+        "Preconditioning": {
+            "PC setup/update": pc_setup_other,
+            "PMG operator update": pmg_operator_update,
+            "PMG fine smooth": pmg_fine,
+            "PMG P2 smooth": pmg_p2,
+            "PMG transfer": pmg_transfer,
+            "PMG coarse solve": pmg_coarse,
+            "PMG residual": pmg_residual,
+            "PC apply other": pc_apply_other,
+        },
+        "Deflation": {
+            "A-orthogonalization": defl_orth,
+            "Deflation projector": defl_project,
+            "Deflation coarse": defl_coarse,
+        },
+        "Linear solver": {
+            "Operator MatMult": matvec,
+            "Krylov orthogonalization": krylov_orth,
+            "GMRES least squares": least_squares,
+            "Solution update": solution_update,
+            "Linear other": linear_other,
+        },
+        "Line search": {
+            "Line search": line_search,
+        },
+    }
+    accounted = sum(value for parts in groups.values() for value in parts.values())
+    other = max(continuation_time - accounted, 0.0)
+    groups["Other"] = {"Continuation other": other}
+    return groups, continuation_time
+
+
+def _timing_breakdown_series(artifacts: RunArtifacts) -> dict[str, float]:
+    groups, _ = _timing_breakdown_groups(artifacts)
+    return {group: sum(parts.values()) for group, parts in groups.items()}
+
+
+def _summary_time(summary: dict[str, Any], fallback: dict[str, Any], *names: str) -> float:
+    for name in names:
+        value = _positive_float(summary.get(name, fallback.get(name, 0.0)))
+        if value > 0.0:
+            return value
+    return 0.0
+
+
+def _timing_part_order(groups: dict[str, dict[str, float]]) -> list[str]:
+    ordered = [
+        "Tangent assembly",
+        "Residual assembly",
+        "Operator build",
+        "Assembly other",
+        "PC setup/update",
+        "PMG operator update",
+        "PMG fine smooth",
+        "PMG P2 smooth",
+        "PMG transfer",
+        "PMG coarse solve",
+        "PMG residual",
+        "PC apply other",
+        "A-orthogonalization",
+        "Deflation projector",
+        "Deflation coarse",
+        "Operator MatMult",
+        "Krylov orthogonalization",
+        "GMRES least squares",
+        "Solution update",
+        "Linear other",
+        "Line search",
+        "Continuation other",
+    ]
+    present = {part for parts in groups.values() for part in parts}
+    return [part for part in ordered if part in present] + sorted(present.difference(ordered))
+
+
+def _timing_color_map() -> dict[str, str]:
+    return {
+        "Tangent assembly": "#3b6ea8",
+        "Residual assembly": "#6f9fd0",
+        "Operator build": "#93b7d8",
+        "Assembly other": "#c4d8eb",
+        "PC setup/update": "#7b5aa6",
+        "PMG operator update": "#9a78c2",
+        "PMG fine smooth": "#4b8f74",
+        "PMG P2 smooth": "#76b08f",
+        "PMG transfer": "#9cc8ab",
+        "PMG coarse solve": "#c19a45",
+        "PMG residual": "#d8bd72",
+        "PC apply other": "#d8c7e8",
+        "A-orthogonalization": "#b24f3f",
+        "Deflation projector": "#d37962",
+        "Deflation coarse": "#e5a08d",
+        "Operator MatMult": "#5c6670",
+        "Krylov orthogonalization": "#7f8a93",
+        "GMRES least squares": "#a2abb2",
+        "Solution update": "#c0c6cb",
+        "Linear other": "#d8dde1",
+        "Line search": "#2f9c95",
+        "Continuation other": "#b9b2a7",
+    }
+
+
+def _load_continuation_curve_rows(artifacts: RunArtifacts) -> list[dict[str, str]]:
+    path = artifacts.data_dir / "continuation_curve.csv"
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def _positive_float(value: Any) -> float:
@@ -1113,7 +1360,7 @@ def show_3d_pore_pressure_view(
         grid.point_data["pore_pressure"] = _pore_pressure_field(artifacts, case_toml, vtu=vtu)
     grid = _display_source_grid(grid, artifacts=artifacts, case_toml=case_toml)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
-    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    reduction = _field_surface_decimate_reduction(surface_decimate_reduction)
     surface = _surface_for_display(
         grid,
         case_toml=case_toml,
@@ -1124,7 +1371,7 @@ def show_3d_pore_pressure_view(
     surface = _decimate_display_mesh(surface, reduction=reduction)
     surface = _optimize_display_mesh(surface, keep_point_arrays=("pore_pressure",))
     plotter = _new_plotter(pv, title="Pore pressure [kPa]")
-    plotter.add_mesh(surface, scalars="pore_pressure", cmap=PARULA_EQUIV, show_edges=False)
+    plotter.add_mesh(surface, scalars="pore_pressure", cmap=PARULA_EQUIV, show_edges=False, lighting=False)
     if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
         _add_boundary_edge_overlay(plotter, grid, case_toml=case_toml, artifacts=artifacts)
     _apply_matlab_camera(plotter)
@@ -1198,9 +1445,8 @@ def show_3d_displacement_view(
     grid = _display_source_grid(pv.read(artifacts.vtu_path), artifacts=artifacts, case_toml=case_toml)
     displacement = np.asarray(artifacts.npz["U"], dtype=np.float64)
     case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
-    scale = matlab_warp_scale(case_mesh.coord, displacement) if warp_scale is None else float(warp_scale)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
-    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    reduction = _field_surface_decimate_reduction(surface_decimate_reduction)
     surface = _surface_for_display(
         grid,
         case_toml=case_toml,
@@ -1208,12 +1454,19 @@ def show_3d_displacement_view(
         nonlinear_subdivision=subdivision,
         point_array_names=("displacement", "displacement_magnitude"),
     )
+    _sync_displacement_magnitude(surface)
     surface = _decimate_display_mesh(surface, reduction=reduction)
+    _sync_displacement_magnitude(surface)
     surface = _optimize_display_mesh(surface, keep_point_arrays=("displacement", "displacement_magnitude"))
+    if warp_scale is None and _elem_type(case_toml) == "P4":
+        scale = _surface_warp_scale(case_mesh.coord, displacement, surface)
+    else:
+        scale = matlab_warp_scale(case_mesh.coord, displacement) if warp_scale is None else float(warp_scale)
     surface = surface.warp_by_vector("displacement", factor=scale)
+    _sync_displacement_magnitude(surface)
     surface = _optimize_display_mesh(surface, keep_point_arrays=("displacement", "displacement_magnitude"))
     plotter = _new_plotter(pv, title=f"Displacement magnitude (warp scale = {scale:.4g})")
-    plotter.add_mesh(surface, scalars="displacement_magnitude", cmap=PARULA_EQUIV, show_edges=False)
+    plotter.add_mesh(surface, scalars="displacement_magnitude", cmap=PARULA_EQUIV, show_edges=False, lighting=False)
     if _display_boundary_edge_overlay(case_toml, override=boundary_edge_overlay):
         _add_boundary_edge_overlay(
             plotter,
@@ -1244,7 +1497,7 @@ def show_3d_deviatoric_surface_view(
     elem_type = str(cfg.problem.elem_type).strip().upper()
     case_mesh = _load_case_mesh(case_toml, artifacts=artifacts)
     subdivision = _display_nonlinear_surface_subdivision(case_toml, override=surface_subdivision)
-    reduction = _display_surface_decimate_reduction(case_toml, override=surface_decimate_reduction)
+    reduction = _field_surface_decimate_reduction(surface_decimate_reduction)
     if elem_type in {"P1", "P2"} and case_mesh.surf is not None:
         displacement = np.asarray(artifacts.npz["U"], dtype=np.float64)
         surface = _build_discontinuous_deviatoric_surface_3d(
@@ -1254,7 +1507,9 @@ def show_3d_deviatoric_surface_view(
             elem_type,
             displacement,
         )
+        _sanitize_nonnegative_point_array(surface, "deviatoric_strain")
         surface = _decimate_display_mesh(surface, reduction=reduction)
+        _sanitize_nonnegative_point_array(surface, "deviatoric_strain")
         surface = _optimize_display_mesh(surface, keep_point_arrays=("deviatoric_strain",))
         plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
         plotter.add_mesh(
@@ -1277,7 +1532,9 @@ def show_3d_deviatoric_surface_view(
             nonlinear_subdivision=subdivision,
             point_array_names=("deviatoric_strain",),
         )
+        _sanitize_nonnegative_point_array(surface, "deviatoric_strain")
         surface = _decimate_display_mesh(surface, reduction=reduction)
+        _sanitize_nonnegative_point_array(surface, "deviatoric_strain")
         surface = _optimize_display_mesh(surface, keep_point_arrays=("deviatoric_strain",))
         plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
         plotter.add_mesh(
@@ -1300,7 +1557,9 @@ def show_3d_deviatoric_surface_view(
             nonlinear_subdivision=subdivision,
             cell_data_from_parent={"deviatoric_strain": np.asarray(grid.cell_data["deviatoric_strain"], dtype=np.float64)},
         )
+        _sanitize_nonnegative_cell_array(surface, "deviatoric_strain")
         surface = _decimate_display_mesh(surface, reduction=reduction)
+        _sanitize_nonnegative_cell_array(surface, "deviatoric_strain")
         surface = _optimize_display_mesh(surface, keep_cell_arrays=("deviatoric_strain",))
         plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
         plotter.add_mesh(
@@ -1332,6 +1591,7 @@ def show_3d_deviatoric_surface_view(
     faces = np.column_stack((np.full(triangles.shape[0], 3, dtype=np.int64), triangles)).reshape(-1)
     surface = pv.PolyData(np.asarray(case_mesh.coord.T, dtype=np.float64), faces)
     surface.cell_data["deviatoric_strain"] = tri_vals
+    _sanitize_nonnegative_cell_array(surface, "deviatoric_strain")
     plotter = _new_plotter(pv, title="Deviatoric strain (boundary surface)")
     plotter.add_mesh(
         surface,
@@ -1389,6 +1649,7 @@ def show_3d_deviatoric_slices(
         grid.cell_data["deviatoric_strain"] = values
         point_grid = grid.cell_data_to_point_data(pass_cell_data=True)
         point_grid.point_data["deviatoric_strain"] = np.asarray(point_grid.point_data["deviatoric_strain"])
+    _sanitize_nonnegative_point_array(point_grid, "deviatoric_strain")
     clim = (float(np.min(values)), float(np.max(values)))
     if clim_scale_max is not None:
         clim = (clim[0], max(clim[0], float(clim_scale_max) * clim[1]))
@@ -1403,6 +1664,7 @@ def show_3d_deviatoric_slices(
             if slc.n_points == 0:
                 continue
             slc = _refine_slice_for_display(slc, point_grid, case_toml=case_toml)
+            _sanitize_nonnegative_point_array(slc, "deviatoric_strain")
             slc = _optimize_display_mesh(slc, keep_point_arrays=("deviatoric_strain",))
             plotter.add_mesh(
                 slc,
@@ -1605,7 +1867,7 @@ def _refine_slice_for_display(dataset, source_grid, *, case_toml: Path):
 
 
 def _use_explicit_surface_builder(case_toml: Path) -> bool:
-    return _elem_type(case_toml) in {"P1", "P2"}
+    return _elem_type(case_toml) in {"P1", "P2", "P4"}
 
 
 def _build_explicit_boundary_surface(
@@ -1740,6 +2002,89 @@ def _decimate_display_mesh(dataset, *, reduction: float | None = None):
     value = min(value, 0.99)
     triangulated = dataset.triangulate()
     return triangulated.decimate_pro(value)
+
+
+def _field_surface_decimate_reduction(override: float | None) -> float:
+    if override is None:
+        return 0.0
+    return min(max(float(override), 0.0), 0.99)
+
+
+def _sync_displacement_magnitude(dataset) -> None:
+    if "displacement" not in getattr(dataset, "point_data", {}):
+        return
+    displacement = np.asarray(dataset.point_data["displacement"], dtype=np.float64)
+    if displacement.ndim != 2:
+        return
+    dataset.point_data["displacement_magnitude"] = np.linalg.norm(displacement, axis=1)
+
+
+def _surface_warp_scale(coord: np.ndarray, displacement: np.ndarray, surface, *, override: float | None = None) -> float:
+    if override is not None:
+        return float(override)
+    return _cap_display_warp_scale(surface, matlab_warp_scale(coord, displacement))
+
+
+def _cap_display_warp_scale(surface, scale: float, *, max_edge_stretch: float = 2.0) -> float:
+    value = float(scale)
+    if value <= 0.0 or "displacement" not in getattr(surface, "point_data", {}):
+        return value
+    triangles = _polydata_triangles(surface)
+    if triangles.size == 0:
+        return value
+
+    points = np.asarray(surface.points, dtype=np.float64)
+    displacement = np.asarray(surface.point_data["displacement"], dtype=np.float64)
+    if displacement.ndim != 2 or displacement.shape[0] != points.shape[0]:
+        return value
+
+    edges = np.vstack((triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]))
+    edges = np.unique(np.sort(edges, axis=1), axis=0)
+    base = points[edges[:, 0]] - points[edges[:, 1]]
+    jump = displacement[edges[:, 0]] - displacement[edges[:, 1]]
+    base_len = np.linalg.norm(base, axis=1)
+    jump_len = np.linalg.norm(jump, axis=1)
+    mask = (base_len > 1.0e-12) & (jump_len > 1.0e-12)
+    if not np.any(mask):
+        return value
+
+    stretch = max(float(max_edge_stretch), 1.0)
+    caps = (stretch - 1.0) * base_len[mask] / jump_len[mask]
+    if caps.size == 0:
+        return value
+    return min(value, float(np.min(caps)))
+
+
+def _polydata_triangles(surface) -> np.ndarray:
+    faces = np.asarray(getattr(surface, "faces", np.empty(0, dtype=np.int64)), dtype=np.int64).reshape(-1)
+    triangles: list[np.ndarray] = []
+    cursor = 0
+    while cursor < faces.size:
+        width = int(faces[cursor])
+        start = cursor + 1
+        stop = start + width
+        if stop > faces.size:
+            break
+        if width == 3:
+            triangles.append(faces[start:stop])
+        cursor = stop
+    if not triangles:
+        return np.empty((0, 3), dtype=np.int64)
+    return np.asarray(triangles, dtype=np.int64)
+
+
+def _sanitize_nonnegative_point_array(dataset, name: str) -> None:
+    if name not in getattr(dataset, "point_data", {}):
+        return
+    values = np.asarray(dataset.point_data[name], dtype=np.float64)
+    dataset.point_data[name] = np.maximum(values, 0.0)
+
+
+def _sanitize_nonnegative_cell_array(dataset, name: str) -> None:
+    if name not in getattr(dataset, "cell_data", {}):
+        return
+    values = np.asarray(dataset.cell_data[name], dtype=np.float64)
+    dataset.cell_data[name] = np.maximum(values, 0.0)
 
 
 def _optimize_display_mesh(
@@ -2012,9 +2357,9 @@ def _surface_faces_by_width(surf: np.ndarray) -> np.ndarray:
     if surf_arr.shape[1] == 6:
         return surf_arr.astype(np.int64)
     if surf_arr.shape[0] == 15:
-        return surf_arr[:3, :].T.astype(np.int64)
+        return surf_arr.T.astype(np.int64)
     if surf_arr.shape[1] == 15:
-        return surf_arr[:, :3].astype(np.int64)
+        return surf_arr.astype(np.int64)
     if surf_arr.shape[0] == 3:
         return surf_arr.T.astype(np.int64)
     if surf_arr.shape[1] == 3:
@@ -2026,9 +2371,28 @@ def _surface_display_local_split(n_face_nodes: int) -> np.ndarray:
     if int(n_face_nodes) == 6:
         # Internal quadratic triangle order is [v0, v1, v2, e12, e20, e01].
         return np.array([[0, 5, 4], [5, 1, 3], [4, 3, 2], [5, 3, 4]], dtype=np.int64)
+    if int(n_face_nodes) == 15:
+        return _p4_triangle_linear_subtriangles()
     if int(n_face_nodes) == 3:
         return np.array([[0, 1, 2]], dtype=np.int64)
     raise ValueError(f"Unsupported surface face width {n_face_nodes}")
+
+
+def _p4_triangle_linear_subtriangles() -> np.ndarray:
+    from petsc_ssr.core.simplex_lagrange import triangle_lagrange_node_tuples
+
+    order = 4
+    lookup = {node: idx for idx, node in enumerate(triangle_lagrange_node_tuples(order))}
+    triangles: list[tuple[int, int, int]] = []
+    for i in range(order):
+        for j in range(order - i):
+            a = order - i - j
+            lower = ((a, i, j), (a - 1, i + 1, j), (a - 1, i, j + 1))
+            triangles.append(tuple(lookup[node] for node in lower))
+            if j < order - i - 1:
+                upper = ((a - 1, i + 1, j), (a - 2, i + 1, j + 1), (a - 1, i, j + 1))
+                triangles.append(tuple(lookup[node] for node in upper))
+    return np.asarray(triangles, dtype=np.int64)
 
 
 def _canonical_surface_faces_for_display(coord: np.ndarray, surf: np.ndarray) -> np.ndarray:
@@ -2060,7 +2424,7 @@ def _build_plotting_mesh_with_face_ids(
         coord = np.asarray(coord_or_surf, dtype=np.float64)
         surf_arr = surf
     surf_faces = _surface_faces_by_width(surf_arr) if coord is None else _canonical_surface_faces_for_display(coord, surf_arr)
-    if surf_faces.shape[1] != 6:
+    if surf_faces.shape[1] == 3:
         tri = surf_faces.astype(np.int64)
         face_ids = np.arange(tri.shape[0], dtype=np.int64)
         return tri, face_ids
@@ -2178,6 +2542,28 @@ def _load_runtime_config(case_toml: Path):
             if benchmark_case.exists():
                 return load_run_case_config(benchmark_case)
         raise
+
+
+def _owning_benchmark_case_toml(case_toml: Path) -> Path | None:
+    case_path = Path(case_toml).resolve()
+    if case_path.name != "generated_case.toml":
+        return None
+    try:
+        candidate = case_path.parents[2] / "case.toml"
+    except IndexError:
+        return None
+    return candidate if candidate.exists() else None
+
+
+def _notebook_sidecar_for_case_path(case_toml: Path) -> Path:
+    case_path = Path(case_toml).resolve()
+    notebook_path = case_path.parent / "notebook.toml"
+    if notebook_path.exists():
+        return notebook_path
+    owner = _owning_benchmark_case_toml(case_path)
+    if owner is not None:
+        return owner.parent / "notebook.toml"
+    return notebook_path
 
 
 def _load_case_mesh(case_toml: Path, *, artifacts: RunArtifacts | None = None):
@@ -2560,7 +2946,14 @@ def _apply_matlab_camera(plotter) -> None:
 
 
 def _elem_type(case_toml: Path) -> str:
-    return str(load_case_document(case_toml).get("problem", {}).get("elem_type", "P2")).upper()
+    document = load_case_document(case_toml)
+    mesh = document.get("mesh", {})
+    if isinstance(mesh, dict) and str(mesh.get("element", "")).strip():
+        return str(mesh["element"]).strip().upper()
+    problem = document.get("problem", {})
+    if isinstance(problem, dict) and str(problem.get("elem_type", "")).strip():
+        return str(problem["elem_type"]).strip().upper()
+    return "P2"
 
 
 def _drain_progress(progress_path: Path, offset: int) -> int:

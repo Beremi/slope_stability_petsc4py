@@ -13,7 +13,11 @@ typedef struct {
   PetscInt       total_linear_its;
   PetscInt       line_search_its;
   PetscLogDouble assembly_time;
+  PetscLogDouble tangent_assembly_time;
+  PetscLogDouble residual_assembly_time;
+  PetscLogDouble operator_build_time;
   PetscLogDouble solve_time;
+  PetscLogDouble line_search_time;
   PetscLogDouble wall_time;
   PetscBool      converged;
 } SsrNewtonStepStats;
@@ -27,6 +31,12 @@ typedef struct {
   PetscReal      lambda_last;
   PetscReal      final_rel;
   PetscReal      final_rel_correction;
+  PetscLogDouble assembly_time;
+  PetscLogDouble tangent_assembly_time;
+  PetscLogDouble residual_assembly_time;
+  PetscLogDouble operator_build_time;
+  PetscLogDouble linear_solve_time;
+  PetscLogDouble line_search_time;
   PetscLogDouble wall_time;
   char           stop_reason[64];
 } SsrContinuationStats;
@@ -75,6 +85,10 @@ typedef enum {
   SSR_EVENT_DEFLATION_COARSE,
   SSR_EVENT_DEFLATION_PC_APPLY,
   SSR_EVENT_DEFLATION_PROJECT,
+  SSR_EVENT_LINEAR_OPERATOR_MATVEC,
+  SSR_EVENT_KRYLOV_ORTHOGONALIZE,
+  SSR_EVENT_KRYLOV_LEAST_SQUARES,
+  SSR_EVENT_KRYLOV_SOLUTION_UPDATE,
   SSR_EVENT_LINE_SEARCH,
   SSR_EVENT_OUTPUT_WRITE,
   SSR_EVENT_CONTINUATION_RUN,
@@ -118,9 +132,13 @@ PetscErrorCode SsrStatsAddNewtonIteration(SsrStats *stats, const char phase[]);
 PetscErrorCode SsrStatsAddLinearSolve(SsrStats *stats, PetscInt its, KSPConvergedReason reason);
 PetscErrorCode SsrStatsAddLineSearchIteration(SsrStats *stats);
 PetscErrorCode SsrStatsAddNewtonStepAssembly(SsrNewtonStepStats *stats, PetscLogDouble elapsed);
+PetscErrorCode SsrStatsAddNewtonStepTangentAssembly(SsrNewtonStepStats *stats, PetscLogDouble elapsed);
+PetscErrorCode SsrStatsAddNewtonStepResidualAssembly(SsrNewtonStepStats *stats, PetscLogDouble elapsed);
+PetscErrorCode SsrStatsAddNewtonStepOperatorBuild(SsrNewtonStepStats *stats, PetscLogDouble elapsed);
 PetscErrorCode SsrStatsAddNewtonStepLinearSolve(SsrNewtonStepStats *stats, PetscInt its, PetscLogDouble elapsed);
 PetscErrorCode SsrStatsAddNewtonStepIteration(SsrNewtonStepStats *stats);
 PetscErrorCode SsrStatsAddNewtonStepLineSearch(SsrNewtonStepStats *stats, PetscInt its);
+PetscErrorCode SsrStatsAddNewtonStepLineSearchTime(SsrNewtonStepStats *stats, PetscLogDouble elapsed);
 PetscErrorCode SsrStatsAcceptContinuationStep(SsrContinuationStats *stats, const SsrNewtonStepStats *step_stats);
 PetscErrorCode SsrStatsAddHydroAssembly(SsrHydroStats *stats, PetscLogDouble elapsed);
 PetscErrorCode SsrStatsAddHydroLinearSolve(SsrHydroStats *stats, PetscInt its, PetscLogDouble elapsed, KSPConvergedReason reason);

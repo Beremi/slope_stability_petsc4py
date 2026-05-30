@@ -28,11 +28,12 @@ def test_case_command_payloads_are_importable_without_cli_main_dispatch() -> Non
 def test_validate_all_cases_payload_reports_committed_case_set() -> None:
     payload = validate_all_cases_payload(CASE_ROOT)
 
-    assert payload["count"] == 18
-    assert payload["valid"] == 18
+    assert payload["count"] == 19
+    assert payload["valid"] == 19
     assert payload["errors"] == 0
     cases = {entry["case"]: entry for entry in payload["cases"]}
     assert cases["3d-heterogeneous-ssr-p4"]["linear_profile"] == "pmg-deflated-baseline"
+    assert cases["3d-heterogeneous-ssr-p4-legacy-rollers"]["linear_profile"] == "pmg-deflated-baseline"
     assert cases["2d-sloan2013-seepage"]["seepage_profile"] == "sloan2013-steady"
 
 
@@ -41,7 +42,7 @@ def test_case_validate_all_cli_prints_summary(capsys) -> None:
 
     assert status == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["valid"] == 18
+    assert payload["valid"] == 19
     assert payload["errors"] == 0
 
 

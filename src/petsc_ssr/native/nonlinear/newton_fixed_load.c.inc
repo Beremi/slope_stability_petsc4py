@@ -35,9 +35,14 @@ static PetscErrorCode FixedLambdaNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *a
 
     SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_ASSEMBLE_TANGENT, dm, residual, &profile_timer);
     PetscCall(AssemblePlasticResidualJacobian(actx, lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAddNewtonStepAssembly(stats, elapsed));
+    PetscCall(SsrStatsAddNewtonStepTangentAssembly(stats, elapsed));
+    SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_OPERATOR_BUILD, Areg, Ktangent, &profile_timer);
     PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, r));
     SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
     PetscCall(SsrStatsAddNewtonStepAssembly(stats, elapsed));
+    PetscCall(SsrStatsAddNewtonStepOperatorBuild(stats, elapsed));
     PetscCall(ResidualNormFree(actx, residual, rhs_norm, &rel));
     PetscCall(StoppingByCriterion(criterion, rel, rel_corr, PETSC_MAX_REAL, stop_tol, PETSC_FALSE, &stop));
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm), "SSR_INIT_NEWTON lambda=%.8e it=%" PetscInt_FMT " rel_res=%.6e rel_corr=%.6e stop=%s\n",
@@ -64,6 +69,7 @@ static PetscErrorCode FixedLambdaNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *a
     PetscCall(FixedLambdaDirectionalDamping(actx, app, lambda, u, du, residual, f_ext, u_trial, r_trial, &alpha, &ls_its, &initial_decrease));
     SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
     PetscCall(SsrStatsAddNewtonStepLineSearch(stats, ls_its));
+    PetscCall(SsrStatsAddNewtonStepLineSearchTime(stats, elapsed));
     rel_corr = (alpha * du_norm) / PetscMax(u_norm, 1.0e-30);
     PetscCall(VecScale(du, alpha));
     PetscCall(VecAXPY(u, 1.0, du));

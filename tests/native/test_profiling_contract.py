@@ -49,6 +49,10 @@ def test_stats_api_exposes_petcs_event_timers() -> None:
     assert "SSR_EVENT_DEFLATION_COARSE" in header
     assert "SSR_EVENT_DEFLATION_PC_APPLY" in header
     assert "SSR_EVENT_OPERATOR_BUILD" in header
+    assert "SSR_EVENT_LINEAR_OPERATOR_MATVEC" in header
+    assert "SSR_EVENT_KRYLOV_ORTHOGONALIZE" in header
+    assert "SSR_EVENT_KRYLOV_LEAST_SQUARES" in header
+    assert "SSR_EVENT_KRYLOV_SOLUTION_UPDATE" in header
     assert "SSR_EVENT_BUILD_RHS" in header
     assert "SSR_EVENT_KSP_SETUP" in header
     assert "SSR_EVENT_LINE_SEARCH" in header
@@ -66,6 +70,10 @@ def test_stats_api_exposes_petcs_event_timers() -> None:
     assert "SSR Deflation Coarse" in impl
     assert "SSR Deflation PC Apply" in impl
     assert "SSR Operator Build" in impl
+    assert "SSR Linear Operator MatMult" in impl
+    assert "SSR Krylov Orthogonalize" in impl
+    assert "SSR Krylov Least Squares" in impl
+    assert "SSR Krylov Solution Update" in impl
     assert "SSR Build RHS" in impl
     assert "SSR KSP Setup" in impl
     assert "SSR Line Search" in impl
@@ -86,9 +94,13 @@ def test_stats_api_exposes_petcs_event_timers() -> None:
     assert "SsrHydroStats" in header
     assert "SsrNeumannStats" in header
     assert "SsrStatsAddNewtonStepAssembly" in header
+    assert "SsrStatsAddNewtonStepTangentAssembly" in header
+    assert "SsrStatsAddNewtonStepResidualAssembly" in header
+    assert "SsrStatsAddNewtonStepOperatorBuild" in header
     assert "SsrStatsAddNewtonStepLinearSolve" in header
     assert "SsrStatsAddNewtonStepIteration" in header
     assert "SsrStatsAddNewtonStepLineSearch" in header
+    assert "SsrStatsAddNewtonStepLineSearchTime" in header
     assert "SsrStatsAddHydroAssembly" in header
     assert "SsrStatsAddHydroLinearSolve" in header
     assert "SsrStatsAddNeumannAssembly" in header
@@ -97,11 +109,20 @@ def test_stats_api_exposes_petcs_event_timers() -> None:
     assert "const void *step_result" not in header
     assert "if (counter) *counter += elapsed" in impl
     assert "stats->assembly_time += elapsed" in impl
+    assert "stats->tangent_assembly_time += elapsed" in impl
+    assert "stats->residual_assembly_time += elapsed" in impl
+    assert "stats->operator_build_time += elapsed" in impl
     assert "stats->solve_time += elapsed" in impl
+    assert "stats->line_search_time += elapsed" in impl
     assert "stats->total_linear_its += its" in impl
     assert "stats->line_search_its += its" in impl
     assert "stats->accepted_steps++" in impl
     assert "stats->total_newton_its += step_stats->newton_its" in impl
+    assert "stats->tangent_assembly_time += step_stats->tangent_assembly_time" in impl
+    assert "stats->residual_assembly_time += step_stats->residual_assembly_time" in impl
+    assert "stats->operator_build_time += step_stats->operator_build_time" in impl
+    assert "stats->linear_solve_time += step_stats->solve_time" in impl
+    assert "stats->line_search_time += step_stats->line_search_time" in impl
     assert "stats->linear_solves += 1" in impl
     assert "stats->quadrature_points += quadrature_points" in impl
 
@@ -145,10 +166,16 @@ def test_newton_hot_path_uses_stats_timer_api_for_assembly_and_solves() -> None:
     indirect = _read(NATIVE / "nonlinear" / "newton_indirect_ssr.c.inc")
 
     assert "SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_ASSEMBLE_TANGENT" in fixed
+    assert "SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_OPERATOR_BUILD" in fixed
+    assert "SsrStatsAddNewtonStepTangentAssembly(stats, elapsed)" in fixed
+    assert "SsrStatsAddNewtonStepOperatorBuild(stats, elapsed)" in fixed
     assert "const SsrEvent assembly_event" in indirect
     assert "SSR_EVENT_ASSEMBLE_RESIDUAL" in indirect
     assert "SSR_EVENT_ASSEMBLE_TANGENT" in indirect
     assert "SSR_PROFILE_TIMER_BEGIN(NULL, assembly_event" in indirect
+    assert "SsrStatsAddNewtonStepResidualAssembly(stats, elapsed)" in indirect
+    assert "SsrStatsAddNewtonStepTangentAssembly(stats, elapsed)" in indirect
+    assert "SsrStatsAddNewtonStepOperatorBuild(stats, elapsed)" in indirect
 
     for source in (fixed, indirect):
         assert "SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_NEWTON_SOLVE" in source
@@ -160,6 +187,7 @@ def test_newton_hot_path_uses_stats_timer_api_for_assembly_and_solves() -> None:
         assert "SsrStatsAddNewtonStepLinearSolve(stats," in source
         assert "SsrStatsAddNewtonStepIteration(stats)" in source
         assert "SsrStatsAddNewtonStepLineSearch(stats, ls_its)" in source
+        assert "SsrStatsAddNewtonStepLineSearchTime(stats, elapsed)" in source
         assert "stats->wall_time             = wall_time" in source
         assert "PetscTime(" not in source
         assert "assembly_time += elapsed" not in source
@@ -216,12 +244,23 @@ def test_deflation_hot_path_uses_stats_timer_api() -> None:
     assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_COARSE") >= 2
     assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PC_APPLY") >= 2
     assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_DEFLATION_PROJECT") >= 2
+    assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_LINEAR_OPERATOR_MATVEC") >= 4
+    assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_ORTHOGONALIZE") >= 2
+    assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_LEAST_SQUARES") >= 2
+    assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_KRYLOV_SOLUTION_UPDATE") >= 2
+    assert "LinearSolverTimedKSPSetUp" in source
     assert source.count("SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed)") >= 2
     assert "SsrStatsAccumulateElapsed(&solver->deflation_orthogonalization_time, elapsed)" in source
     assert "SsrStatsAccumulateElapsed(&solver->deflation_coarse_time, elapsed)" in source
     assert "SsrStatsAccumulateElapsed(&solver->deflation_coarse_time, coarse_time)" in source
     assert "SsrStatsAccumulateElapsed(&solver->deflation_pc_apply_time, pc_time)" in source
     assert "SsrStatsAccumulateElapsed(&solver->deflation_projector_time, projector_time)" in source
+    assert "SsrStatsAccumulateElapsed(&solver->ksp_setup_time, elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&solver->linear_operator_matvec_time, matvec_time)" in source
+    assert "SsrStatsAccumulateElapsed(&solver->linear_operator_matvec_time, phase_elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&solver->krylov_orthogonalization_time, phase_elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&solver->krylov_least_squares_time, phase_elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&solver->krylov_solution_update_time, phase_elapsed)" in source
     assert "PetscTime(" not in source
     assert "deflation_orthogonalization_time += elapsed" not in source
     assert "deflation_coarse_time += elapsed" not in source
@@ -256,6 +295,12 @@ def test_pmg_shell_apply_subphases_use_stats_timer_api() -> None:
     assert "SsrStatsAccumulateElapsed(&ctx->restrict_time, elapsed)" in source
     assert "SsrStatsAccumulateElapsed(&ctx->prolong_time, elapsed)" in source
     assert "SsrStatsAccumulateElapsed(accum_time, elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&ctx->owner->pmg_fine_smooth_time, elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&ctx->owner->pmg_p2_smooth_time, elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&ctx->owner->pmg_coarse_solve_time, elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&ctx->owner->pmg_restrict_time, elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&ctx->owner->pmg_prolong_time, elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(owner_accum_time, elapsed)" in source
     assert "fine_smooth_time += elapsed" not in source
     assert "p2_smooth_time += elapsed" not in source
     assert "coarse_solve_time += elapsed" not in source
@@ -278,6 +323,7 @@ def test_pmg_shell_operator_update_submetrics_use_stats_timer_api() -> None:
     assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_SUBMATRIX") == 1
     assert source.count("SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_PMG_CONCATENATE") == 1
     assert "SsrStatsAccumulateElapsed(&ctx->operator_update_time, update_elapsed)" in source
+    assert "SsrStatsAccumulateElapsed(&ctx->owner->pmg_operator_update_time, update_elapsed)" in source
     assert "PetscTime(" not in source
     assert "ctx->operator_update_time += update_elapsed" not in source
     assert "operator_update_time += t" not in source
@@ -324,6 +370,39 @@ def test_continuation_acceptance_uses_stats_checkpoint_api() -> None:
         assert "stats->total_linear_its += nstats.total_linear_its" not in source
         assert "stats->total_line_search_its += nstats.line_search_its" not in source
         assert "stats->wall_time = t_end - t_start" not in source
+
+
+def test_native_summary_exports_explicit_timing_breakdown_fields() -> None:
+    source = _read(NATIVE / "reporting" / "reporting.c.inc")
+
+    for name in (
+        "assembly_time",
+        "tangent_assembly_time",
+        "residual_assembly_time",
+        "operator_build_time",
+        "linear_solve_time",
+        "ksp_setup_time",
+        "preconditioner_setup_time",
+        "line_search_time",
+        "deflation_base_pc_apply_time",
+        "pmg_apply_calls",
+        "pmg_operator_updates",
+        "pmg_operator_update_time",
+        "pmg_fine_smooth_time",
+        "pmg_p2_smooth_time",
+        "pmg_restrict_time",
+        "pmg_prolong_time",
+        "pmg_transfer_time",
+        "pmg_coarse_solve_time",
+        "pmg_residual_time",
+        "linear_operator_matvec_time",
+        "krylov_orthogonalization_time",
+        "krylov_least_squares_time",
+        "krylov_solution_update_time",
+    ):
+        assert f'\\"{name}\\"' in source
+
+    assert "assembly_time,solve_time,line_search_time" in source
 
 
 def test_replay_debug_assembly_checks_use_stats_timer_api() -> None:

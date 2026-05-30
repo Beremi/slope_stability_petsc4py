@@ -190,8 +190,22 @@ typedef struct {
   PetscLogDouble deflation_coarse_time;
   PetscLogDouble deflation_pc_apply_time;
   PetscLogDouble deflation_projector_time;
+  PetscLogDouble ksp_setup_time;
+  PetscLogDouble linear_operator_matvec_time;
+  PetscLogDouble krylov_orthogonalization_time;
+  PetscLogDouble krylov_least_squares_time;
+  PetscLogDouble krylov_solution_update_time;
+  PetscLogDouble pmg_operator_update_time;
+  PetscLogDouble pmg_fine_smooth_time;
+  PetscLogDouble pmg_p2_smooth_time;
+  PetscLogDouble pmg_restrict_time;
+  PetscLogDouble pmg_prolong_time;
+  PetscLogDouble pmg_coarse_solve_time;
+  PetscLogDouble pmg_residual_time;
   PetscInt       deflation_coarse_calls;
   PetscInt       deflation_projected_pc_calls;
+  PetscInt       pmg_apply_calls;
+  PetscInt       pmg_operator_updates;
   Vec           *recycle_basis;
   PetscInt       n_recycle_basis;
   PetscInt       recycle_basis_cap;
@@ -1044,6 +1058,13 @@ static PetscErrorCode ReportBoundaryCounts(DM dm, const AppCtx *app)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscBool MechanicsLabelConstraintTableActive(const AppCtx *app)
+{
+  if (!app || !app->mechanics_bc_labels_csv[0]) return PETSC_FALSE;
+  if (app->native_problem_manifest_loaded && app->native_manifest_mechanics_dirichlet <= 0) return PETSC_FALSE;
+  return PETSC_TRUE;
+}
+
 static PetscErrorCode AddPlasticityBoundaryConditions(DM dm, const AppCtx *app)
 {
   DMLabel        label = NULL;
@@ -1053,8 +1074,18 @@ static PetscErrorCode AddPlasticityBoundaryConditions(DM dm, const AppCtx *app)
   PetscInt       x_rollers[2], z_rollers[2], nx = 0, nz = 0;
   const PetscInt x_comp[1] = {0}, y_comp[1] = {1}, z_comp[1] = {2};
   PetscBool      is_rollers, is_base_only, is_full_sides, is_fixed_base_rollers, is_2d_rollers;
+  PetscBool      label_table_active;
 
   PetscFunctionBeginUser;
+  label_table_active = MechanicsLabelConstraintTableActive(app);
+  if (label_table_active) {
+    PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
+                          "MECHANICS_BC_MODE source=label_table path=%s legacy_mode=%s status=petsc_section_boundaries_enabled\n",
+                          app->mechanics_bc_labels_csv, app->mesh_bc_mode));
+    PetscCall(AssemblyApplyLabelBoundaryConditions(dm, app->mechanics_bc_labels_csv,
+                                                   app->native_problem_manifest_loaded ? app->native_manifest_mechanics_dirichlet : -1));
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
   PetscCall(DMGetLabel(dm, "boundary_marker", &label));
   PetscCheck(label, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_WRONGSTATE, "Missing boundary_marker label");
   PetscCall(PetscStrcasecmp(app->mesh_bc_mode, "rollers", &is_rollers));
@@ -1138,6 +1169,16 @@ static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *app, P4Basis *basis, DM 
       else if (app->mechanics_dim == 2 && PetscAbsReal(centroid[1] - 1.0) < 1.0e-10) PetscCall(DMLabelSetValue(faceSets, f, 6)); /* y_max */
     }
   } else {
+    PetscBool label_table_active = MechanicsLabelConstraintTableActive(app);
+    if (label_table_active) {
+      PetscBool user_set_mark_vertices = PETSC_FALSE;
+
+      PetscCall(PetscOptionsHasName(NULL, NULL, "-dm_plex_gmsh_mark_vertices", &user_set_mark_vertices));
+      if (!user_set_mark_vertices) PetscCall(PetscOptionsSetValue(NULL, "-dm_plex_gmsh_mark_vertices", "true"));
+      PetscCall(PetscPrintf(comm,
+                            "MECHANICS_BC_LABELS_VERTEX_MARKING enabled=true source=label_table option=dm_plex_gmsh_mark_vertices user_set=%s\n",
+                            user_set_mark_vertices ? "true" : "false"));
+    }
     PetscCall(DMPlexCreateFromFile(comm, app->mesh, NULL, PETSC_TRUE, &cur));
   }
   PetscCall(DMSetFromOptions(cur));
@@ -1181,6 +1222,8 @@ static PetscErrorCode ReportPartitionDiagnostics(DM dm, Mat A, Vec u, const Asse
   PetscInt             local_cells, local_vertices, local_owned_rows, global_rows;
   PetscInt             cells_sum, cells_min, cells_max, vertices_sum, vertices_min, vertices_max, owned_min, owned_max;
   PetscInt             constraints_sum, constraints_min, constraints_max;
+  PetscInt             constraints_local = 0, constraints_global = 0, section_constraints_local = 0, section_constraints_global = 0;
+  PetscBool            section_constraints_active = PETSC_FALSE;
   PetscBool            ismatis = PETSC_FALSE;
 
   PetscFunctionBeginUser;
@@ -1193,6 +1236,13 @@ static PetscErrorCode ReportPartitionDiagnostics(DM dm, Mat A, Vec u, const Asse
   local_vertices = vEnd - vStart;
   PetscCall(VecGetLocalSize(u, &local_owned_rows));
   PetscCall(VecGetSize(u, &global_rows));
+  PetscCall(AssemblyGetSectionConstraintStats(dm, &section_constraints_local, &section_constraints_global, &section_constraints_active));
+  constraints_local = actx->n_constrained_local;
+  constraints_global = actx->n_constrained_all;
+  if (section_constraints_active && constraints_global == 0) {
+    constraints_local = section_constraints_local;
+    constraints_global = section_constraints_global;
+  }
 
   PetscCallMPI(MPI_Allreduce(&local_cells, &cells_sum, 1, MPIU_INT, MPI_SUM, comm));
   PetscCallMPI(MPI_Allreduce(&local_cells, &cells_min, 1, MPIU_INT, MPI_MIN, comm));
@@ -1202,15 +1252,15 @@ static PetscErrorCode ReportPartitionDiagnostics(DM dm, Mat A, Vec u, const Asse
   PetscCallMPI(MPI_Allreduce(&local_vertices, &vertices_max, 1, MPIU_INT, MPI_MAX, comm));
   PetscCallMPI(MPI_Allreduce(&local_owned_rows, &owned_min, 1, MPIU_INT, MPI_MIN, comm));
   PetscCallMPI(MPI_Allreduce(&local_owned_rows, &owned_max, 1, MPIU_INT, MPI_MAX, comm));
-  PetscCallMPI(MPI_Allreduce(&actx->n_constrained_local, &constraints_sum, 1, MPIU_INT, MPI_SUM, comm));
-  PetscCallMPI(MPI_Allreduce(&actx->n_constrained_local, &constraints_min, 1, MPIU_INT, MPI_MIN, comm));
-  PetscCallMPI(MPI_Allreduce(&actx->n_constrained_local, &constraints_max, 1, MPIU_INT, MPI_MAX, comm));
+  PetscCallMPI(MPI_Allreduce(&constraints_local, &constraints_sum, 1, MPIU_INT, MPI_SUM, comm));
+  PetscCallMPI(MPI_Allreduce(&constraints_local, &constraints_min, 1, MPIU_INT, MPI_MIN, comm));
+  PetscCallMPI(MPI_Allreduce(&constraints_local, &constraints_max, 1, MPIU_INT, MPI_MAX, comm));
 
   PetscCall(PetscPrintf(comm,
                         "PARTITION_RESULT kind=dm partitioner=%s ranks=%d variant=%s mesh=%s%s refine_levels=%" PetscInt_FMT " cells_sum=%" PetscInt_FMT " cells_min=%" PetscInt_FMT " cells_max=%" PetscInt_FMT " cell_imbalance=%.6g vertices_sum=%" PetscInt_FMT " vertices_min=%" PetscInt_FMT " vertices_max=%" PetscInt_FMT " owned_rows_min=%" PetscInt_FMT " owned_rows_max=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " owned_constraints_sum=%" PetscInt_FMT " owned_constraints_min=%" PetscInt_FMT " owned_constraints_max=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT "\n",
                         part_type ? part_type : "unknown", size, app->variant_name, app->use_box_mesh ? "generated-box:" : "", app->use_box_mesh ? "unit" : app->mesh, app->refine_levels,
                         cells_sum, cells_min, cells_max, cells_sum ? ((double)cells_max * (double)size) / (double)cells_sum : 0.0, vertices_sum, vertices_min, vertices_max, owned_min, owned_max, global_rows,
-                        constraints_sum, constraints_min, constraints_max, actx->n_constrained_all));
+                        constraints_sum, constraints_min, constraints_max, constraints_global));
 
   PetscCall(PetscObjectTypeCompare((PetscObject)A, MATIS, &ismatis));
   if (ismatis) {

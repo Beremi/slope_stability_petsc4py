@@ -40,11 +40,12 @@ def _load_metadata(case_toml: Path) -> dict[str, object]:
         linear = dict(raw.get("linear", {}))
         model = str(mechanics.get("model", ""))
         analysis = "ll" if "limit" in model else ("ssr" if mechanics else "seepage")
+        mpi_ranks = int(notebook.get("mpi_ranks", benchmark.get("mpi_ranks", 8)))
         return {
             "case_dir_name": case_toml.parent.name,
             "title": str(case.get("title", case_toml.parent.name)),
             "comparison_kind": "continuation" if analysis in {"ssr", "ll"} else "seepage",
-            "mpi_ranks": 8,
+            "mpi_ranks": mpi_ranks,
             "asset": str(mesh.get("asset", "")),
             "mesh_variant": str(mesh.get("variant", "")),
             "profile": str(linear.get("profile", "pmg-deflated-baseline") or "pmg-deflated-baseline"),
@@ -250,6 +251,7 @@ def _continuation_cells():
         _code_cell(
             """
             _ = nb.plot_convergence_dashboard(artifacts)
+            _ = nb.plot_iteration_history(artifacts)
             _ = nb.plot_timing_breakdown(artifacts)
             """
         ),

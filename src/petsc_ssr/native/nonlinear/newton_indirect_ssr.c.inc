@@ -191,16 +191,28 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
     } else {
       PetscCall(AssemblePlasticResidualJacobian(actx, *lambda, u, f_ext, Ktangent, residual, PETSC_TRUE));
     }
+    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+    PetscCall(SsrStatsAddNewtonStepAssembly(stats, elapsed));
+    if (freeze_pair_matrix) PetscCall(SsrStatsAddNewtonStepResidualAssembly(stats, elapsed));
+    else PetscCall(SsrStatsAddNewtonStepTangentAssembly(stats, elapsed));
     PetscCall(ResidualNormFree(actx, residual, rhs_norm, &rel));
-    if (compute_diffs) PetscCall(ComputeLambdaDerivativeFD(actx, app, *lambda, u, f_ext, residual, residual_eps, G));
+    if (compute_diffs) {
+      SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_ASSEMBLE_RESIDUAL, dm, residual_eps, &profile_timer);
+      PetscCall(ComputeLambdaDerivativeFD(actx, app, *lambda, u, f_ext, residual, residual_eps, G));
+      SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+      PetscCall(SsrStatsAddNewtonStepAssembly(stats, elapsed));
+      PetscCall(SsrStatsAddNewtonStepResidualAssembly(stats, elapsed));
+    }
     if (!freeze_pair_matrix) {
+      SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_OPERATOR_BUILD, Areg, Ktangent, &profile_timer);
       PetscCall(BuildRegularizedOperator(Areg, Kelastic, Ktangent, r));
+      SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
+      PetscCall(SsrStatsAddNewtonStepAssembly(stats, elapsed));
+      PetscCall(SsrStatsAddNewtonStepOperatorBuild(stats, elapsed));
       have_pair_matrix    = PETSC_TRUE;
       pair_matrix_start_it = it;
       pair_matrix_r        = r;
     }
-    SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
-    PetscCall(SsrStatsAddNewtonStepAssembly(stats, elapsed));
     PetscCall(PetscPrintf(PetscObjectComm((PetscObject)dm),
                           "SSR_PAIR_MATRIX omega=%.8e it=%" PetscInt_FMT " enabled=%s mode=%s pair_start_it=%" PetscInt_FMT " current_r=%.6e matrix_r=%.6e force_pc_reuse=%s\n",
                           (double)omega_target, it, app->indirect_newton_pair_freeze_matrix ? "true" : "false",
@@ -290,6 +302,7 @@ static PetscErrorCode IndirectNewtonSolve(DM dm, AssemblyCtx *actx, AppCtx *app,
     PetscCall(IndirectNewtonLineSearch(actx, app, f_ext, u, *lambda, dU, -numer / denom, omega_target, rel, rhs_norm, u_trial, r_trial, &alpha, &trial_rel, &ls_its));
     SSR_PROFILE_TIMER_END(NULL, &profile_timer, &elapsed);
     PetscCall(SsrStatsAddNewtonStepLineSearch(stats, ls_its));
+    PetscCall(SsrStatsAddNewtonStepLineSearchTime(stats, elapsed));
     PetscCall(VecNorm(dU, NORM_2, &dU_norm));
     PetscCall(VecNorm(u, NORM_2, &u_norm));
     rel_corr = (alpha * dU_norm) / PetscMax(u_norm, 1.0);

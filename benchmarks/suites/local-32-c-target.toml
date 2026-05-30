@@ -1,0 +1,33 @@
+[suite]
+id = "local-32-c-target"
+title = "Local 32-core legacy C target match"
+cases = ["3d-heterogeneous-ssr-p4-legacy-rollers"]
+profiles = ["pmg-deflated-baseline"]
+ranks = [32]
+repeats = 1
+timeout = "00:45:00"
+
+[resources.local]
+machine = "local-32-core"
+cores = 32
+max_ranks = 32
+launcher = "mpiexec"
+time_limit = "00:45:00"
+
+[environment]
+OMP_NUM_THREADS = "1"
+
+[overrides.continuation]
+omega_max = 7000000.0
+step_max = 100
+
+[overrides.linear]
+rtol = 0.1
+max_it = 200
+
+[collect]
+petsc_log_view = true
+options_view = true
+options_left = true
+environment = true
+resolved_manifest = true

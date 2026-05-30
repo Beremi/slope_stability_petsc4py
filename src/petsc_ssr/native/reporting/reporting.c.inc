@@ -13,6 +13,9 @@ typedef struct {
   PetscReal      rel_residual;
   PetscReal      rel_correction;
   PetscLogDouble step_wall_time;
+  PetscLogDouble assembly_time;
+  PetscLogDouble solve_time;
+  PetscLogDouble line_search_time;
   char           stop_reason[64];
 } SSRCurveRow;
 
@@ -209,7 +212,7 @@ static PetscErrorCode CurveWriteHeader(FILE *fp)
 {
   PetscFunctionBeginUser;
   if (!fp) PetscFunctionReturn(PETSC_SUCCESS);
-  PetscCheck(fprintf(fp, "step,phase,omega,lambda,d_omega,d_lambda,u_max,attempts,newton_iterations,linear_iterations,line_search_iterations,rel_residual,rel_correction,step_wall_time,stop_reason\n") > 0,
+  PetscCheck(fprintf(fp, "step,phase,omega,lambda,d_omega,d_lambda,u_max,attempts,newton_iterations,linear_iterations,line_search_iterations,rel_residual,rel_correction,step_wall_time,assembly_time,solve_time,line_search_time,stop_reason\n") > 0,
              PETSC_COMM_SELF, PETSC_ERR_FILE_WRITE, "Failed to write continuation CSV header");
   fflush(fp);
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -220,10 +223,11 @@ static PetscErrorCode CurveWriteRow(FILE *fp, const SSRCurveRow *row)
   PetscFunctionBeginUser;
   if (!fp) PetscFunctionReturn(PETSC_SUCCESS);
   PetscCheck(fprintf(fp,
-                     "%" PetscInt_FMT ",%s,%.16e,%.16e,%.16e,%.16e,%.16e,%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT ",%.16e,%.16e,%.16e,%s\n",
+                     "%" PetscInt_FMT ",%s,%.16e,%.16e,%.16e,%.16e,%.16e,%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT ",%" PetscInt_FMT ",%.16e,%.16e,%.16e,%.16e,%.16e,%.16e,%s\n",
                      row->step, row->phase, (double)row->omega, (double)row->lambda, (double)row->d_omega, (double)row->d_lambda,
                      (double)row->u_max, row->attempts, row->newton_iterations, row->linear_iterations, row->line_search_iterations,
-                     (double)row->rel_residual, (double)row->rel_correction, (double)row->step_wall_time, row->stop_reason) > 0,
+                     (double)row->rel_residual, (double)row->rel_correction, (double)row->step_wall_time, (double)row->assembly_time,
+                     (double)row->solve_time, (double)row->line_search_time, row->stop_reason) > 0,
              PETSC_COMM_SELF, PETSC_ERR_FILE_WRITE, "Failed to write continuation CSV row");
   fflush(fp);
   PetscFunctionReturn(PETSC_SUCCESS);
@@ -305,8 +309,31 @@ static PetscErrorCode WriteSummaryJSON(const AppCtx *app, PetscMPIInt ranks, con
                      "  \"deflation_coarse_initial_time\": %.17g,\n"
                      "  \"deflation_coarse_initial_calls\": %" PetscInt_FMT ",\n"
                      "  \"deflation_pc_apply_time\": %.17g,\n"
+                     "  \"deflation_base_pc_apply_time\": %.17g,\n"
                      "  \"deflation_projector_time\": %.17g,\n"
                      "  \"deflation_projected_pc_calls\": %" PetscInt_FMT ",\n"
+                     "  \"assembly_time\": %.17g,\n"
+                     "  \"tangent_assembly_time\": %.17g,\n"
+                     "  \"residual_assembly_time\": %.17g,\n"
+                     "  \"operator_build_time\": %.17g,\n"
+                     "  \"linear_solve_time\": %.17g,\n"
+                     "  \"ksp_setup_time\": %.17g,\n"
+                     "  \"preconditioner_setup_time\": %.17g,\n"
+                     "  \"line_search_time\": %.17g,\n"
+                     "  \"pmg_apply_calls\": %" PetscInt_FMT ",\n"
+                     "  \"pmg_operator_updates\": %" PetscInt_FMT ",\n"
+                     "  \"pmg_operator_update_time\": %.17g,\n"
+                     "  \"pmg_fine_smooth_time\": %.17g,\n"
+                     "  \"pmg_p2_smooth_time\": %.17g,\n"
+                     "  \"pmg_restrict_time\": %.17g,\n"
+                     "  \"pmg_prolong_time\": %.17g,\n"
+                     "  \"pmg_transfer_time\": %.17g,\n"
+                     "  \"pmg_coarse_solve_time\": %.17g,\n"
+                     "  \"pmg_residual_time\": %.17g,\n"
+                     "  \"linear_operator_matvec_time\": %.17g,\n"
+                     "  \"krylov_orthogonalization_time\": %.17g,\n"
+                     "  \"krylov_least_squares_time\": %.17g,\n"
+                     "  \"krylov_solution_update_time\": %.17g,\n"
                      "  \"native_problem_manifest\": \"%s\",\n"
                      "  \"mechanics_bc_labels_csv\": \"%s\",\n"
                      "  \"mechanics_neumann_labels_csv\": \"%s\",\n"
@@ -327,8 +354,18 @@ static PetscErrorCode WriteSummaryJSON(const AppCtx *app, PetscMPIInt ranks, con
                      app->deflation_projector_name, app->deflation_max_vectors, solver->n_raw_basis,
                      (double)solver->deflation_orthogonalization_time,
                      (double)solver->deflation_coarse_time, solver->deflation_coarse_calls,
-                     (double)solver->deflation_pc_apply_time, (double)solver->deflation_projector_time,
-                     solver->deflation_projected_pc_calls, app->native_problem_manifest, app->mechanics_bc_labels_csv, app->mechanics_neumann_labels_csv, app->seepage_boundary_labels_csv, app->curve_csv,
+                     (double)solver->deflation_pc_apply_time, (double)solver->deflation_pc_apply_time, (double)solver->deflation_projector_time,
+                     solver->deflation_projected_pc_calls, (double)stats->assembly_time, (double)stats->tangent_assembly_time,
+                     (double)stats->residual_assembly_time, (double)stats->operator_build_time,
+                     (double)stats->linear_solve_time, (double)solver->ksp_setup_time, (double)solver->ksp_setup_time,
+                     (double)stats->line_search_time, solver->pmg_apply_calls, solver->pmg_operator_updates,
+                     (double)solver->pmg_operator_update_time, (double)solver->pmg_fine_smooth_time,
+                     (double)solver->pmg_p2_smooth_time, (double)solver->pmg_restrict_time, (double)solver->pmg_prolong_time,
+                     (double)(solver->pmg_restrict_time + solver->pmg_prolong_time), (double)solver->pmg_coarse_solve_time,
+                     (double)solver->pmg_residual_time, (double)solver->linear_operator_matvec_time,
+                     (double)solver->krylov_orthogonalization_time, (double)solver->krylov_least_squares_time,
+                     (double)solver->krylov_solution_update_time,
+                     app->native_problem_manifest, app->mechanics_bc_labels_csv, app->mechanics_neumann_labels_csv, app->seepage_boundary_labels_csv, app->curve_csv,
                      app->solution_binary, app->solution_vtk, app->solution_points_csv) > 0,
              PETSC_COMM_SELF, PETSC_ERR_FILE_WRITE, "Failed to write summary JSON %s", app->summary_json);
   fclose(fp);
@@ -355,6 +392,9 @@ static PetscErrorCode FillCurveRow(SSRCurveRow *row, PetscInt step, const char p
     row->rel_residual          = stats->final_rel;
     row->rel_correction        = stats->final_rel_correction;
     row->step_wall_time        = stats->wall_time;
+    row->assembly_time         = stats->assembly_time;
+    row->solve_time            = stats->solve_time;
+    row->line_search_time      = stats->line_search_time;
   }
   PetscFunctionReturn(PETSC_SUCCESS);
 }

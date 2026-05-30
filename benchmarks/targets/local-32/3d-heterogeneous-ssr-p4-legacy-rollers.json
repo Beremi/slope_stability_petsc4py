@@ -1,0 +1,48 @@
+{
+  "case": "3d-heterogeneous-ssr-p4-legacy-rollers",
+  "profile": "pmg-deflated-baseline",
+  "suite": "local-32-c-target",
+  "status": "measured_c_baseline_20260523",
+  "notes": "Historical local C/PETSc unrefined L1 target. This target belongs to the legacy roller-support mesh profile; the canonical 3d-heterogeneous-ssr-p4 case now uses glued-bottom support.",
+  "metrics": {},
+  "rank_metrics": {
+    "32": {
+      "metrics": {
+        "wall_time": {
+          "max": 190.528
+        },
+        "continuation_wall_time": {
+          "max": 188.6742
+        },
+        "total_newton_its": {
+          "max": 86.7
+        },
+        "total_linear_its": {
+          "max": 882.8
+        },
+        "lambda_last": {
+          "expected": 1.570195,
+          "abs_tol": 1e-6
+        },
+        "final_rel": {
+          "max": 0.02516848
+        },
+        "global_dofs": {
+          "expected": 616322,
+          "abs_tol": 0
+        },
+        "deflation_pc_apply_time": {
+          "max": 80.61261
+        },
+        "deflation_orthogonalization_time": {
+          "max": 21.20604
+        },
+        "deflation_projector_time": {
+          "max": 10.634949
+        }
+      },
+      "source": "benchmarks/targets/l1-unrefined-c-target.json",
+      "source_profile": "split_smoother_redundant_p1"
+    }
+  }
+}

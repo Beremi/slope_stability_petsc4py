@@ -419,6 +419,245 @@ static PetscErrorCode ReplaceExtraConstraints(AssemblyCtx *ctx, PetscInt nidx, P
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+static PetscErrorCode AssemblyZeroDisplacement(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nc, PetscScalar *u, void *ctx)
+{
+  PetscFunctionBeginUser;
+  (void)dim;
+  (void)time;
+  (void)x;
+  (void)ctx;
+  for (PetscInt c = 0; c < Nc; ++c) u[c] = 0.0;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode LabelRuleComponents(const LabelConstraintRule *rule, PetscInt dim, PetscInt components[3], PetscInt *ncomponents)
+{
+  PetscFunctionBeginUser;
+  *ncomponents = 0;
+  for (PetscInt c = dim; c < 3; ++c) {
+    PetscCheck(!rule->constrained[c], PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG,
+               "Mechanics label constraint row %s constrains component %" PetscInt_FMT " but mesh dimension is %" PetscInt_FMT,
+               rule->support_name, c, dim);
+  }
+  for (PetscInt c = 0; c < dim && c < 3; ++c) {
+    if (rule->constrained[c]) components[(*ncomponents)++] = c;
+  }
+  PetscCheck(*ncomponents > 0, PETSC_COMM_SELF, PETSC_ERR_ARG_WRONG, "Mechanics label constraint row %s has no constrained components", rule->support_name);
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode MarkBoundaryPoint(DMLabel boundary_label, PetscInt point, PetscInt *marked)
+{
+  PetscInt existing = -1;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMLabelGetValue(boundary_label, point, &existing));
+  if (existing != 1) {
+    PetscCall(DMLabelSetValue(boundary_label, point, 1));
+    ++*marked;
+  }
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode MarkFaceLabelBoundaryPoints(DM dm, IS points, DMLabel boundary_label, PetscInt *marked)
+{
+  const PetscInt *face_idx = NULL;
+  PetscInt        nfaces = 0;
+
+  PetscFunctionBeginUser;
+  if (!points) PetscFunctionReturn(PETSC_SUCCESS);
+  PetscCall(ISGetLocalSize(points, &nfaces));
+  PetscCall(ISGetIndices(points, &face_idx));
+  for (PetscInt i = 0; i < nfaces; ++i) {
+    PetscInt nclosure = 0, *closure = NULL;
+
+    PetscCall(DMPlexGetTransitiveClosure(dm, face_idx[i], PETSC_TRUE, &nclosure, &closure));
+    for (PetscInt j = 0; j < nclosure; ++j) PetscCall(MarkBoundaryPoint(boundary_label, closure[2 * j], marked));
+    PetscCall(DMPlexRestoreTransitiveClosure(dm, face_idx[i], PETSC_TRUE, &nclosure, &closure));
+  }
+  PetscCall(ISRestoreIndices(points, &face_idx));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+static PetscErrorCode MarkVertexLabelBoundaryPoints(DM dm, IS points, DMLabel boundary_label, PetscInt *marked)
+{
+  IS              expanded_points = NULL;
+  const PetscInt *selected = NULL;
+  PetscInt       *expanded = NULL;
+  PetscInt        nselected = 0, nexpanded = 0, cap_expanded = 0;
+  PetscInt        dim = 0, pStart, pEnd;
+
+  PetscFunctionBeginUser;
+  PetscCall(DMGetDimension(dm, &dim));
+  PetscCall(DMPlexGetChart(dm, &pStart, &pEnd));
+  if (points) {
+    const PetscInt *raw_points = NULL;
+    PetscInt        nraw = 0;
+
+    PetscCall(ISGetLocalSize(points, &nraw));
+    PetscCall(ISGetIndices(points, &raw_points));
+    for (PetscInt i = 0; i < nraw; ++i) {
+      PetscInt nclosure = 0, *closure = NULL;
+
+      PetscCall(AppendPoint(raw_points[i], &expanded, &nexpanded, &cap_expanded));
+      PetscCall(DMPlexGetTransitiveClosure(dm, raw_points[i], PETSC_TRUE, &nclosure, &closure));
+      for (PetscInt j = 0; j < nclosure; ++j) {
+        PetscInt p = closure[2 * j], depth = -1;
+
+        PetscCall(PointDepthFromStrata(dm, p, dim, &depth));
+        if (depth == 0) PetscCall(AppendPoint(p, &expanded, &nexpanded, &cap_expanded));
+      }
+      PetscCall(DMPlexRestoreTransitiveClosure(dm, raw_points[i], PETSC_TRUE, &nclosure, &closure));
+    }
+    PetscCall(ISRestoreIndices(points, &raw_points));
+    PetscCall(ISCreateGeneral(PETSC_COMM_SELF, nexpanded, expanded, PETSC_OWN_POINTER, &expanded_points));
+    expanded = NULL;
+    PetscCall(ISSortRemoveDups(expanded_points));
+    PetscCall(ISGetLocalSize(expanded_points, &nselected));
+    PetscCall(ISGetIndices(expanded_points, &selected));
+  }
+  for (PetscInt p = pStart; p < pEnd; ++p) {
+    PetscInt  depth = -1, nverts = 0;
+    PetscBool all_selected = PETSC_FALSE, touches_boundary = PETSC_FALSE, use_point = PETSC_FALSE;
+
+    PetscCall(PointDepthFromStrata(dm, p, dim, &depth));
+    if (depth < 0 || depth >= dim) continue;
+    if (depth == 0) {
+      use_point = SortedIntArrayContains(selected, nselected, p);
+    } else {
+      PetscCall(PointTouchesBoundary(dm, p, depth, dim, &touches_boundary));
+      if (touches_boundary) {
+        PetscCall(PointClosureVerticesInSet(dm, p, dim, selected, nselected, &all_selected, &nverts));
+        use_point = (PetscBool)(nverts > 0 && all_selected);
+      }
+    }
+    if (use_point) PetscCall(MarkBoundaryPoint(boundary_label, p, marked));
+  }
+  if (expanded_points) PetscCall(ISRestoreIndices(expanded_points, &selected));
+  PetscCall(ISDestroy(&expanded_points));
+  PetscCall(PetscFree(expanded));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode AssemblyApplyLabelBoundaryConditions(DM dm, const char path[], PetscInt expected_rows)
+{
+  MPI_Comm comm;
+  FILE    *fh = NULL;
+  char     line[2048];
+  PetscInt dim = 0, nrows = 0;
+
+  PetscFunctionBeginUser;
+  PetscCheck(dm, PETSC_COMM_SELF, PETSC_ERR_ARG_NULL, "DM is NULL");
+  comm = PetscObjectComm((PetscObject)dm);
+  if (!path || !path[0]) {
+    PetscCheck(expected_rows <= 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+               "Native problem manifest declares %" PetscInt_FMT " mechanics Dirichlet row(s), but no mechanics label table is available",
+               expected_rows);
+    PetscFunctionReturn(PETSC_SUCCESS);
+  }
+  fh = fopen(path, "r");
+  PetscCheck(fh, comm, PETSC_ERR_FILE_OPEN, "Cannot open mechanics label constraint CSV %s", path);
+  PetscCall(DMGetDimension(dm, &dim));
+  while (fgets(line, sizeof(line), fh)) {
+    LabelConstraintRule rule;
+    PetscBool           is_header = PETSC_FALSE, is_face_label = PETSC_FALSE, is_vertex_label = PETSC_FALSE;
+    DMLabel             source_label = NULL, boundary_label = NULL;
+    IS                  points = NULL;
+    PetscInt            local_label_points = 0, global_label_points = 0, local_marked = 0, global_marked = 0;
+    PetscInt            components[3], ncomponents = 0, marker = 1;
+    char                boundary_name[PETSC_MAX_PATH_LEN];
+
+    if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+    PetscCall(ParseLabelConstraintRule(line, &rule, &is_header));
+    if (is_header) continue;
+    nrows++;
+    PetscCheck(rule.tag > 0, comm, PETSC_ERR_ARG_WRONG, "Mechanics label constraint row %s has invalid tag %" PetscInt_FMT, rule.support_name, rule.tag);
+    PetscCall(LabelRuleComponents(&rule, dim, components, &ncomponents));
+    PetscCall(PetscStrcasecmp(rule.dm_label, "Face Sets", &is_face_label));
+    PetscCall(PetscStrcasecmp(rule.dm_label, "Vertex Sets", &is_vertex_label));
+    PetscCheck(is_face_label || is_vertex_label, comm, PETSC_ERR_SUP,
+               "Unsupported mechanics constraint DMPlex label %s for target %s", rule.dm_label, rule.support_name);
+    PetscCall(PetscSNPrintf(boundary_name, sizeof(boundary_name), "mechanics_label_%03" PetscInt_FMT "_%s", nrows, rule.support_name));
+    PetscCall(DMGetLabel(dm, boundary_name, &boundary_label));
+    if (boundary_label) {
+      IS       existing_points = NULL;
+      PetscInt local_existing = 0, global_existing = 0;
+
+      PetscCall(DMLabelGetStratumIS(boundary_label, marker, &existing_points));
+      if (existing_points) PetscCall(ISGetLocalSize(existing_points, &local_existing));
+      PetscCallMPI(MPI_Allreduce(&local_existing, &global_existing, 1, MPIU_INT, MPI_SUM, comm));
+      PetscCall(ISDestroy(&existing_points));
+      if (global_existing > 0) {
+        PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, boundary_name, boundary_label, 1, &marker, 0, ncomponents, components,
+                                (PetscVoidFn *)AssemblyZeroDisplacement, NULL, NULL, NULL));
+        PetscCall(PetscPrintf(comm,
+                              "MECHANICS_BC_LABELS_SECTION row=%" PetscInt_FMT " target=%s source_label=%s tag=%" PetscInt_FMT " components=%" PetscInt_FMT " marked_points=%" PetscInt_FMT " status=reused_dm_label\n",
+                              nrows, rule.support_name, rule.dm_label, rule.tag, ncomponents, global_existing));
+        continue;
+      }
+    }
+    PetscCall(DMGetLabel(dm, rule.dm_label, &source_label));
+    PetscCheck(source_label, comm, PETSC_ERR_ARG_WRONGSTATE, "Mesh has no DMPlex label %s for mechanics constraint target %s", rule.dm_label, rule.support_name);
+    PetscCall(DMLabelGetStratumIS(source_label, rule.tag, &points));
+    if (points) PetscCall(ISGetLocalSize(points, &local_label_points));
+    PetscCallMPI(MPI_Allreduce(&local_label_points, &global_label_points, 1, MPIU_INT, MPI_SUM, comm));
+    PetscCheck(global_label_points > 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+               "DMPlex label %s has no stratum tag %" PetscInt_FMT " for mechanics constraint target %s",
+               rule.dm_label, rule.tag, rule.support_name);
+    PetscCall(DMCreateLabel(dm, boundary_name));
+    PetscCall(DMGetLabel(dm, boundary_name, &boundary_label));
+    PetscCheck(boundary_label, comm, PETSC_ERR_PLIB, "Could not create mechanics boundary label %s", boundary_name);
+    if (is_face_label) PetscCall(MarkFaceLabelBoundaryPoints(dm, points, boundary_label, &local_marked));
+    else PetscCall(MarkVertexLabelBoundaryPoints(dm, points, boundary_label, &local_marked));
+    PetscCallMPI(MPI_Allreduce(&local_marked, &global_marked, 1, MPIU_INT, MPI_SUM, comm));
+    PetscCheck(global_marked > 0, comm, PETSC_ERR_ARG_WRONGSTATE,
+               "Mechanics label constraint row %s did not mark any DMPlex boundary points", rule.support_name);
+    PetscCall(DMAddBoundary(dm, DM_BC_ESSENTIAL, boundary_name, boundary_label, 1, &marker, 0, ncomponents, components,
+                            (PetscVoidFn *)AssemblyZeroDisplacement, NULL, NULL, NULL));
+    PetscCall(PetscPrintf(comm,
+                          "MECHANICS_BC_LABELS_SECTION row=%" PetscInt_FMT " target=%s source_label=%s tag=%" PetscInt_FMT " components=%" PetscInt_FMT " marked_points=%" PetscInt_FMT "\n",
+                          nrows, rule.support_name, rule.dm_label, rule.tag, ncomponents, global_marked));
+    PetscCall(ISDestroy(&points));
+  }
+  fclose(fh);
+  PetscCheck(nrows > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "No mechanics label constraint rows were read from %s", path);
+  PetscCheck(expected_rows < 0 || nrows == expected_rows, comm, PETSC_ERR_ARG_WRONG,
+             "Native problem manifest declares %" PetscInt_FMT " mechanics Dirichlet row(s), but label table contains %" PetscInt_FMT,
+             expected_rows, nrows);
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode AssemblyGetSectionConstraintStats(DM dm, PetscInt *local_constraints, PetscInt *global_constraints, PetscBool *active)
+{
+  MPI_Comm     comm;
+  PetscSection lsec = NULL, gsec = NULL;
+  PetscInt     pStart = 0, pEnd = 0, local_cdof = 0, global_cdof = 0;
+  PetscInt     global_storage = 0, global_constrained_storage = 0, local_eliminated = 0, global_eliminated = 0;
+
+  PetscFunctionBeginUser;
+  comm = PetscObjectComm((PetscObject)dm);
+  PetscCall(DMGetLocalSection(dm, &lsec));
+  PetscCall(DMGetGlobalSection(dm, &gsec));
+  PetscCall(PetscSectionGetChart(lsec, &pStart, &pEnd));
+  for (PetscInt p = pStart; p < pEnd; ++p) {
+    PetscInt cdof = 0;
+
+    PetscCall(PetscSectionGetConstraintDof(lsec, p, &cdof));
+    local_cdof += cdof;
+  }
+  PetscCallMPI(MPI_Allreduce(&local_cdof, &global_cdof, 1, MPIU_INT, MPI_SUM, comm));
+  if (gsec) {
+    PetscCall(PetscSectionGetStorageSize(gsec, &global_storage));
+    PetscCall(PetscSectionGetConstrainedStorageSize(gsec, &global_constrained_storage));
+    local_eliminated = PetscMax(0, global_storage - global_constrained_storage);
+    PetscCallMPI(MPI_Allreduce(&local_eliminated, &global_eliminated, 1, MPIU_INT, MPI_SUM, comm));
+  }
+  if (local_constraints) *local_constraints = local_eliminated > 0 ? local_eliminated : local_cdof;
+  if (global_constraints) *global_constraints = global_eliminated > 0 ? global_eliminated : global_cdof;
+  if (active) *active = global_cdof > 0 ? PETSC_TRUE : PETSC_FALSE;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 static PetscErrorCode StagedBoundaryCopyField(MPI_Comm comm, const char path[], const char support_name[], const char field_name[], const char text[], char dest[], size_t dest_size)
 {
   const size_t len = text ? strlen(text) : 0;
@@ -787,7 +1026,9 @@ PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char p
   PetscSection        gsec = NULL;
   PetscInt           *idx = NULL, nidx = 0, cap_idx = 0;
   PetscInt            nrows = 0, local_matched = 0, global_matched = 0, global_rows = 0;
+  PetscInt            section_local_constraints = 0, section_global_constraints = 0;
   PetscInt            dim = 0, pStart, pEnd;
+  PetscBool           section_constraints_active = PETSC_FALSE;
 
   PetscFunctionBeginUser;
   if (loaded) *loaded = PETSC_FALSE;
@@ -799,6 +1040,7 @@ PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char p
   PetscCall(DMGetDimension(ctx->dm, &dim));
   PetscCall(DMGetGlobalSection(ctx->dm, &gsec));
   PetscCall(DMPlexGetChart(ctx->dm, &pStart, &pEnd));
+  PetscCall(AssemblyGetSectionConstraintStats(ctx->dm, &section_local_constraints, &section_global_constraints, &section_constraints_active));
   while (fgets(line, sizeof(line), fh)) {
     PetscBool is_header = PETSC_FALSE, is_face_label = PETSC_FALSE, is_vertex_label = PETSC_FALSE;
     DMLabel   label = NULL;
@@ -853,8 +1095,12 @@ PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char p
           for (PetscInt j = 0; j < nclosure; ++j) {
             PetscBool added = PETSC_FALSE;
 
-            PetscCall(AppendConstraintDofsForPoint(ctx, gsec, closure[2 * j], rule.constrained, &idx, &nidx, &cap_idx, &added));
-            if (added) local_matched++;
+            if (section_constraints_active) {
+              local_matched++;
+            } else {
+              PetscCall(AppendConstraintDofsForPoint(ctx, gsec, closure[2 * j], rule.constrained, &idx, &nidx, &cap_idx, &added));
+              if (added) local_matched++;
+            }
           }
           PetscCall(DMPlexRestoreTransitiveClosure(ctx->dm, face_idx[i], PETSC_TRUE, &nclosure, &closure));
         }
@@ -886,7 +1132,7 @@ PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char p
           PetscCall(DMPlexRestoreTransitiveClosure(ctx->dm, raw_points[i], PETSC_TRUE, &nclosure, &closure));
         }
         PetscCall(ISRestoreIndices(points, &raw_points));
-        PetscCall(ISCreateGeneral(comm, nexpanded, expanded, PETSC_OWN_POINTER, &expanded_points));
+        PetscCall(ISCreateGeneral(PETSC_COMM_SELF, nexpanded, expanded, PETSC_OWN_POINTER, &expanded_points));
         PetscCall(ISSortRemoveDups(expanded_points));
         PetscCall(ISGetLocalSize(expanded_points, &nselected));
         PetscCall(ISGetIndices(expanded_points, &selected));
@@ -909,8 +1155,12 @@ PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char p
         if (use_point) {
           PetscBool added = PETSC_FALSE;
 
-          PetscCall(AppendConstraintDofsForPoint(ctx, gsec, p, rule.constrained, &idx, &nidx, &cap_idx, &added));
-          if (added) local_matched++;
+          if (section_constraints_active) {
+            local_matched++;
+          } else {
+            PetscCall(AppendConstraintDofsForPoint(ctx, gsec, p, rule.constrained, &idx, &nidx, &cap_idx, &added));
+            if (added) local_matched++;
+          }
         }
       }
       if (expanded_points) PetscCall(ISRestoreIndices(expanded_points, &selected));
@@ -925,19 +1175,28 @@ PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char p
 
   PetscCallMPI(MPI_Allreduce(&local_matched, &global_matched, 1, MPIU_INT, MPI_SUM, comm));
   PetscCallMPI(MPI_Allreduce(&nidx, &global_rows, 1, MPIU_INT, MPI_SUM, comm));
-  PetscCheck(global_rows > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "Mechanics label constraint CSV %s did not resolve to any algebraic rows", path);
-  PetscCall(ReplaceExtraConstraints(ctx, nidx, idx));
+  if (section_constraints_active) {
+    global_rows = section_global_constraints;
+    PetscCheck(global_rows > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "Mechanics label constraint CSV %s did not install any PETSc section constraints", path);
+    PetscCall(PetscFree(idx));
+  } else {
+    PetscCheck(global_rows > 0, comm, PETSC_ERR_ARG_WRONGSTATE, "Mechanics label constraint CSV %s did not resolve to any algebraic rows", path);
+    PetscCall(ReplaceExtraConstraints(ctx, nidx, idx));
+  }
   if (stats) {
     stats->rows = nrows;
     stats->matched_points = global_matched;
     stats->raw_constrained_rows = global_rows;
-    stats->owned_constraints = ctx->n_constrained_local;
-    stats->global_constraints = ctx->n_constrained_all;
+    stats->owned_constraints = section_constraints_active ? section_local_constraints : ctx->n_constrained_local;
+    stats->global_constraints = section_constraints_active ? section_global_constraints : ctx->n_constrained_all;
   }
   if (loaded) *loaded = PETSC_TRUE;
   PetscCall(PetscPrintf(comm,
-                        "MECHANICS_BC_LABELS_CONFIG enabled=true path=%s rows=%" PetscInt_FMT " matched_points=%" PetscInt_FMT " raw_constrained_rows=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT "\n",
-                        path, nrows, global_matched, global_rows, ctx->n_constrained_local, ctx->n_constrained_all));
+                        "MECHANICS_BC_LABELS_CONFIG enabled=true path=%s rows=%" PetscInt_FMT " matched_points=%" PetscInt_FMT " raw_constrained_rows=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " source=%s\n",
+                        path, nrows, global_matched, global_rows,
+                        section_constraints_active ? section_local_constraints : ctx->n_constrained_local,
+                        section_constraints_active ? section_global_constraints : ctx->n_constrained_all,
+                        section_constraints_active ? "petsc_section" : "algebraic_rows"));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -1250,6 +1509,7 @@ PetscErrorCode AssemblyWriteDisplacementPointCSV(AssemblyCtx *ctx, Vec u, const 
   PetscCall(DMGetLocalVector(dm, &u_loc));
   PetscCall(DMGlobalToLocalBegin(dm, u, INSERT_VALUES, u_loc));
   PetscCall(DMGlobalToLocalEnd(dm, u, INSERT_VALUES, u_loc));
+  PetscCall(DMPlexInsertBoundaryValues(dm, PETSC_TRUE, u_loc, 0.0, NULL, NULL, NULL));
   PetscCall(PetscViewerASCIIOpen(comm, path, &viewer));
   PetscCall(PetscViewerASCIIPushSynchronized(viewer));
   if (rank == 0) PetscCall(PetscViewerASCIIPrintf(viewer, "x,y,z,ux,uy,uz\n"));
@@ -1270,15 +1530,23 @@ PetscErrorCode AssemblyWriteDisplacementPointCSV(AssemblyCtx *ctx, Vec u, const 
     for (PetscInt b = 0; b < ctx->basis->n_basis; ++b) {
       PetscInt  key = -1;
       PetscReal x[3], disp[3] = {0.0, 0.0, 0.0};
+      PetscBool constrained_only = PETSC_FALSE, has_constrained = PETSC_FALSE, has_unconstrained = PETSC_FALSE;
 
       for (PetscInt c = 0; c < ctx->basis->components; ++c) {
         const PetscInt idx = b * ctx->basis->components + c;
         if (c < 3) disp[c] = PetscRealPart(u_cell[idx]);
         if (key < 0 && gidx[idx] >= lo && gidx[idx] < hi) key = gidx[idx];
+        if (gidx[idx] < 0) has_constrained = PETSC_TRUE;
+        else has_unconstrained = PETSC_TRUE;
       }
-      if (key < lo || key >= hi) continue;
-      if (seen[key - lo]) continue;
-      seen[key - lo] = PETSC_TRUE;
+      if (key < lo || key >= hi) {
+        if (!has_constrained || has_unconstrained) continue;
+        constrained_only = PETSC_TRUE;
+      }
+      if (!constrained_only) {
+        if (seen[key - lo]) continue;
+        seen[key - lo] = PETSC_TRUE;
+      }
       nseen++;
       ReferenceToPhysical(ctx->basis, &ctx->basis_ref_points[ctx->basis->dim * b], v0, J, x);
       PetscCall(PetscViewerASCIISynchronizedPrintf(viewer, "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",

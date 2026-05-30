@@ -84,6 +84,8 @@ typedef struct {
 
 PetscErrorCode AssemblyCtxCreate(DM dm, P4Basis *basis, AssemblyCtx *ctx);
 PetscErrorCode AssemblyCtxDestroy(AssemblyCtx *ctx);
+PetscErrorCode AssemblyApplyLabelBoundaryConditions(DM dm, const char path[], PetscInt expected_rows);
+PetscErrorCode AssemblyGetSectionConstraintStats(DM dm, PetscInt *local_constraints, PetscInt *global_constraints, PetscBool *active);
 PetscErrorCode AssemblyCtxLoadSeepagePressureCSV(AssemblyCtx *ctx, const char path[], PetscReal grho);
 PetscErrorCode AssemblyCtxLoadLabelConstraintsCSV(AssemblyCtx *ctx, const char path[], PetscBool *loaded, AssemblyLabelConstraintStats *stats);
 PetscErrorCode AssemblyCtxLoadNeumannLabelsCSV(AssemblyCtx *ctx, const char path[], AssemblyNeumannLabelStats *stats);

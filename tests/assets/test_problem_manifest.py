@@ -93,9 +93,40 @@ def test_mechanics_label_constraint_rows_are_coordinate_free(monkeypatch) -> Non
     assert {row["support_kind"] for row in rows} == {"boundary", "nodeset"}
     assert {row["dm_label"] for row in rows} == {"Face Sets", "Vertex Sets"}
     assert all(int(row["tag"]) > 0 for row in rows)
-    assert {row["components"] for row in rows} == {"x", "y", "z"}
+    assert {row["support_name"]: row["components"] for row in rows} == {
+        "base": "x y z",
+        "x_lock": "x",
+        "z_lock": "z",
+    }
     assert {row["native_status"] for row in rows} == {"label_table_native_preferred"}
     assert {"x", "y", "z", "node", "coordinate"}.isdisjoint(rows[0])
+
+
+def test_heterogeneous_legacy_c_rollers_profile_uses_boundary_supports(monkeypatch) -> None:
+    monkeypatch.setenv("PETSC_SSR_WORLD_SIZE", "32")
+    case_toml = CASE_ROOT / "3d-heterogeneous-ssr-p4-legacy-rollers" / "case.toml"
+    cfg = load_run_case_config(case_toml).validate()
+    resolved = resolve_problem_asset_from_config(cfg)
+
+    rows = build_mechanics_label_constraint_rows(resolved)
+
+    assert len(rows) == 5
+    assert {row["support_kind"] for row in rows} == {"boundary"}
+    assert {row["dm_label"] for row in rows} == {"Face Sets"}
+    assert {row["support_name"]: row["components"] for row in rows} == {
+        "base": "y",
+        "x_min": "x",
+        "x_max": "x",
+        "z_min": "z",
+        "z_max": "z",
+    }
+
+    from petsc_ssr.case_config import translate_case_toml
+
+    translation = translate_case_toml(case_toml)
+    assert translation.supported, translation.reason
+    assert translation.problem is not None
+    assert translation.problem.boundary.mode == "rollers"
 
 
 def test_case_artifacts_write_label_table_and_manifest_path(monkeypatch, tmp_path: Path) -> None:
@@ -813,10 +844,14 @@ def test_native_c_consumes_manifest_option_for_options_left_cleanliness() -> Non
     assert "NativeProblemManifestApply(&ctx->app)" in cython_source
     assert "AssemblyCtxLoadLabelConstraintsCSV" in assembly_header
     assert "AssemblyCtxLoadLabelConstraintsCSV" in assembly_source
+    assert "AssemblyApplyLabelBoundaryConditions" in assembly_header
+    assert "AssemblyApplyLabelBoundaryConditions" in assembly_source
     assert "AssemblyLabelConstraintStats" in assembly_header
     assert "PetscSectionGetConstraintDof(gsec, point" not in assembly_source
     assert "AppendPoint(raw_points[i], &expanded" in assembly_source
     assert "DMPlexGetTransitiveClosure(ctx->dm, raw_points[i]" in assembly_source
+    assert "ISCreateGeneral(PETSC_COMM_SELF, nexpanded, expanded, PETSC_OWN_POINTER, &expanded_points)" in assembly_source
+    assert "ISCreateGeneral(comm, nexpanded, expanded, PETSC_OWN_POINTER, &expanded_points)" not in assembly_source
     assert "AppendExistingSectionConstraintDofsForComponents" in assembly_source
     assert "missing_vertex_label_using_section_constraints" in assembly_source
     assert "DMGetLocalSection(ctx->dm, &lsec)" in assembly_source
@@ -897,6 +932,26 @@ def test_native_c_consumes_manifest_option_for_options_left_cleanliness() -> Non
     assert "mechanics_bc_labels_csv" in reporting_source
     assert "mechanics_neumann_labels_csv" in reporting_source
     assert "seepage_boundary_labels_csv" in reporting_source
+
+
+def test_native_label_table_installs_section_boundary_modes() -> None:
+    context_source = (ROOT / "src" / "petsc_ssr" / "native" / "core" / "context.c.inc").read_text(encoding="utf-8")
+    assembly_source = (ROOT / "src" / "petsc_ssr" / "native" / "assembly" / "assembly.c").read_text(encoding="utf-8")
+
+    assert "MechanicsLabelConstraintTableActive" in context_source
+    assert "app->mechanics_bc_labels_csv[0]" in context_source
+    assert "app->native_manifest_mechanics_dirichlet <= 0" in context_source
+    assert "-dm_plex_gmsh_mark_vertices" in context_source
+    assert "MECHANICS_BC_LABELS_VERTEX_MARKING" in context_source
+    assert "petsc_section_boundaries_enabled" in context_source
+    assert "AssemblyApplyLabelBoundaryConditions" in context_source
+    assert "MECHANICS_BC_LABELS_SECTION" in assembly_source
+    assert "DMAddBoundary(dm, DM_BC_ESSENTIAL, boundary_name" in assembly_source
+    add_bc_start = context_source.index("static PetscErrorCode AddPlasticityBoundaryConditions")
+    add_bc_source = context_source[add_bc_start : context_source.index("static PetscErrorCode CreateMesh")]
+    assert context_source.index("MechanicsLabelConstraintTableActive") < add_bc_start
+    assert add_bc_source.index("petsc_section_boundaries_enabled") < add_bc_source.index("PetscFunctionReturn(PETSC_SUCCESS);")
+    assert add_bc_source.index("AssemblyApplyLabelBoundaryConditions") < add_bc_source.index("PetscFunctionReturn(PETSC_SUCCESS);")
 
 
 def _all_keys(value: object) -> set[str]:

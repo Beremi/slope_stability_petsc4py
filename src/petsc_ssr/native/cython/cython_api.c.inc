@@ -10,7 +10,7 @@ static PetscErrorCode P4SsrEngineCheckSlot(P4SsrEngine *ctx, PetscInt slot)
 PetscErrorCode P4SsrEngineCreateOptionsString(const char options[], P4SsrEngine **out)
 {
   P4SsrEngine   *ctx = NULL;
-  PetscInt       cStart, cEnd, nStart, nEnd, local_dofs;
+  PetscInt       cStart, cEnd, nStart, nEnd, local_dofs, reported_owned_constraints = 0, reported_global_constraints = 0;
   PetscLogDouble  elapsed;
   SsrProfileTimer create_timer, profile_timer;
 
@@ -52,11 +52,17 @@ PetscErrorCode P4SsrEngineCreateOptionsString(const char options[], P4SsrEngine 
   PetscCall(VecGetLocalSize(ctx->states[0], &local_dofs));
   PetscCall(VecGetSize(ctx->states[0], &ctx->global_dofs));
   PetscCall(AssemblyCtxCreate(ctx->dm, &ctx->basis, &ctx->actx));
+  reported_owned_constraints = ctx->actx.n_constrained_local;
+  reported_global_constraints = ctx->actx.n_constrained_all;
   {
     PetscBool                    label_constraints_loaded = PETSC_FALSE;
     AssemblyLabelConstraintStats label_stats;
 
     PetscCall(AssemblyCtxLoadLabelConstraintsCSV(&ctx->actx, ctx->app.mechanics_bc_labels_csv, &label_constraints_loaded, &label_stats));
+    if (label_constraints_loaded) {
+      reported_owned_constraints = label_stats.owned_constraints;
+      reported_global_constraints = label_stats.global_constraints;
+    }
     if (ctx->app.native_problem_manifest_loaded) {
       PetscCheck(label_stats.rows == ctx->app.native_manifest_mechanics_dirichlet, PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG,
                  "Native problem manifest declares %" PetscInt_FMT " mechanics Dirichlet row(s), but label table contains %" PetscInt_FMT,
@@ -67,6 +73,8 @@ PetscErrorCode P4SsrEngineCreateOptionsString(const char options[], P4SsrEngine 
     if (ctx->app.mechanics_bc_nodes_csv[0]) {
       if (label_constraints_loaded) PetscCall(PetscPrintf(PETSC_COMM_WORLD, "MECHANICS_BC_NODES_CONFIG path=%s status=debug_coordinate_override\n", ctx->app.mechanics_bc_nodes_csv));
       PetscCall(AssemblyCtxLoadCoordinateConstraintsCSV(&ctx->actx, ctx->app.mechanics_bc_nodes_csv));
+      reported_owned_constraints = ctx->actx.n_constrained_local;
+      reported_global_constraints = ctx->actx.n_constrained_all;
     } else if (!label_constraints_loaded) PetscCall(AssemblyCtxLoadCoordinateConstraintsCSV(&ctx->actx, ctx->app.mechanics_bc_nodes_csv));
   }
   if (ctx->app.seepage_pressure_csv[0]) {
@@ -88,7 +96,7 @@ PetscErrorCode P4SsrEngineCreateOptionsString(const char options[], P4SsrEngine 
                         "PY_ENGINE_CREATE mesh=%s%s refine_levels=%" PetscInt_FMT " mechanics_dim=%" PetscInt_FMT " element_degree=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " local_dofs=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " basis_functions=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " pc_variant=%s pmg_backend=%s bc=%s omega_max=%.6g lambda_init=%.6g d_lambda_init=%.6g\n",
                         ctx->app.use_box_mesh ? "generated-box:" : "", ctx->app.use_box_mesh ? "unit" : ctx->app.mesh, ctx->app.refine_levels,
                         ctx->basis.dim, ctx->basis.degree, cEnd - cStart, nEnd - nStart, local_dofs, ctx->global_dofs, ctx->basis.n_basis,
-                        ctx->actx.n_constrained_local, ctx->actx.n_constrained_all, ctx->app.variant_name,
+                        reported_owned_constraints, reported_global_constraints, ctx->app.variant_name,
                         ctx->app.pmg_apply_backend, ctx->app.mesh_bc_mode, (double)ctx->app.omega_max,
                         (double)ctx->app.lambda_init, (double)ctx->app.d_lambda_init));
   SSR_PROFILE_TIMER_BEGIN(NULL, SSR_EVENT_ASSEMBLE_ELASTIC, ctx->Kelastic, ctx->f_ext, &profile_timer);

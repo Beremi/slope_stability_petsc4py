@@ -9,7 +9,7 @@ PetscErrorCode P4IndirectSSRRunFromOptions(void)
   Mat             Areg = NULL, Kelastic = NULL, Ktangent = NULL;
   Vec             u = NULL, f_ext = NULL;
   PetscInt        cStart, cEnd, nStart, nEnd;
-  PetscInt        local_dofs, global_dofs;
+  PetscInt        local_dofs, global_dofs, reported_owned_constraints = 0, reported_global_constraints = 0;
   PetscReal       rhs_norm;
   PetscLogDouble  elastic_assembly_time, dirichlet_time, wall_time;
   SsrProfileTimer run_timer, profile_timer;
@@ -36,11 +36,17 @@ PetscErrorCode P4IndirectSSRRunFromOptions(void)
   PetscCall(VecGetLocalSize(u, &local_dofs));
   PetscCall(VecGetSize(u, &global_dofs));
   PetscCall(AssemblyCtxCreate(dm, &basis, &actx));
+  reported_owned_constraints = actx.n_constrained_local;
+  reported_global_constraints = actx.n_constrained_all;
   {
     PetscBool                    label_constraints_loaded = PETSC_FALSE;
     AssemblyLabelConstraintStats label_stats;
 
     PetscCall(AssemblyCtxLoadLabelConstraintsCSV(&actx, app.mechanics_bc_labels_csv, &label_constraints_loaded, &label_stats));
+    if (label_constraints_loaded) {
+      reported_owned_constraints = label_stats.owned_constraints;
+      reported_global_constraints = label_stats.global_constraints;
+    }
     if (app.native_problem_manifest_loaded) {
       PetscCheck(label_stats.rows == app.native_manifest_mechanics_dirichlet, PETSC_COMM_WORLD, PETSC_ERR_ARG_WRONG,
                  "Native problem manifest declares %" PetscInt_FMT " mechanics Dirichlet row(s), but label table contains %" PetscInt_FMT,
@@ -51,6 +57,8 @@ PetscErrorCode P4IndirectSSRRunFromOptions(void)
     if (app.mechanics_bc_nodes_csv[0]) {
       if (label_constraints_loaded) PetscCall(PetscPrintf(PETSC_COMM_WORLD, "MECHANICS_BC_NODES_CONFIG path=%s status=debug_coordinate_override\n", app.mechanics_bc_nodes_csv));
       PetscCall(AssemblyCtxLoadCoordinateConstraintsCSV(&actx, app.mechanics_bc_nodes_csv));
+      reported_owned_constraints = actx.n_constrained_local;
+      reported_global_constraints = actx.n_constrained_all;
     } else if (!label_constraints_loaded) PetscCall(AssemblyCtxLoadCoordinateConstraintsCSV(&actx, app.mechanics_bc_nodes_csv));
   }
   if (app.seepage_pressure_csv[0]) {
@@ -71,7 +79,7 @@ PetscErrorCode P4IndirectSSRRunFromOptions(void)
 
   PetscCall(PetscPrintf(PETSC_COMM_WORLD,
                         "mesh=%s%s refine_levels=%" PetscInt_FMT " mechanics_dim=%" PetscInt_FMT " element_degree=%" PetscInt_FMT " local_cells=%" PetscInt_FMT " local_vertices=%" PetscInt_FMT " local_dofs=%" PetscInt_FMT " global_dofs=%" PetscInt_FMT " basis_functions=%" PetscInt_FMT " owned_constraints=%" PetscInt_FMT " global_constraints=%" PetscInt_FMT " analysis=%s continuation_method=%s pc_variant=%s pmg_backend=%s bc=%s omega_max=%.6g lambda_init=%.6g d_lambda_init=%.6g curve_csv=%s\n",
-                        app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, basis.dim, basis.degree, cEnd - cStart, nEnd - nStart, local_dofs, global_dofs, basis.n_basis, actx.n_constrained_local, actx.n_constrained_all, app.analysis, app.continuation_method, app.variant_name, app.pmg_apply_backend, app.mesh_bc_mode, (double)app.omega_max, (double)app.lambda_init, (double)app.d_lambda_init, app.curve_csv));
+                        app.use_box_mesh ? "generated-box:" : "", app.use_box_mesh ? "unit" : app.mesh, app.refine_levels, basis.dim, basis.degree, cEnd - cStart, nEnd - nStart, local_dofs, global_dofs, basis.n_basis, reported_owned_constraints, reported_global_constraints, app.analysis, app.continuation_method, app.variant_name, app.pmg_apply_backend, app.mesh_bc_mode, (double)app.omega_max, (double)app.lambda_init, (double)app.d_lambda_init, app.curve_csv));
   if (app.inspect_partition) {
     PetscCall(ReportPartitionDiagnostics(dm, Areg, u, &actx, &app));
     SSR_PROFILE_TIMER_END(NULL, &run_timer, &wall_time);

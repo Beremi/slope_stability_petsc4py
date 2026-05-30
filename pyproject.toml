@@ -18,7 +18,7 @@ seepage = ["scipy>=1.10"]
 notebooks = [
   "nbformat>=5.9",
   "nbclient>=0.8",
-  "pyvista>=0.43",
+  "pyvista[jupyter]>=0.43",
   "ipywidgets>=8.0",
   "matplotlib>=3.7",
   "meshio>=5.3",

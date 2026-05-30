@@ -44,6 +44,10 @@ static const char *const ssr_event_names[SSR_EVENT_COUNT] = {
   "SSR Deflation Coarse",
   "SSR Deflation PC Apply",
   "SSR Deflation Project",
+  "SSR Linear Operator MatMult",
+  "SSR Krylov Orthogonalize",
+  "SSR Krylov Least Squares",
+  "SSR Krylov Solution Update",
   "SSR Line Search",
   "SSR Output Write",
   "SSR Continuation Run",
@@ -189,6 +193,27 @@ PetscErrorCode SsrStatsAddNewtonStepAssembly(SsrNewtonStepStats *stats, PetscLog
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+PetscErrorCode SsrStatsAddNewtonStepTangentAssembly(SsrNewtonStepStats *stats, PetscLogDouble elapsed)
+{
+  PetscFunctionBeginUser;
+  if (stats) stats->tangent_assembly_time += elapsed;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode SsrStatsAddNewtonStepResidualAssembly(SsrNewtonStepStats *stats, PetscLogDouble elapsed)
+{
+  PetscFunctionBeginUser;
+  if (stats) stats->residual_assembly_time += elapsed;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode SsrStatsAddNewtonStepOperatorBuild(SsrNewtonStepStats *stats, PetscLogDouble elapsed)
+{
+  PetscFunctionBeginUser;
+  if (stats) stats->operator_build_time += elapsed;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 PetscErrorCode SsrStatsAddNewtonStepLinearSolve(SsrNewtonStepStats *stats, PetscInt its, PetscLogDouble elapsed)
 {
   PetscFunctionBeginUser;
@@ -213,6 +238,13 @@ PetscErrorCode SsrStatsAddNewtonStepLineSearch(SsrNewtonStepStats *stats, PetscI
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+PetscErrorCode SsrStatsAddNewtonStepLineSearchTime(SsrNewtonStepStats *stats, PetscLogDouble elapsed)
+{
+  PetscFunctionBeginUser;
+  if (stats) stats->line_search_time += elapsed;
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
 PetscErrorCode SsrStatsAcceptContinuationStep(SsrContinuationStats *stats, const SsrNewtonStepStats *step_stats)
 {
   PetscFunctionBeginUser;
@@ -223,6 +255,12 @@ PetscErrorCode SsrStatsAcceptContinuationStep(SsrContinuationStats *stats, const
     stats->total_line_search_its += step_stats->line_search_its;
     stats->final_rel            = step_stats->final_rel;
     stats->final_rel_correction = step_stats->final_rel_correction;
+    stats->assembly_time += step_stats->assembly_time;
+    stats->tangent_assembly_time += step_stats->tangent_assembly_time;
+    stats->residual_assembly_time += step_stats->residual_assembly_time;
+    stats->operator_build_time += step_stats->operator_build_time;
+    stats->linear_solve_time += step_stats->solve_time;
+    stats->line_search_time += step_stats->line_search_time;
   }
   PetscFunctionReturn(PETSC_SUCCESS);
 }

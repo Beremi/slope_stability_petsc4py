@@ -261,6 +261,41 @@ def translate_case_toml(
     return CaseTranslation(True, f"supported_{dimension}d_{method}_{analysis}{suffix}", problem=problem, options=options, config=cfg, mesh_info=mesh_info)
 
 
+def _summary_timing_breakdown(summary: dict[str, object]) -> dict[str, dict[str, float]]:
+    def metric(name: str) -> float:
+        try:
+            return float(summary.get(name, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "assembly": {
+            "tangent_assembly_time": metric("tangent_assembly_time"),
+            "residual_assembly_time": metric("residual_assembly_time"),
+            "operator_build_time": metric("operator_build_time"),
+        },
+        "preconditioning": {
+            "ksp_setup_time": metric("ksp_setup_time"),
+            "pmg_operator_update_time": metric("pmg_operator_update_time"),
+            "deflation_base_pc_apply_time": metric("deflation_base_pc_apply_time")
+            or metric("deflation_pc_apply_time"),
+            "pmg_fine_smooth_time": metric("pmg_fine_smooth_time"),
+            "pmg_p2_smooth_time": metric("pmg_p2_smooth_time"),
+            "pmg_transfer_time": metric("pmg_transfer_time"),
+            "pmg_coarse_solve_time": metric("pmg_coarse_solve_time"),
+            "pmg_residual_time": metric("pmg_residual_time"),
+        },
+        "deflation": {
+            "deflation_orthogonalization_time": metric("deflation_orthogonalization_time"),
+            "deflation_projector_time": metric("deflation_projector_time"),
+            "deflation_coarse_initial_time": metric("deflation_coarse_initial_time"),
+        },
+        "line_search": {
+            "line_search_time": metric("line_search_time"),
+        },
+    }
+
+
 def write_case_outputs(result: EngineRunResult, translation: CaseTranslation, config_path: str | Path) -> None:
     rank = _rank()
     if rank != 0:
@@ -279,6 +314,9 @@ def write_case_outputs(result: EngineRunResult, translation: CaseTranslation, co
     umax = np.asarray([float(row["u_max"]) for row in curve_rows], dtype=np.float64)
     newton = np.asarray([int(row["newton_iterations"]) for row in curve_rows], dtype=np.int64)
     linear = np.asarray([int(row["linear_iterations"]) for row in curve_rows], dtype=np.int64)
+    step_assembly = np.asarray([float(row.get("assembly_time", 0.0) or 0.0) for row in curve_rows], dtype=np.float64)
+    step_solve = np.asarray([float(row.get("solve_time", 0.0) or 0.0) for row in curve_rows], dtype=np.float64)
+    step_line_search = np.asarray([float(row.get("line_search_time", 0.0) or 0.0) for row in curve_rows], dtype=np.float64)
     case_mesh = _load_case_mesh_for_output(translation)
     displacement = _load_case_ordered_displacement(result, translation, case_mesh)
     coupled_fields = _load_coupled_hydro_fields(output_dir)
@@ -297,8 +335,12 @@ def write_case_outputs(result: EngineRunResult, translation: CaseTranslation, co
         stats_step_lambda=lambdas,
         stats_step_newton_iterations=newton,
         stats_step_linear_iterations=linear,
+        stats_step_assembly_time=step_assembly,
+        stats_step_solve_time=step_solve,
+        stats_step_line_search_time=step_line_search,
         **coupled_fields,
     )
+    timing_breakdown = _summary_timing_breakdown(result.summary)
     payload = {
         "run_info": {
             "python_version": "petsc_ssr full-C DMPlex backend",
@@ -317,12 +359,22 @@ def write_case_outputs(result: EngineRunResult, translation: CaseTranslation, co
         "timings": {
             "continuation_total_wall_time": float(result.summary.get("continuation_wall_time", 0.0)),
             "wall_time": float(result.summary.get("wall_time", result.wall_time)),
+            "assembly": timing_breakdown["assembly"],
+            "preconditioning": timing_breakdown["preconditioning"],
+            "deflation": timing_breakdown["deflation"],
             "linear": {
                 "attempt_linear_iterations_total": int(result.summary.get("total_linear_its", 0)),
+                "attempt_linear_solve_time_total": float(result.summary.get("linear_solve_time", 0.0)),
+                "ksp_setup_time": float(result.summary.get("ksp_setup_time", 0.0)),
+                "linear_operator_matvec_time": float(result.summary.get("linear_operator_matvec_time", 0.0)),
+                "krylov_orthogonalization_time": float(result.summary.get("krylov_orthogonalization_time", 0.0)),
+                "krylov_least_squares_time": float(result.summary.get("krylov_least_squares_time", 0.0)),
+                "krylov_solution_update_time": float(result.summary.get("krylov_solution_update_time", 0.0)),
                 "deflation_orthogonalization_time": float(result.summary.get("deflation_orthogonalization_time", 0.0)),
                 "deflation_pc_apply_time": float(result.summary.get("deflation_pc_apply_time", 0.0)),
                 "deflation_projector_time": float(result.summary.get("deflation_projector_time", 0.0)),
             },
+            "line_search": timing_breakdown["line_search"],
         },
         "c_hotpath_summary": result.summary,
         "lambda_last": float(result.summary.get("lambda_last", lambdas[-1] if lambdas.size else 0.0)),
@@ -855,8 +907,12 @@ def _boundary_spec_from_asset(resolved: Any, mesh_info: dict[str, Any]) -> Bound
             )
         raise ValueError(f"unsupported 2D Dirichlet rules for C boundary modes: {rules!r}")
 
-    has_x = "x" in set(rules.get("x_lock", ()))
-    has_z = "z" in set(rules.get("z_lock", ()))
+    has_x = "x" in set(rules.get("x_lock", ())) or (
+        "x" in set(rules.get("x_min", ())) and "x" in set(rules.get("x_max", ()))
+    )
+    has_z = "z" in set(rules.get("z_lock", ())) or (
+        "z" in set(rules.get("z_min", ())) and "z" in set(rules.get("z_max", ()))
+    )
     if base_components == {"y"} and has_x and has_z:
         mode = "rollers"
     elif base_components == {"x", "y", "z"} and has_x and has_z:

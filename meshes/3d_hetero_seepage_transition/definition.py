@@ -29,14 +29,14 @@ ASSET = build_problem_asset_3d(
         "dirichlet": [
             {"target": "x_lock", "components": ["x"]},
             {"target": "z_lock", "components": ["z"]},
-            {"target": "base", "components": ["y"]},
+            {"target": "base", "components": ["x", "y", "z"]},
         ],
         "profiles": {
             "roller_base": {
                 "dirichlet": [
                     {"target": "x_lock", "components": ["x"]},
                     {"target": "z_lock", "components": ["z"]},
-                    {"target": "base", "components": ["y"]},
+                    {"target": "base", "components": ["x", "y", "z"]},
                 ],
             },
             "fixed_base": {

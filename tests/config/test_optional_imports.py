@@ -51,6 +51,7 @@ def test_pyproject_keeps_runtime_dependency_footprint_minimal() -> None:
     assert "h5py>=3.8" not in optional["mesh"]
     assert "scipy>=1.10" in optional["seepage"]
     assert "meshio>=5.3" not in optional["reports"]
+    assert "pyvista[jupyter]>=0.43" in optional["notebooks"]
 
 
 def test_lightweight_cli_and_registry_import_without_optional_extras() -> None:
